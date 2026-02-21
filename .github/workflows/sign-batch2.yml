@@ -3,7 +3,7 @@ name: 账户组2
 on:
   workflow_dispatch:
   schedule:
-    - cron: '30 08 * * *'  # 北京时间 16:30 (UTC 08:30)
+    - cron: '00 02 * * *'  # 北京时间 10:00 (UTC 02:00)
 
 env:
   TZ: Asia/Shanghai
