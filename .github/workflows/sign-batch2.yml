@@ -1,0 +1,203 @@
+name: 账户组2
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 08 * * *'  # 北京时间 16:30 (UTC 08:30)
+
+env:
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - id: matrix
+        shell: bash
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH2 }}
+        run: |
+          python - <<'PY'
+          import os, json
+          lines = [l.strip() for l in os.environ['ACCOUNTS'].splitlines() if l.strip()]
+          count = len(lines)
+          if count == 0:
+              raise SystemExit("ACCOUNTS_BATCH2 为空")
+          matrix = {"account_index": list(range(1, count + 1))}
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f"matrix={json.dumps(matrix)}\n")
+              f.write(f"count={count}\n")
+          PY
+
+  run:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      BASE_URL: ${{ secrets.BASE_URL }}
+      PASSPORT_URL: ${{ secrets.PASSPORT_URL }}
+      REFERER: ${{ secrets.REFERER }}
+      SLIDER_ID: ${{ secrets.SLIDER_ID }}
+      WRAPPER_ID: ${{ secrets.WRAPPER_ID }}
+      HEADER_CLIENT_TYPE: ${{ secrets.HEADER_CLIENT_TYPE }}
+      HEADER_ACCESS_TOKEN: ${{ secrets.HEADER_ACCESS_TOKEN }}
+      HEADER_ACCESS_TOKEN_FALLBACKS: ${{ secrets.HEADER_ACCESS_TOKEN_FALLBACKS }}
+      HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
+      TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
+      TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
+      API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
+      ACCOUNT_INDEX: ${{ matrix.account_index }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH2 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r h3/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Select account
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          lines = [l.strip() for l in os.environ['ACCOUNTS'].splitlines() if l.strip()]
+          idx = int(os.environ['ACCOUNT_INDEX'])
+          if idx < 1 or idx > len(lines):
+              raise SystemExit(f"Index {idx} out of range 1..{len(lines)}")
+          username, password = lines[idx - 1].split(',', 1)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as f:
+              f.write(f"ACCOUNT_USERNAME={username}\n")
+              f.write(f"ACCOUNT_PASSWORD={password}\n")
+          PY
+
+      - name: Sign in
+        env:
+          NOTIFY_ON: never
+          RESULT_JSON_PATH: result.json
+        run: |
+          python h3/script.py "$ACCOUNT_USERNAME" "$ACCOUNT_PASSWORD" "true"
+
+      - name: Ensure result file
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, json
+          from datetime import datetime
+
+          path = "result.json"
+          if os.path.exists(path):
+              raise SystemExit(0)
+
+          idx = int(os.getenv("ACCOUNT_INDEX","0") or 0)
+          payload = {
+              "generated_at": datetime.now().isoformat(),
+              "batch_name": os.getenv("BATCH_NAME","") or "",
+              "total_accounts": 1,
+              "results": [{
+                  "account_index": idx,
+                  "sign_success": False,
+                  "sign_status": "未生成结果文件",
+                  "points_reward": 0,
+                  "has_reward": False,
+                  "password_error": False,
+                  "retry_count": 0,
+                  "is_final_retry": False
+              }]
+          }
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(payload, f, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.account_index }}
+          path: result.json
+          if-no-files-found: ignore
+          retention-days: 1
+
+  summary:
+    needs: [prepare, run]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install notify deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+
+      - name: Summarize and notify
+        env:
+          GROUP_NAME: 账户组2
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.count }}
+          TOTAL_ACCOUNTS: ${{ needs.prepare.outputs.count }}
+          NOTIFY_CHANNELS: telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_SSL }}
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH2 }}
+        run: |
+          python h3/aggregate.py results
+
+      - name: Delete artifacts
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const run_id = context.runId;
+            let page = 1;
+            while (true) {
+              const { data } = await github.rest.actions.listWorkflowRunArtifacts({
+                owner, repo, run_id, per_page: 100, page
+              });
+              for (const artifact of data.artifacts) {
+                await github.rest.actions.deleteArtifact({
+                  owner, repo, artifact_id: artifact.id
+                });
+              }
+              if (data.artifacts.length < 100) break;
+              page += 1;
+            }
