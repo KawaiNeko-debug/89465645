@@ -6,14 +6,12 @@ import json
 import requests
 import smtplib
 import threading
+import re
 from email.message import EmailMessage
 from datetime import datetime
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
-#from dotenv import load_dotenv
 from fake_useragent import UserAgent
-
-#load_dotenv()
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -22,8 +20,6 @@ try:
 except Exception:
     pass
 
-
-
 # ==============================================================================
 # 从环境变量读取所有配置（必须设置）
 # ==============================================================================
@@ -31,6 +27,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
+
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
     for k in os.getenv('HEADER_ACCESS_TOKEN_FALLBACKS', '').split(',')
@@ -53,6 +50,10 @@ PASSWORD_ERROR_HINTS = ["账号或密码不正确", "请重新输入", "密码�
 # 首页元素（用于判断是否进入首页）
 HOME_SELECTOR = 'div.uni-tabbar__label:has-text("首页")'
 
+# 签到相关接口
+SIGN_CONFIG_PATH = "/api/activity/sign/getCurrentUserSignInConfig"
+RECEIVE_VOUCHER_PATH = "/api/activity/sign/receiveVoucher"
+
 # 检查必要变量
 required_vars = [
     BASE_URL, PASSPORT_URL, REFERER,
@@ -67,6 +68,41 @@ if not all(required_vars):
 parsed_base = urlparse(BASE_URL)
 HOST = parsed_base.netloc
 URL_PATTERN = f"**/{HOST}/**"
+
+# ==============================================================================
+# 小工具函数
+# ==============================================================================
+_UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
+
+def truthy(v) -> bool:
+    if v is True:
+        return True
+    if v is False or v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return v != 0
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+def safe_int(v, default=0) -> int:
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return default
+
+def truncate_text(s: str, limit: int = 1200) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"...(truncated, len={len(s)})"
+
+def redact_sensitive(s: str) -> str:
+    # 避免在 public Actions log 里泄露 UUID/token（适度脱敏，不影响看错误页面主体）
+    if not s:
+        return ""
+    return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
 
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
@@ -168,7 +204,7 @@ def masked_label(result):
 
 def with_retry(func, max_retries=5, delay=1):
     def wrapper(*args, **kwargs):
-        for attempt in range(max_retries):
+        for _ in range(max_retries):
             try:
                 result = func(*args, **kwargs)
                 if result is not None:
@@ -178,8 +214,6 @@ def with_retry(func, max_retries=5, delay=1):
                 time.sleep(delay + random.uniform(0, 1))
         return None
     return wrapper
-
-
 
 def wait_token_from_requests(token_holder, timeout=8):
     start = time.time()
@@ -194,25 +228,19 @@ def wait_token_from_requests(token_holder, timeout=8):
 # 滑块破解脚本（注入式，ID 从环境变量读取）
 # ==============================================================================
 def solve_slider_with_bezier(page: Page) -> bool:
-    """
-    执行滑块破解，返回 True 表示滑块已消失（无需处理或破解成功），False 表示破解失败。
-    """
     try:
         page.locator(f"#{SLIDER_ID}").wait_for(state="visible", timeout=10000)
         log("✅ 检测到滑块，准备注入破解脚本...")
     except Exception:
         log("🟢 未检测到滑块，跳过。")
-        return True  # 没有滑块，视为成功
+        return True
 
     script = f"""
     (async function() {{
-        console.log("🚀 开始启动滑块破解脚本...");
         const slider = document.getElementById('{SLIDER_ID}');
         const wrapper = document.getElementById('{WRAPPER_ID}');
-        if (!slider || !wrapper) {{
-            console.error("❌ 未找到滑块元素");
-            return false;
-        }}
+        if (!slider || !wrapper) return false;
+
         wrapper.scrollIntoView({{behavior: 'instant', block: 'center'}});
         await new Promise(r => setTimeout(r, 300));
 
@@ -297,7 +325,6 @@ def solve_slider_with_bezier(page: Page) -> bool:
         log(f"❌ 滑块脚本异常: {e}")
         return False
 
-    # 检测滑块是否消失
     time.sleep(5)
     if page.locator(f"#{SLIDER_ID}").is_visible(timeout=2000):
         log("⚠️ 滑块仍然存在（5s检测）")
@@ -305,12 +332,11 @@ def solve_slider_with_bezier(page: Page) -> bool:
         if page.locator(f"#{SLIDER_ID}").is_visible(timeout=2000):
             log("❌ 滑块10秒后仍存在，进入重试阶段")
             return False
-        else:
-            log("✅ 10秒后滑块已消失，破解成功")
-            return True
-    else:
-        log("✅ 滑块已消失，破解成功")
+        log("✅ 10秒后滑块已消失，破解成功")
         return True
+
+    log("✅ 滑块已消失，破解成功")
+    return True
 
 # ==============================================================================
 # 提取 localStorage 中的 AccessToken（键名从环境变量读取）
@@ -332,7 +358,7 @@ def extract_token_from_local_storage(page: Page):
     return None
 
 # ==============================================================================
-# API 客户端（通用名称，无任何硬编码标识）
+# API 客户端
 # ==============================================================================
 class ApiClient:
     def __init__(self, access_token, secretkey, account_index, page: Page, user_agent=None):
@@ -347,96 +373,205 @@ class ApiClient:
         }
         if secretkey:
             self.headers[HEADER_SECRET_KEY] = secretkey
+
         self.account_index = account_index
         self.page = page
+
         self.initial_points = 0
         self.final_points = 0
         self.points_reward = 0
+
         self.sign_status = "未知"
         self.has_reward = False
 
-    def send_request(self, url, method='GET'):
+        self._last_sign_day = 0  # 由配置接口解析出的“今天第几天”
+
+    def _refresh_token(self) -> bool:
         try:
-            if method.upper() == 'GET':
-                resp = requests.get(url, headers=self.headers, timeout=10)
-            else:
-                resp = requests.post(url, headers=self.headers, timeout=10)
-            if resp.status_code == 200:
-                return resp.json()
-            log(f"账号{self.account_index} - API请求失败 {resp.status_code}")
+            self.page.goto(BASE_URL, wait_until="networkidle")
+            self.page.reload(wait_until="networkidle")
+            new_token = extract_token_from_local_storage(self.page)
+            if new_token:
+                self.headers[HEADER_ACCESS_TOKEN] = new_token
+                log(f"账号{self.account_index} - 🔄 token 已刷新")
+                return True
         except Exception as e:
-            log(f"账号{self.account_index} - API异常: {e}")
-        return None
+            log(f"账号{self.account_index} - 🔄 token 刷新失败: {e}")
+        return False
+
+    def request_json(self, url, method='GET', dump_body_on_error=False, tag="API"):
+        method = method.upper().strip()
+        try:
+            resp = requests.request(method, url, headers=self.headers, timeout=12)
+
+            if resp.status_code != 200:
+                allow = resp.headers.get("Allow") or resp.headers.get("allow") or ""
+                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} ({method} {url})"
+                if allow:
+                    msg += f" Allow={allow}"
+                log(msg)
+
+                if dump_body_on_error:
+                    body = redact_sensitive(truncate_text(resp.text, 2000))
+                    log(f"账号{self.account_index} - {tag}响应内容: {body}")
+                return None
+
+            try:
+                return resp.json()
+            except Exception:
+                # 200 但不是 json（或被网关返回奇怪内容）
+                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 {method} {url})")
+                if dump_body_on_error:
+                    body = redact_sensitive(truncate_text(resp.text, 2000))
+                    log(f"账号{self.account_index} - {tag}响应内容: {body}")
+                return None
+
+        except Exception as e:
+            log(f"账号{self.account_index} - {tag}异常: {e}")
+            return None
 
     @with_retry
     def get_points(self):
-        data = self.send_request(f"{self.base_url}/api/activity/front/getCustomerIntegral")
+        data = self.request_json(f"{self.base_url}/api/activity/front/getCustomerIntegral", tag="积分", dump_body_on_error=False)
         if data and data.get('success'):
             return data.get('data', {}).get('integralVoucher', 0)
-        self.page.goto(BASE_URL, wait_until="networkidle")
-        self.page.reload(wait_until="networkidle")
-        new_token = extract_token_from_local_storage(self.page)
-        if new_token:
-            self.headers[HEADER_ACCESS_TOKEN] = new_token
+
+        # token 可能失效，尝试刷新后再返回 None（由 with_retry 重试）
+        self._refresh_token()
         return None
 
-    def check_sign_status(self):
-        data = self.send_request(f"{self.base_url}/api/activity/sign/getCurrentUserSignInConfig")
-        if data and data.get('success'):
-            if data.get('data', {}).get('haveSignIn', False):
-                self.sign_status = "已签到过"
-                return True
-            self.sign_status = "未签到"
-            return False
-        self.sign_status = "检查失败"
-        return None
+    def _parse_today_day(self, data: dict) -> int:
+        """
+        尽量兼容不同字段名/结构：
+        - 直接字段：todayDay / signInDay / currentDay / dayNum ...
+        - 列表：signInConfigList / signInConfigs ... 找 isToday/isCurrent/today/current
+        - 连续签到：continueSignInDay / signInCount ... 推算今天
+        """
+        if not isinstance(data, dict):
+            return 0
+        d = data.get("data") or {}
+        if not isinstance(d, dict):
+            return 0
 
-    def sign_in(self):
-        log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
-        url = f"{self.base_url}{API_SIGN_PATH}"
-        data = self.send_request(url, method='GET')
-        if data and data.get('success'):
-            gain = data.get('data', {}).get('gainNum')
-            if gain:
-                log(f"账号{self.account_index} - ✅ 签到成功")
-                self.sign_status = "签到成功"
-                return True
-            else:
-                log(f"账号{self.account_index} - 有奖励需领取")
-                self.has_reward = True
-                if self.receive_voucher():
-                    self.sign_status = "领取奖励成功"
-                    return True
-                self.sign_status = "领取奖励失败"
-                return False
-        else:
-            log(f"账号{self.account_index} - GET 失败，尝试 POST...")
-            data = self.send_request(url, method='POST')
-            if data and data.get('success'):
-                gain = data.get('data', {}).get('gainNum')
-                if gain:
-                    log(f"账号{self.account_index} - ✅ 签到成功")
-                    self.sign_status = "签到成功"
-                    return True
-                else:
-                    self.has_reward = True
-                    if self.receive_voucher():
-                        self.sign_status = "领取奖励成功"
-                        return True
-                    self.sign_status = "领取奖励失败"
-                    return False
-            else:
-                msg = data.get('message', '未知错误') if data else '请求失败'
-                log(f"账号{self.account_index} - ❌ 签到失败: {msg}")
-                self.sign_status = "签到失败"
-                return False
+        # 1) 直接字段
+        direct_keys = [
+            "todayDay", "todaySignInDay", "signInDay", "currentDay",
+            "currentSignInDay", "day", "dayNum", "signDay", "currentSignDay"
+        ]
+        for k in direct_keys:
+            if k in d and d.get(k) is not None:
+                day = safe_int(d.get(k), 0)
+                if day > 0:
+                    return day
+
+        # 2) 列表结构
+        list_keys = [
+            "signInConfigList", "signInConfigs", "configList", "configs",
+            "signInList", "signInDetailList", "signInConfigDtoList"
+        ]
+        for lk in list_keys:
+            lst = d.get(lk)
+            if not isinstance(lst, list):
+                continue
+
+            # 2.1 找到“今天/当前”那条
+            for item in lst:
+                if not isinstance(item, dict):
+                    continue
+                if truthy(item.get("today")) or truthy(item.get("isToday")) or truthy(item.get("current")) or truthy(item.get("isCurrent")):
+                    for dk in ("day", "dayNum", "signInDay", "index", "sort", "seq"):
+                        day = safe_int(item.get(dk), 0)
+                        if day > 0:
+                            return day
+
+            # 2.2 兜底：按“已签到条目数”推算
+            signed_cnt = 0
+            for item in lst:
+                if not isinstance(item, dict):
+                    continue
+                if truthy(item.get("haveSignIn")) or truthy(item.get("signed")) or truthy(item.get("isSignIn")) or truthy(item.get("haveReceive")):
+                    signed_cnt += 1
+            if signed_cnt > 0:
+                have_signed_today = truthy(d.get("haveSignIn")) or truthy(d.get("haveSign"))
+                return min(7, signed_cnt if have_signed_today else signed_cnt + 1)
+
+        # 3) 连续签到字段推算
+        for k in ("continueSignInDay", "continueSignDay", "continuousDay", "continueDay", "seriesDay", "signedDays", "signInCount"):
+            if k in d and d.get(k) is not None:
+                cnt = safe_int(d.get(k), 0)
+                if cnt > 0:
+                    have_signed_today = truthy(d.get("haveSignIn")) or truthy(d.get("haveSign"))
+                    return min(7, cnt if have_signed_today else cnt + 1)
+
+        return 0
+
+    def get_sign_config(self):
+        """
+        返回 (have_signed_today: bool, today_day: int, raw_data: dict) 或 None
+        """
+        url = f"{self.base_url}{SIGN_CONFIG_PATH}"
+        data = self.request_json(url, method="GET", tag="签到配置", dump_body_on_error=True)
+        if not (data and data.get("success")):
+            # 尝试刷新 token 再来一次
+            self._refresh_token()
+            data = self.request_json(url, method="GET", tag="签到配置", dump_body_on_error=True)
+
+        if not (data and data.get("success")):
+            return None
+
+        raw = data.get("data") or {}
+        have_signed = False
+        if isinstance(raw, dict):
+            have_signed = truthy(raw.get("haveSignIn")) or truthy(raw.get("haveSign"))
+
+        today_day = self._parse_today_day(data)
+        self._last_sign_day = today_day
+
+        if today_day > 0:
+            log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}")
+
+        return have_signed, today_day, data
 
     def receive_voucher(self):
-        data = self.send_request(f"{self.base_url}/api/activity/sign/receiveVoucher", method='POST')
-        if data and data.get('success'):
-            log(f"账号{self.account_index} - ✅ 奖励领取成功")
-            return True
+        """
+        领取额外奖励：
+        成功时 data 通常是豆子数量（例如 8）
+        返回 (ok: bool, beans: int)
+        """
+        url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
+        data = self.request_json(url, method="POST", tag="领取奖励", dump_body_on_error=True)
+        if data and data.get("success"):
+            beans = safe_int(data.get("data"), 0)
+            log(f"账号{self.account_index} - ✅ 奖励领取成功（+{beans} 豆子）")
+            return True, beans
+
         log(f"账号{self.account_index} - ❌ 奖励领取失败")
+        return False, 0
+
+    def sign_in(self):
+        """
+        正常签到：优先 GET，失败再 POST。
+        ✅ 关键改造：当返回非 200（例如 405）时，打印服务器响应内容到 log。
+        """
+        url = f"{self.base_url}{API_SIGN_PATH}"
+
+        log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
+        data = self.request_json(url, method='GET', tag="签到", dump_body_on_error=True)
+        if data and data.get('success'):
+            log(f"账号{self.account_index} - ✅ 签到成功")
+            self.sign_status = "签到成功"
+            return True
+
+        log(f"账号{self.account_index} - GET 失败，尝试 POST...")
+        data = self.request_json(url, method='POST', tag="签到", dump_body_on_error=True)
+        if data and data.get('success'):
+            log(f"账号{self.account_index} - ✅ 签到成功")
+            self.sign_status = "签到成功"
+            return True
+
+        msg = data.get('message', '未知错误') if isinstance(data, dict) else '请求失败'
+        log(f"账号{self.account_index} - ❌ 签到失败: {msg}")
+        self.sign_status = "签到失败"
         return False
 
     def execute_full_process(self):
@@ -444,11 +579,39 @@ class ApiClient:
         self.initial_points = self.get_points() or 0
         time.sleep(random.uniform(1, 2))
 
-        signed = self.check_sign_status()
-        if signed is None:
+        cfg = self.get_sign_config()
+        if cfg is None:
+            self.sign_status = "检查失败"
             return False
 
-        if not signed:
+        have_signed, today_day, _raw = cfg
+
+        # ✅ 第 7 天：直接尝试领取额外奖励；领取成功就算已签到，不走正常签到
+        if today_day == 7:
+            log(f"账号{self.account_index} - 🎁 检测到今天为第 7 天，直接领取额外奖励（不走正常签到）")
+            ok, _beans = self.receive_voucher()
+            if ok:
+                self.has_reward = True
+                self.sign_status = "领取奖励成功"  # 保持与汇总统计一致
+                time.sleep(random.uniform(1, 2))
+                self.final_points = self.get_points() or self.initial_points
+                self.points_reward = self.final_points - self.initial_points
+                return True
+
+            # 领取失败就兜底：如果实际上已经签过，就当成功；否则走正常签到
+            if have_signed:
+                self.sign_status = "已签到过"
+                time.sleep(random.uniform(1, 2))
+                self.final_points = self.get_points() or self.initial_points
+                self.points_reward = self.final_points - self.initial_points
+                return True
+
+            log(f"账号{self.account_index} - ⚠️ 第 7 天领取奖励失败，兜底走正常签到流程")
+
+        # 非第 7 天正常流程
+        if have_signed:
+            self.sign_status = "已签到过"
+        else:
             time.sleep(random.uniform(2, 3))
             if not self.sign_in():
                 return False
@@ -490,7 +653,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         page = None
         try:
             browser = p.chromium.launch(
-                headless=True,  # 在 GitHub Actions 中建议改为 True
+                headless=True,
                 args=[
                     '--disable-blink-features=AutomationControlled',
                     '--disable-features=IsolateOrigins,site-per-process',
@@ -518,7 +681,6 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             secretkey_holder = {'value': None}
             token_holder = {'value': None}
 
-            # 定义路由处理函数，用于提取 secretkey 和 access_token
             def handle_route(route):
                 headers = {k.lower(): v for k, v in route.request.headers.items()}
                 key = headers.get(HEADER_SECRET_KEY.lower())
@@ -593,7 +755,6 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                 page.locator('form button[type="submit"]').click()
 
             # ===== 执行滑块破解 =====
-            # ===== 执行滑块破解 =====
             slider_ok = solve_slider_with_bezier(page)
             if not slider_ok:
                 result['sign_status'] = '滑块未通过'
@@ -604,14 +765,12 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             home_found = False
 
             while time.time() - monitor_start < 7:
-                # 检查密码错误
                 if page.locator("text=/账号或密码不正确|用户名或密码错误|密码错误|登录失败/").is_visible(timeout=500):
                     log(f"账号{account_index} - ❌ 密码错误（滑块后检测）")
                     result['password_error'] = True
                     result['sign_status'] = '密码错误'
                     return result
 
-                # 尝试等待首页一小段时间
                 try:
                     page.wait_for_selector(HOME_SELECTOR, timeout=500)
                     home_found = True
@@ -620,9 +779,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     continue
 
             if not home_found:
-                # 7秒监控期内未出现错误也未出现首页，继续等待首页直到30秒总超时
                 try:
-                    page.wait_for_selector(HOME_SELECTOR, timeout=30000 - 7000)  # 剩余时间约23秒
+                    page.wait_for_selector(HOME_SELECTOR, timeout=30000 - 7000)
                     home_found = True
                     log(f"账号{account_index} - ✅ 已进入首页")
                 except PlaywrightTimeoutError:
@@ -632,9 +790,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             else:
                 log(f"账号{account_index} - ✅ 已进入首页")
 
-            # 提取 token 和 secretkey（后续代码不变）
+            # 提取 token
             access_token = extract_token_from_local_storage(page)
-
             if not access_token:
                 access_token = wait_token_from_requests(token_holder, timeout=8)
 
@@ -670,7 +827,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             try:
                 if page and page.locator("text=/密码错误/").is_visible():
                     result['password_error'] = True
-            except:
+            except Exception:
                 pass
         finally:
             if context:
@@ -685,10 +842,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
 # 重试逻辑与结果合并
 # ==============================================================================
 def should_retry(res):
-    # 密码错误绝不重试
     if res.get('password_error'):
         return False
-    # Token失败/未进入首页/滑块失败 才重试
     return not res['sign_success']
 
 def process_single_account(username, password, account_index, total_accounts):
@@ -727,9 +882,8 @@ def process_single_account(username, password, account_index, total_accounts):
 
         if not should_retry(merged) or attempt >= max_retries:
             break
-        else:
-            log(f"账号{account_index} - 🔄 准备第 {attempt+1} 次重试...")
-            time.sleep(random.uniform(3, 7))
+        log(f"账号{account_index} - 🔄 准备第 {attempt+1} 次重试...")
+        time.sleep(random.uniform(3, 7))
     return merged
 
 def final_retry(all_results, usernames, passwords, total_accounts):
@@ -1076,9 +1230,9 @@ def main():
     if enable_failure_exit and failed_exists:
         log("❌ 存在失败账号，退出码设为1")
         sys.exit(1)
-    else:
-        log("✅ 程序正常结束")
-        sys.exit(0)
+
+    log("✅ 程序正常结束")
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
