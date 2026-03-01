@@ -99,10 +99,27 @@ def truncate_text(s: str, limit: int = 1200) -> str:
     return s[:limit] + f"...(truncated, len={len(s)})"
 
 def redact_sensitive(s: str) -> str:
-    # 避免在 public Actions log 里泄露 UUID/token（适度脱敏，不影响看错误页面主体）
     if not s:
         return ""
     return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
+
+def is_unclaimed_reward_error(data: dict) -> bool:
+    """
+    判断是否是：存在签到未领取，请先领取!
+    """
+    if not isinstance(data, dict):
+        return False
+    msg = str(data.get("message") or "")
+    return ("存在签到未领取" in msg and "请先领取" in msg) or ("未领取" in msg and "先领取" in msg)
+
+def is_duplicate_claim_error(data: dict) -> bool:
+    """
+    判断是否是：重复领取金豆
+    """
+    if not isinstance(data, dict):
+        return False
+    msg = str(data.get("message") or "")
+    return "重复领取金豆" in msg
 
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
@@ -358,7 +375,7 @@ def extract_token_from_local_storage(page: Page):
     return None
 
 # ==============================================================================
-# API 客户端（只用 GET；失败重试一次 GET；不再 POST 触发 405）
+# API 客户端（只用 GET；失败重试一次 GET；领取成功就不再签到）
 # ==============================================================================
 class ApiClient:
     def __init__(self, access_token, secretkey, account_index, page: Page, user_agent=None):
@@ -384,8 +401,6 @@ class ApiClient:
         self.sign_status = "未知"
         self.has_reward = False
 
-        self._last_sign_day = 0
-
     def _refresh_token(self) -> bool:
         try:
             self.page.goto(BASE_URL, wait_until="networkidle")
@@ -400,11 +415,6 @@ class ApiClient:
         return False
 
     def _get_json_once(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
-        """
-        单次 GET 请求：
-        - 非200：输出状态码+响应体
-        - 200但success=false：输出json（方便定位服务端原因）
-        """
         try:
             resp = requests.get(url, headers=self.headers, timeout=12)
 
@@ -437,27 +447,19 @@ class ApiClient:
             log(f"账号{self.account_index} - {tag}异常: {e}")
             return None
 
-    def get_json_with_one_retry(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
-        """
-        只用 GET；失败后再重试一次 GET。
-        失败包含：非200、JSON解析失败、success=false
-        """
+    def get_json_retry1(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
         data = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
-        if data and isinstance(data, dict) and data.get("success") is True:
+        if isinstance(data, dict) and data.get("success") is True:
             return data
 
-        # 重试一次（短暂停顿）
         time.sleep(random.uniform(0.6, 1.2))
         log(f"账号{self.account_index} - 🔁 {tag}GET失败，重试一次GET...")
         data2 = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
-        if data2 and isinstance(data2, dict) and data2.get("success") is True:
-            return data2
-
-        return None
+        return data2 if data2 is not None else data
 
     @with_retry
     def get_points(self):
-        data = self.get_json_with_one_retry(
+        data = self.get_json_retry1(
             f"{self.base_url}/api/activity/front/getCustomerIntegral",
             tag="金豆",
             dump_body_on_error=True,
@@ -469,117 +471,83 @@ class ApiClient:
         self._refresh_token()
         return None
 
-    def _parse_today_day(self, data: dict) -> int:
-        if not isinstance(data, dict):
-            return 0
-        d = data.get("data") or {}
-        if not isinstance(d, dict):
-            return 0
-
-        direct_keys = [
-            "todayDay", "todaySignInDay", "signInDay", "currentDay",
-            "currentSignInDay", "day", "dayNum", "signDay", "currentSignDay"
-        ]
-        for k in direct_keys:
-            if k in d and d.get(k) is not None:
-                day = safe_int(d.get(k), 0)
-                if day > 0:
-                    return day
-
-        list_keys = [
-            "signInConfigList", "signInConfigs", "configList", "configs",
-            "signInList", "signInDetailList", "signInConfigDtoList"
-        ]
-        for lk in list_keys:
-            lst = d.get(lk)
-            if not isinstance(lst, list):
-                continue
-
-            for item in lst:
-                if not isinstance(item, dict):
-                    continue
-                if truthy(item.get("today")) or truthy(item.get("isToday")) or truthy(item.get("current")) or truthy(item.get("isCurrent")):
-                    for dk in ("day", "dayNum", "signInDay", "index", "sort", "seq"):
-                        day = safe_int(item.get(dk), 0)
-                        if day > 0:
-                            return day
-
-            signed_cnt = 0
-            for item in lst:
-                if not isinstance(item, dict):
-                    continue
-                if truthy(item.get("haveSignIn")) or truthy(item.get("signed")) or truthy(item.get("isSignIn")) or truthy(item.get("haveReceive")):
-                    signed_cnt += 1
-            if signed_cnt > 0:
-                have_signed_today = truthy(d.get("haveSignIn")) or truthy(d.get("haveSign"))
-                return min(7, signed_cnt if have_signed_today else signed_cnt + 1)
-
-        for k in ("continueSignInDay", "continueSignDay", "continuousDay", "continueDay", "seriesDay", "signedDays", "signInCount"):
-            if k in d and d.get(k) is not None:
-                cnt = safe_int(d.get(k), 0)
-                if cnt > 0:
-                    have_signed_today = truthy(d.get("haveSignIn")) or truthy(d.get("haveSign"))
-                    return min(7, cnt if have_signed_today else cnt + 1)
-
-        return 0
-
     def get_sign_config(self):
-        """
-        返回 (have_signed_today, today_day, have_receive, raw_data) 或 None
-        """
         url = f"{self.base_url}{SIGN_CONFIG_PATH}"
-        data = self.get_json_with_one_retry(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
+        data = self.get_json_retry1(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
         if not (data and data.get("success")):
             self._refresh_token()
-            data = self.get_json_with_one_retry(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
+            data = self.get_json_retry1(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
 
         if not (data and data.get("success")):
             return None
 
         raw = data.get("data") or {}
-        have_signed = False
-        have_receive = False
-        if isinstance(raw, dict):
-            have_signed = truthy(raw.get("haveSignIn")) or truthy(raw.get("haveSign"))
-            have_receive = truthy(raw.get("haveReceive"))
-
-        today_day = safe_int(raw.get("day"), 0) or self._parse_today_day(data)
-        self._last_sign_day = today_day
+        have_signed = truthy(raw.get("haveSignIn")) or truthy(raw.get("haveSign"))
+        have_receive = truthy(raw.get("haveReceive"))
+        today_day = safe_int(raw.get("day"), 0)
 
         log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
         return have_signed, today_day, have_receive, data
 
     def receive_voucher(self):
         """
-        领取额外奖励（只用GET；失败重试一次GET）
-        成功时 data 通常是“金豆数量”
-        返回 (ok, jindou)
+        领取奖励（只GET；失败重试一次GET）
+        返回 (ok, jindou, data)
         """
         url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
-        data = self.get_json_with_one_retry(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
+        data = self.get_json_retry1(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
+
         if data and data.get("success"):
             jindou = safe_int(data.get("data"), 0)
             log(f"账号{self.account_index} - ✅ 奖励领取成功（+{jindou} 金豆）")
-            return True, jindou
+            return True, jindou, data
 
         log(f"账号{self.account_index} - ❌ 奖励领取失败")
-        return False, 0
+        return False, 0, data
+
+    def sign_in_simple(self):
+        """
+        纯签到（只GET，失败重试一次GET），不做“未领取奖励”的自动领取。
+        用于第7天“重复领取金豆”兜底补签。
+        """
+        url = f"{self.base_url}{API_SIGN_PATH}"
+        log(f"账号{self.account_index} - 🧾 第7天兜底：执行一次签到（只GET，失败重试一次）...")
+        data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
+        if data and data.get("success"):
+            self.sign_status = "签到成功"
+            log(f"账号{self.account_index} - ✅ 签到成功")
+            return True
+        self.sign_status = "签到失败"
+        log(f"账号{self.account_index} - ❌ 签到失败")
+        return False
 
     def sign_in(self):
         """
-        签到（只用GET；失败重试一次GET）
+        只GET签到：失败会重试一次GET
+        若返回“存在签到未领取，请先领取!”：改为领取奖励；领取成功就直接成功（不再签到）
         """
         url = f"{self.base_url}{API_SIGN_PATH}"
-
         log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
-        data = self.get_json_with_one_retry(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-        if data and data.get('success'):
-            log(f"账号{self.account_index} - ✅ 签到成功")
+
+        data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
+
+        if data and data.get("success"):
             self.sign_status = "签到成功"
+            log(f"账号{self.account_index} - ✅ 签到成功")
             return True
 
-        log(f"账号{self.account_index} - ❌ 签到失败")
+        if isinstance(data, dict) and is_unclaimed_reward_error(data):
+            log(f"账号{self.account_index} - 🎁 检测到“存在签到未领取”，开始领取奖励（领取成功就算完成，不再签到）...")
+            ok, _jindou, _raw = self.receive_voucher()
+            if ok:
+                self.has_reward = True
+                self.sign_status = "领取奖励成功"
+                return True
+            self.sign_status = "领取奖励失败"
+            return False
+
         self.sign_status = "签到失败"
+        log(f"账号{self.account_index} - ❌ 签到失败")
         return False
 
     def execute_full_process(self):
@@ -594,28 +562,38 @@ class ApiClient:
 
         have_signed, today_day, have_receive, _raw = cfg
 
-        # 第7天：奖励未领 -> 必须领取成功才算成功；领取失败算失败（不会再“假成功”）
+        # 互斥规则：如果已领取奖励，就直接成功，不再签到
+        if have_receive:
+            self.has_reward = True
+            self.sign_status = "奖励已领取"
+            time.sleep(random.uniform(1, 2))
+            self.final_points = self.get_points() or self.initial_points
+            self.points_reward = self.final_points - self.initial_points
+            return True
+
+        # 第7天：优先领取奖励；成功即完成；失败则看是否“重复领取金豆”-> 额外签到一次
         if today_day == 7:
-            if have_receive:
+            log(f"账号{self.account_index} - 🎁 今天第7天且奖励未领取，开始领取奖励（领取成功就算完成，不再签到）")
+            ok, _jindou, raw = self.receive_voucher()
+            if ok:
                 self.has_reward = True
-                self.sign_status = "奖励已领取"
-                log(f"账号{self.account_index} - 🎁 第7天奖励已领取，无需操作")
+                self.sign_status = "领取奖励成功"
             else:
-                log(f"账号{self.account_index} - 🎁 检测到今天为第 7 天且奖励未领取，开始领取奖励（只GET，失败重试一次）")
-                ok, _jindou = self.receive_voucher()
-                if ok:
-                    self.has_reward = True
-                    self.sign_status = "领取奖励成功"
+                # 你要求的特殊兜底
+                if isinstance(raw, dict) and is_duplicate_claim_error(raw):
+                    log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
+                    if not self.sign_in_simple():
+                        return False
                 else:
                     self.sign_status = "领取奖励失败"
-                    return False  # ✅ 这里严格失败
+                    return False
 
             time.sleep(random.uniform(1, 2))
             self.final_points = self.get_points() or self.initial_points
             self.points_reward = self.final_points - self.initial_points
             return True
 
-        # 非第7天：正常签到
+        # 非第7天：如果已经签到，也直接成功
         if have_signed:
             self.sign_status = "已签到过"
         else:
@@ -703,7 +681,6 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     token_holder['value'] = token
                 route.continue_()
 
-            # 只要能拿到 secretkey/token 就行（保持你原来的拦截）
             context.route(f"**{LOGIN_API_PATH}*", handle_route)
 
             # ---------- 登录流程 ----------
@@ -814,7 +791,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             result['secretkey_extracted'] = bool(secretkey)
 
             if access_token:
-                log(f"账号{account_index} - 使用 token 进行签到（只GET，失败重试一次GET）")
+                log(f"账号{account_index} - 使用 token 进行签到（只GET；领取成功就不再签到）")
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
                 success = client.execute_full_process()
                 result.update({
@@ -979,9 +956,6 @@ def summarize_results(all_results):
         "other_failed": other_failed,
     }
 
-# ==============================================================================
-# 总结与推送
-# ==============================================================================
 def print_summary(all_results, total_accounts):
     global in_summary
     in_summary = True
@@ -1187,8 +1161,6 @@ def push_summary(all_results, total_accounts):
 def main():
     if len(sys.argv) < 3:
         print("用法: python script.py \"账号1,账号2\" \"密码1,密码2\" [失败退出标志]")
-        print("示例: python script.py 13800138000 mypassword false")
-        print("      python script.py \"user1,user2\" \"pass1,pass2\" true")
         sys.exit(1)
 
     usernames = [u.strip() for u in sys.argv[1].split(',') if u.strip()]
