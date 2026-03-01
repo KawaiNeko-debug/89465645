@@ -358,7 +358,7 @@ def extract_token_from_local_storage(page: Page):
     return None
 
 # ==============================================================================
-# API 客户端
+# API 客户端（只用 GET；失败重试一次 GET；不再 POST 触发 405）
 # ==============================================================================
 class ApiClient:
     def __init__(self, access_token, secretkey, account_index, page: Page, user_agent=None):
@@ -384,7 +384,7 @@ class ApiClient:
         self.sign_status = "未知"
         self.has_reward = False
 
-        self._last_sign_day = 0  # 由配置接口解析出的“今天第几天”
+        self._last_sign_day = 0
 
     def _refresh_token(self) -> bool:
         try:
@@ -399,61 +399,83 @@ class ApiClient:
             log(f"账号{self.account_index} - 🔄 token 刷新失败: {e}")
         return False
 
-    def request_json(self, url, method='GET', dump_body_on_error=False, tag="API"):
-        method = method.upper().strip()
+    def _get_json_once(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        """
+        单次 GET 请求：
+        - 非200：输出状态码+响应体
+        - 200但success=false：输出json（方便定位服务端原因）
+        """
         try:
-            resp = requests.request(method, url, headers=self.headers, timeout=12)
+            resp = requests.get(url, headers=self.headers, timeout=12)
 
             if resp.status_code != 200:
                 allow = resp.headers.get("Allow") or resp.headers.get("allow") or ""
-                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} ({method} {url})"
+                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} (GET {url})"
                 if allow:
                     msg += f" Allow={allow}"
                 log(msg)
-
                 if dump_body_on_error:
                     body = redact_sensitive(truncate_text(resp.text, 2000))
                     log(f"账号{self.account_index} - {tag}响应内容: {body}")
                 return None
 
             try:
-                return resp.json()
+                data = resp.json()
             except Exception:
-                # 200 但不是 json（或被网关返回奇怪内容）
-                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 {method} {url})")
+                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 GET {url})")
                 if dump_body_on_error:
                     body = redact_sensitive(truncate_text(resp.text, 2000))
                     log(f"账号{self.account_index} - {tag}响应内容: {body}")
                 return None
 
+            if dump_json_on_success_false and isinstance(data, dict) and data.get("success") is False:
+                log(f"账号{self.account_index} - ⚠️ {tag}返回success=false: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
+
+            return data
+
         except Exception as e:
             log(f"账号{self.account_index} - {tag}异常: {e}")
             return None
 
+    def get_json_with_one_retry(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        """
+        只用 GET；失败后再重试一次 GET。
+        失败包含：非200、JSON解析失败、success=false
+        """
+        data = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
+        if data and isinstance(data, dict) and data.get("success") is True:
+            return data
+
+        # 重试一次（短暂停顿）
+        time.sleep(random.uniform(0.6, 1.2))
+        log(f"账号{self.account_index} - 🔁 {tag}GET失败，重试一次GET...")
+        data2 = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
+        if data2 and isinstance(data2, dict) and data2.get("success") is True:
+            return data2
+
+        return None
+
     @with_retry
     def get_points(self):
-        data = self.request_json(f"{self.base_url}/api/activity/front/getCustomerIntegral", tag="积分", dump_body_on_error=False)
+        data = self.get_json_with_one_retry(
+            f"{self.base_url}/api/activity/front/getCustomerIntegral",
+            tag="金豆",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True
+        )
         if data and data.get('success'):
             return data.get('data', {}).get('integralVoucher', 0)
 
-        # token 可能失效，尝试刷新后再返回 None（由 with_retry 重试）
         self._refresh_token()
         return None
 
     def _parse_today_day(self, data: dict) -> int:
-        """
-        尽量兼容不同字段名/结构：
-        - 直接字段：todayDay / signInDay / currentDay / dayNum ...
-        - 列表：signInConfigList / signInConfigs ... 找 isToday/isCurrent/today/current
-        - 连续签到：continueSignInDay / signInCount ... 推算今天
-        """
         if not isinstance(data, dict):
             return 0
         d = data.get("data") or {}
         if not isinstance(d, dict):
             return 0
 
-        # 1) 直接字段
         direct_keys = [
             "todayDay", "todaySignInDay", "signInDay", "currentDay",
             "currentSignInDay", "day", "dayNum", "signDay", "currentSignDay"
@@ -464,7 +486,6 @@ class ApiClient:
                 if day > 0:
                     return day
 
-        # 2) 列表结构
         list_keys = [
             "signInConfigList", "signInConfigs", "configList", "configs",
             "signInList", "signInDetailList", "signInConfigDtoList"
@@ -474,7 +495,6 @@ class ApiClient:
             if not isinstance(lst, list):
                 continue
 
-            # 2.1 找到“今天/当前”那条
             for item in lst:
                 if not isinstance(item, dict):
                     continue
@@ -484,7 +504,6 @@ class ApiClient:
                         if day > 0:
                             return day
 
-            # 2.2 兜底：按“已签到条目数”推算
             signed_cnt = 0
             for item in lst:
                 if not isinstance(item, dict):
@@ -495,7 +514,6 @@ class ApiClient:
                 have_signed_today = truthy(d.get("haveSignIn")) or truthy(d.get("haveSign"))
                 return min(7, signed_cnt if have_signed_today else signed_cnt + 1)
 
-        # 3) 连续签到字段推算
         for k in ("continueSignInDay", "continueSignDay", "continuousDay", "continueDay", "seriesDay", "signedDays", "signInCount"):
             if k in d and d.get(k) is not None:
                 cnt = safe_int(d.get(k), 0)
@@ -507,70 +525,60 @@ class ApiClient:
 
     def get_sign_config(self):
         """
-        返回 (have_signed_today: bool, today_day: int, raw_data: dict) 或 None
+        返回 (have_signed_today, today_day, have_receive, raw_data) 或 None
         """
         url = f"{self.base_url}{SIGN_CONFIG_PATH}"
-        data = self.request_json(url, method="GET", tag="签到配置", dump_body_on_error=True)
+        data = self.get_json_with_one_retry(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
         if not (data and data.get("success")):
-            # 尝试刷新 token 再来一次
             self._refresh_token()
-            data = self.request_json(url, method="GET", tag="签到配置", dump_body_on_error=True)
+            data = self.get_json_with_one_retry(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
 
         if not (data and data.get("success")):
             return None
 
         raw = data.get("data") or {}
         have_signed = False
+        have_receive = False
         if isinstance(raw, dict):
             have_signed = truthy(raw.get("haveSignIn")) or truthy(raw.get("haveSign"))
+            have_receive = truthy(raw.get("haveReceive"))
 
-        today_day = self._parse_today_day(data)
+        today_day = safe_int(raw.get("day"), 0) or self._parse_today_day(data)
         self._last_sign_day = today_day
 
-        if today_day > 0:
-            log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}")
-
-        return have_signed, today_day, data
+        log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
+        return have_signed, today_day, have_receive, data
 
     def receive_voucher(self):
         """
-        领取额外奖励：
-        成功时 data 通常是豆子数量（例如 8）
-        返回 (ok: bool, beans: int)
+        领取额外奖励（只用GET；失败重试一次GET）
+        成功时 data 通常是“金豆数量”
+        返回 (ok, jindou)
         """
         url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
-        data = self.request_json(url, method="POST", tag="领取奖励", dump_body_on_error=True)
+        data = self.get_json_with_one_retry(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
         if data and data.get("success"):
-            beans = safe_int(data.get("data"), 0)
-            log(f"账号{self.account_index} - ✅ 奖励领取成功（+{beans} 豆子）")
-            return True, beans
+            jindou = safe_int(data.get("data"), 0)
+            log(f"账号{self.account_index} - ✅ 奖励领取成功（+{jindou} 金豆）")
+            return True, jindou
 
         log(f"账号{self.account_index} - ❌ 奖励领取失败")
         return False, 0
 
     def sign_in(self):
         """
-        正常签到：优先 GET，失败再 POST。
-        ✅ 关键改造：当返回非 200（例如 405）时，打印服务器响应内容到 log。
+        签到（只用GET；失败重试一次GET）
         """
         url = f"{self.base_url}{API_SIGN_PATH}"
 
         log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
-        data = self.request_json(url, method='GET', tag="签到", dump_body_on_error=True)
+        data = self.get_json_with_one_retry(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
         if data and data.get('success'):
             log(f"账号{self.account_index} - ✅ 签到成功")
             self.sign_status = "签到成功"
             return True
 
-        log(f"账号{self.account_index} - GET 失败，尝试 POST...")
-        data = self.request_json(url, method='POST', tag="签到", dump_body_on_error=True)
-        if data and data.get('success'):
-            log(f"账号{self.account_index} - ✅ 签到成功")
-            self.sign_status = "签到成功"
-            return True
-
-        msg = data.get('message', '未知错误') if isinstance(data, dict) else '请求失败'
-        log(f"账号{self.account_index} - ❌ 签到失败: {msg}")
+        log(f"账号{self.account_index} - ❌ 签到失败")
         self.sign_status = "签到失败"
         return False
 
@@ -584,31 +592,30 @@ class ApiClient:
             self.sign_status = "检查失败"
             return False
 
-        have_signed, today_day, _raw = cfg
+        have_signed, today_day, have_receive, _raw = cfg
 
-        # ✅ 第 7 天：直接尝试领取额外奖励；领取成功就算已签到，不走正常签到
+        # 第7天：奖励未领 -> 必须领取成功才算成功；领取失败算失败（不会再“假成功”）
         if today_day == 7:
-            log(f"账号{self.account_index} - 🎁 检测到今天为第 7 天，直接领取额外奖励（不走正常签到）")
-            ok, _beans = self.receive_voucher()
-            if ok:
+            if have_receive:
                 self.has_reward = True
-                self.sign_status = "领取奖励成功"  # 保持与汇总统计一致
-                time.sleep(random.uniform(1, 2))
-                self.final_points = self.get_points() or self.initial_points
-                self.points_reward = self.final_points - self.initial_points
-                return True
+                self.sign_status = "奖励已领取"
+                log(f"账号{self.account_index} - 🎁 第7天奖励已领取，无需操作")
+            else:
+                log(f"账号{self.account_index} - 🎁 检测到今天为第 7 天且奖励未领取，开始领取奖励（只GET，失败重试一次）")
+                ok, _jindou = self.receive_voucher()
+                if ok:
+                    self.has_reward = True
+                    self.sign_status = "领取奖励成功"
+                else:
+                    self.sign_status = "领取奖励失败"
+                    return False  # ✅ 这里严格失败
 
-            # 领取失败就兜底：如果实际上已经签过，就当成功；否则走正常签到
-            if have_signed:
-                self.sign_status = "已签到过"
-                time.sleep(random.uniform(1, 2))
-                self.final_points = self.get_points() or self.initial_points
-                self.points_reward = self.final_points - self.initial_points
-                return True
+            time.sleep(random.uniform(1, 2))
+            self.final_points = self.get_points() or self.initial_points
+            self.points_reward = self.final_points - self.initial_points
+            return True
 
-            log(f"账号{self.account_index} - ⚠️ 第 7 天领取奖励失败，兜底走正常签到流程")
-
-        # 非第 7 天正常流程
+        # 非第7天：正常签到
         if have_signed:
             self.sign_status = "已签到过"
         else:
@@ -696,6 +703,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     token_holder['value'] = token
                 route.continue_()
 
+            # 只要能拿到 secretkey/token 就行（保持你原来的拦截）
             context.route(f"**{LOGIN_API_PATH}*", handle_route)
 
             # ---------- 登录流程 ----------
@@ -806,7 +814,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             result['secretkey_extracted'] = bool(secretkey)
 
             if access_token:
-                log(f"账号{account_index} - 使用 token 进行签到（secretkey 非必需）")
+                log(f"账号{account_index} - 使用 token 进行签到（只GET，失败重试一次GET）")
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
                 success = client.execute_full_process()
                 result.update({
@@ -1138,7 +1146,7 @@ def push_summary(all_results, total_accounts):
     stats = [
         f"总账号数: {total_accounts}",
         f"签到成功: {success_count}/{total_accounts}",
-        f"总计获得 +{total_reward:.1f} 🌽",
+        f"总计获得 +{total_reward:.1f} 金豆",
     ]
     if reward_count > 0:
         stats.append("有额外奖励🎁")
@@ -1158,8 +1166,8 @@ def push_summary(all_results, total_accounts):
             label = r.get('username') or f"账号序号{r.get('account_index')}"
             if r.get("password_error"):
                 reason = "密码错误❌"
-            elif r.get("sign_status") and "签到失败" in r.get("sign_status"):
-                reason = "签到失败❗"
+            elif r.get("sign_status") and "失败" in r.get("sign_status"):
+                reason = "签到/奖励失败❗"
             else:
                 reason = "未知情况❓"
             lines.append(f"{label}：{reason}")
