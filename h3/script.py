@@ -104,18 +104,12 @@ def redact_sensitive(s: str) -> str:
     return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
 
 def is_unclaimed_reward_error(data: dict) -> bool:
-    """
-    判断是否是：存在签到未领取，请先领取!
-    """
     if not isinstance(data, dict):
         return False
     msg = str(data.get("message") or "")
     return ("存在签到未领取" in msg and "请先领取" in msg) or ("未领取" in msg and "先领取" in msg)
 
 def is_duplicate_claim_error(data: dict) -> bool:
-    """
-    判断是否是：重复领取金豆
-    """
     if not isinstance(data, dict):
         return False
     msg = str(data.get("message") or "")
@@ -375,7 +369,7 @@ def extract_token_from_local_storage(page: Page):
     return None
 
 # ==============================================================================
-# API 客户端（只用 GET；失败重试一次 GET；领取成功就不再签到）
+# API 客户端（只用 GET；失败重试一次 GET）
 # ==============================================================================
 class ApiClient:
     def __init__(self, access_token, secretkey, account_index, page: Page, user_agent=None):
@@ -400,6 +394,8 @@ class ApiClient:
 
         self.sign_status = "未知"
         self.has_reward = False
+
+        self.today_day = 0
 
     def _refresh_token(self) -> bool:
         try:
@@ -486,14 +482,11 @@ class ApiClient:
         have_receive = truthy(raw.get("haveReceive"))
         today_day = safe_int(raw.get("day"), 0)
 
+        self.today_day = today_day
         log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
         return have_signed, today_day, have_receive, data
 
     def receive_voucher(self):
-        """
-        领取奖励（只GET；失败重试一次GET）
-        返回 (ok, jindou, data)
-        """
         url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
         data = self.get_json_retry1(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
 
@@ -507,11 +500,11 @@ class ApiClient:
 
     def sign_in_simple(self):
         """
-        纯签到（只GET，失败重试一次GET），不做“未领取奖励”的自动领取。
-        用于第7天“重复领取金豆”兜底补签。
+        单纯做一次签到（只GET，失败重试一次）
+        用于：非第7天“领取成功后额外签到”、第7天“重复领取金豆”兜底补签
         """
         url = f"{self.base_url}{API_SIGN_PATH}"
-        log(f"账号{self.account_index} - 🧾 第7天兜底：执行一次签到（只GET，失败重试一次）...")
+        log(f"账号{self.account_index} - 🧾 执行一次签到（只GET，失败重试一次）...")
         data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
         if data and data.get("success"):
             self.sign_status = "签到成功"
@@ -523,26 +516,67 @@ class ApiClient:
 
     def sign_in(self):
         """
-        只GET签到：失败会重试一次GET
-        若返回“存在签到未领取，请先领取!”：改为领取奖励；领取成功就直接成功（不再签到）
+        ✅ 修复点1：第一次就检查“未领取”，不再先重试签到
+        ✅ 修复点2：非第7天，领取成功后必须额外签到一次
         """
         url = f"{self.base_url}{API_SIGN_PATH}"
         log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
 
-        data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
+        # 第一次请求：先判断“未领取”
+        data1 = self._get_json_once(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
 
-        if data and data.get("success"):
+        if data1 and isinstance(data1, dict) and data1.get("success") is True:
             self.sign_status = "签到成功"
             log(f"账号{self.account_index} - ✅ 签到成功")
             return True
 
-        if isinstance(data, dict) and is_unclaimed_reward_error(data):
-            log(f"账号{self.account_index} - 🎁 检测到“存在签到未领取”，开始领取奖励（领取成功就算完成，不再签到）...")
-            ok, _jindou, _raw = self.receive_voucher()
+        if isinstance(data1, dict) and is_unclaimed_reward_error(data1):
+            log(f"账号{self.account_index} - 🎁 检测到“存在签到未领取”，开始领取奖励...")
+            ok, _jindou, raw = self.receive_voucher()
             if ok:
                 self.has_reward = True
+                # 只要不是第7天：领取后再额外签到一次
+                if self.today_day != 7:
+                    log(f"账号{self.account_index} - ➕ 非第7天：领取奖励后需要额外签到一次")
+                    return self.sign_in_simple()
+                # 第7天：领取成功即完成（不再签到）
                 self.sign_status = "领取奖励成功"
                 return True
+
+            # 领取失败：第7天如果是“重复领取金豆” -> 额外签到一次
+            if isinstance(raw, dict) and is_duplicate_claim_error(raw):
+                log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
+                return self.sign_in_simple()
+
+            self.sign_status = "领取奖励失败"
+            return False
+
+        # 不是“未领取”情况：才重试一次签到
+        time.sleep(random.uniform(0.6, 1.2))
+        log(f"账号{self.account_index} - 🔁 签到GET失败，重试一次GET...")
+        data2 = self._get_json_once(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
+
+        if data2 and isinstance(data2, dict) and data2.get("success") is True:
+            self.sign_status = "签到成功"
+            log(f"账号{self.account_index} - ✅ 签到成功")
+            return True
+
+        # 重试后才出现“未领取”：也要处理（不再继续重试签到）
+        if isinstance(data2, dict) and is_unclaimed_reward_error(data2):
+            log(f"账号{self.account_index} - 🎁 重试后检测到“存在签到未领取”，开始领取奖励...")
+            ok, _jindou, raw = self.receive_voucher()
+            if ok:
+                self.has_reward = True
+                if self.today_day != 7:
+                    log(f"账号{self.account_index} - ➕ 非第7天：领取奖励后需要额外签到一次")
+                    return self.sign_in_simple()
+                self.sign_status = "领取奖励成功"
+                return True
+
+            if isinstance(raw, dict) and is_duplicate_claim_error(raw):
+                log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
+                return self.sign_in_simple()
+
             self.sign_status = "领取奖励失败"
             return False
 
@@ -562,24 +596,14 @@ class ApiClient:
 
         have_signed, today_day, have_receive, _raw = cfg
 
-        # 互斥规则：如果已领取奖励，就直接成功，不再签到
-        if have_receive:
-            self.has_reward = True
-            self.sign_status = "奖励已领取"
-            time.sleep(random.uniform(1, 2))
-            self.final_points = self.get_points() or self.initial_points
-            self.points_reward = self.final_points - self.initial_points
-            return True
-
-        # 第7天：优先领取奖励；成功即完成；失败则看是否“重复领取金豆”-> 额外签到一次
-        if today_day == 7:
-            log(f"账号{self.account_index} - 🎁 今天第7天且奖励未领取，开始领取奖励（领取成功就算完成，不再签到）")
+        # 第7天：优先领；重复领取则补签一次；其它失败即失败
+        if today_day == 7 and not have_receive:
+            log(f"账号{self.account_index} - 🎁 今天第7天且奖励未领取，开始领取奖励")
             ok, _jindou, raw = self.receive_voucher()
             if ok:
                 self.has_reward = True
                 self.sign_status = "领取奖励成功"
             else:
-                # 你要求的特殊兜底
                 if isinstance(raw, dict) and is_duplicate_claim_error(raw):
                     log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
                     if not self.sign_in_simple():
@@ -593,11 +617,11 @@ class ApiClient:
             self.points_reward = self.final_points - self.initial_points
             return True
 
-        # 非第7天：如果已经签到，也直接成功
+        # 非第7天：如果已签到，结束；否则走 sign_in()（里面会处理未领取 -> 领取 -> 再签）
         if have_signed:
             self.sign_status = "已签到过"
         else:
-            time.sleep(random.uniform(2, 3))
+            time.sleep(random.uniform(1, 2))
             if not self.sign_in():
                 return False
 
@@ -709,27 +733,10 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             time.sleep(1)
 
             password_xpath = "/html/body/div[1]/div/div/div/div/div/div[2]/div[2]/form/div[2]/div/div[1]/div[1]/input"
-            try:
-                page.wait_for_selector(f"xpath={password_xpath}", timeout=10000)
-                log("✅ 密码框已出现")
-                page.locator(f"xpath={password_xpath}").fill(password)
-                log("✅ 已填写密码")
-            except Exception as e:
-                log(f"❌ 密码框未出现: {e}")
-                try:
-                    page.wait_for_selector('input[placeholder="请输入登录密码"]', timeout=5000)
-                    password_inputs = page.locator('input[placeholder="请输入登录密码"]')
-                    count = password_inputs.count()
-                    for i in range(count):
-                        if password_inputs.nth(i).is_visible():
-                            password_inputs.nth(i).fill(password)
-                            log("✅ 已通过备用选择器填写密码")
-                            break
-                    else:
-                        raise Exception("没有可见的密码输入框")
-                except Exception as e2:
-                    log(f"❌ 备用选择器也失败: {e2}")
-                    raise
+            page.wait_for_selector(f"xpath={password_xpath}", timeout=10000)
+            log("✅ 密码框已出现")
+            page.locator(f"xpath={password_xpath}").fill(password)
+            log("✅ 已填写密码")
 
             second_login_btn = "#__layout > div > div > div > div > div:nth-child(2) > div:nth-child(2) > form > button"
             try:
@@ -764,14 +771,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     continue
 
             if not home_found:
-                try:
-                    page.wait_for_selector(HOME_SELECTOR, timeout=30000 - 7000)
-                    home_found = True
-                    log(f"账号{account_index} - ✅ 已进入首页")
-                except PlaywrightTimeoutError:
-                    log(f"账号{account_index} - ❌ 未检测到首页元素")
-                    result['sign_status'] = '未进入首页'
-                    return result
+                page.wait_for_selector(HOME_SELECTOR, timeout=30000 - 7000)
+                log(f"账号{account_index} - ✅ 已进入首页")
             else:
                 log(f"账号{account_index} - ✅ 已进入首页")
 
@@ -791,7 +792,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             result['secretkey_extracted'] = bool(secretkey)
 
             if access_token:
-                log(f"账号{account_index} - 使用 token 进行签到（只GET；领取成功就不再签到）")
+                log(f"账号{account_index} - 使用 token 进行签到（只GET；未领取先领；非第7天领完再签一次）")
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
                 success = client.execute_full_process()
                 result.update({
@@ -809,11 +810,6 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         except Exception as e:
             log(f"账号{account_index} - ❌ 执行异常: {e}")
             result['sign_status'] = '执行异常'
-            try:
-                if page and page.locator("text=/密码错误/").is_visible():
-                    result['password_error'] = True
-            except Exception:
-                pass
         finally:
             if context:
                 context.close()
@@ -824,7 +820,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     return result
 
 # ==============================================================================
-# 重试逻辑与结果合并
+# 重试逻辑与结果合并（保持不变）
 # ==============================================================================
 def should_retry(res):
     if res.get('password_error'):
@@ -991,74 +987,6 @@ def print_summary(all_results, total_accounts):
 
     log("=" * 70)
 
-def parse_notify_channels():
-    raw = os.getenv('NOTIFY_CHANNELS', '').strip()
-    if raw:
-        return [c.strip().lower() for c in raw.split(',') if c.strip()]
-    channels = []
-    if os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID'):
-        channels.append('telegram')
-    if os.getenv('SMTP_HOST') and os.getenv('SMTP_TO'):
-        channels.append('email')
-    return channels
-
-def send_telegram(text):
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
-    chat_id = os.getenv('TELEGRAM_CHAT_ID')
-    if not (token and chat_id):
-        log("未配置 Telegram 环境变量，跳过 Telegram 通知")
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        resp = requests.get(url, params={'chat_id': chat_id, 'text': text}, timeout=10)
-        if resp.status_code == 200:
-            log("Telegram 推送成功")
-            return True
-        log(f"Telegram 推送失败，状态码: {resp.status_code}")
-    except Exception as e:
-        log(f"Telegram 推送异常: {e}")
-    return False
-
-def send_email(subject, body):
-    host = os.getenv('SMTP_HOST')
-    to_raw = os.getenv('SMTP_TO', '')
-    if not host or not to_raw:
-        log("未配置 SMTP 环境变量，跳过邮件通知")
-        return False
-    port = int(os.getenv('SMTP_PORT', '587'))
-    user = os.getenv('SMTP_USER')
-    password = os.getenv('SMTP_PASS')
-    sender = os.getenv('SMTP_FROM') or user or "no-reply@example.com"
-    to_list = [t.strip() for t in to_raw.split(',') if t.strip()]
-    if not to_list:
-        log("SMTP_TO 为空，跳过邮件通知")
-        return False
-
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = sender
-    msg['To'] = ", ".join(to_list)
-    msg.set_content(body)
-
-    use_ssl = os.getenv('SMTP_SSL', 'false').lower() in ('1', 'true', 'yes', 'on')
-    use_tls = os.getenv('SMTP_TLS', 'true').lower() in ('1', 'true', 'yes', 'on')
-    try:
-        if use_ssl:
-            server = smtplib.SMTP_SSL(host, port, timeout=10)
-        else:
-            server = smtplib.SMTP(host, port, timeout=10)
-            if use_tls:
-                server.starttls()
-        if user and password:
-            server.login(user, password)
-        server.send_message(msg)
-        server.quit()
-        log("邮件通知发送成功")
-        return True
-    except Exception as e:
-        log(f"邮件通知发送失败: {e}")
-        return False
-
 def should_notify(failed_exists):
     mode = os.getenv('NOTIFY_ON', 'always').strip().lower()
     if mode in ('never', 'none', 'off', 'false', '0'):
@@ -1098,65 +1026,6 @@ def write_results_json(path, all_results, total_accounts):
         log(f"结果已写入: {path}")
     except Exception as e:
         log(f"写入结果失败: {e}")
-
-def push_summary(all_results, total_accounts):
-    today = datetime.now().strftime("%Y年%m月%d日")
-    batch_name = os.getenv('BATCH_NAME', '').strip()
-    header = f"{today} 📊 任务总结"
-    if batch_name:
-        header += f" - {batch_name}"
-
-    summary = summarize_results(all_results)
-    success_count = summary["success_count"]
-    total_reward = float(summary["total_reward"])
-    reward_count = summary["reward_count"]
-    password_error = summary["password_error"]
-    other_failed = summary["other_failed"]
-
-    lines = []
-    lines.append(header)
-    lines.append("=" * 50)
-    lines.append("")
-    stats = [
-        f"总账号数: {total_accounts}",
-        f"签到成功: {success_count}/{total_accounts}",
-        f"总计获得 +{total_reward:.1f} 金豆",
-    ]
-    if reward_count > 0:
-        stats.append("有额外奖励🎁")
-    success_rate = (success_count / total_accounts) * 100 if total_accounts > 0 else 0
-    stats.append(f"签到成功率: {success_rate:.1f}%")
-
-    for i, line in enumerate(stats):
-        prefix = "  └── " if i == len(stats) - 1 else "  ├── "
-        lines.append(prefix + line)
-
-    if not password_error and not other_failed:
-        lines.append("  🎉 所有账号签到成功!")
-    else:
-        lines.append("")
-        lines.append("失败的账户")
-        for r in password_error + other_failed:
-            label = r.get('username') or f"账号序号{r.get('account_index')}"
-            if r.get("password_error"):
-                reason = "密码错误❌"
-            elif r.get("sign_status") and "失败" in r.get("sign_status"):
-                reason = "签到/奖励失败❗"
-            else:
-                reason = "未知情况❓"
-            lines.append(f"{label}：{reason}")
-
-    lines.append("=" * 50)
-    full_text = "\n".join(lines)
-
-    channels = parse_notify_channels()
-    if not channels:
-        log("未配置通知渠道，跳过推送")
-        return
-    if 'telegram' in channels:
-        send_telegram(full_text)
-    if 'email' in channels:
-        send_email(header, full_text)
 
 def main():
     if len(sys.argv) < 3:
@@ -1202,11 +1071,6 @@ def main():
         write_results_json(result_json_path, all_results, total)
 
     failed_exists = any(not r['sign_success'] and not r.get('password_error') for r in all_results) or any(r.get('password_error') for r in all_results)
-    if should_notify(failed_exists):
-        push_summary(all_results, total)
-    else:
-        log("通知已按 NOTIFY_ON 配置跳过")
-
     if enable_failure_exit and failed_exists:
         log("❌ 存在失败账号，退出码设为1")
         sys.exit(1)
