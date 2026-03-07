@@ -115,6 +115,15 @@ def is_duplicate_claim_error(data: dict) -> bool:
     msg = str(data.get("message") or "")
     return "重复领取金豆" in msg
 
+
+def is_zero_reward_abnormal(points_reward, pre_signed: bool) -> bool:
+    """只有原本已签到过时，+0 金豆才算正常。"""
+    try:
+        reward = float(points_reward or 0)
+    except Exception:
+        reward = 0.0
+    return reward <= 0 and not pre_signed
+
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
 # ==============================================================================
@@ -595,19 +604,25 @@ class ApiClient:
             return False
 
         have_signed, today_day, have_receive, _raw = cfg
+        pre_signed = have_signed
 
-        # 第7天：优先领；重复领取则补签一次；其它失败即失败
-        if today_day == 7 and not have_receive:
-            log(f"账号{self.account_index} - 🎁 今天第7天且奖励未领取，开始领取奖励")
+        # 第7天：一律先尝试直接领取奖励；不先走签到
+        if today_day == 7:
+            log(f"账号{self.account_index} - 🎁 今天第7天，优先执行直接领取奖励（haveReceive={have_receive}）")
             ok, _jindou, raw = self.receive_voucher()
             if ok:
                 self.has_reward = True
                 self.sign_status = "领取奖励成功"
             else:
                 if isinstance(raw, dict) and is_duplicate_claim_error(raw):
-                    log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
-                    if not self.sign_in_simple():
-                        return False
+                    log(f"账号{self.account_index} - ♻️ 第7天领取返回“重复领取金豆”")
+                    # 已签到过时，允许 +0；未签到时补一次签到
+                    if pre_signed or have_receive:
+                        self.sign_status = "已签到过"
+                    else:
+                        log(f"账号{self.account_index} - 🧾 第7天检测到未签到，补执行一次签到")
+                        if not self.sign_in_simple():
+                            return False
                 else:
                     self.sign_status = "领取奖励失败"
                     return False
@@ -615,6 +630,35 @@ class ApiClient:
             time.sleep(random.uniform(1, 2))
             self.final_points = self.get_points() or self.initial_points
             self.points_reward = self.final_points - self.initial_points
+
+            if is_zero_reward_abnormal(self.points_reward, pre_signed):
+                log(f"账号{self.account_index} - ⚠️ 第7天成功后金豆增量为0，回查签到配置")
+                cfg2 = self.get_sign_config()
+                if cfg2 is not None:
+                    _signed2, _day2, have_receive2, _raw2 = cfg2
+                    if not have_receive2:
+                        log(f"账号{self.account_index} - ⚠️ 回查发现 haveReceive=False，再次尝试领取奖励")
+                        ok2, _jindou2, raw2 = self.receive_voucher()
+                        if ok2:
+                            self.has_reward = True
+                            self.sign_status = "领取奖励成功"
+                            time.sleep(random.uniform(1, 2))
+                            self.final_points = self.get_points() or self.initial_points
+                            self.points_reward = self.final_points - self.initial_points
+                        elif isinstance(raw2, dict) and is_duplicate_claim_error(raw2):
+                            if not pre_signed and not self.sign_in_simple():
+                                return False
+                            time.sleep(random.uniform(1, 2))
+                            self.final_points = self.get_points() or self.initial_points
+                            self.points_reward = self.final_points - self.initial_points
+                        else:
+                            self.sign_status = "领取奖励失败"
+                            return False
+
+            if is_zero_reward_abnormal(self.points_reward, pre_signed):
+                self.sign_status = "奖励异常(+0)"
+                log(f"账号{self.account_index} - ❌ 非已签到场景出现 +0 金豆，判定异常")
+                return False
             return True
 
         # 非第7天：如果已签到，结束；否则走 sign_in()（里面会处理未领取 -> 领取 -> 再签）
@@ -628,6 +672,36 @@ class ApiClient:
         time.sleep(random.uniform(1, 2))
         self.final_points = self.get_points() or 0
         self.points_reward = self.final_points - self.initial_points
+
+        if is_zero_reward_abnormal(self.points_reward, pre_signed):
+            log(f"账号{self.account_index} - ⚠️ 非第7天成功后金豆增量为0，回查签到配置")
+            cfg2 = self.get_sign_config()
+            if cfg2 is not None:
+                _signed2, _day2, have_receive2, _raw2 = cfg2
+                if not have_receive2:
+                    log(f"账号{self.account_index} - ⚠️ 回查发现 haveReceive=False，先领取奖励")
+                    ok2, _jindou2, raw2 = self.receive_voucher()
+                    if ok2:
+                        self.has_reward = True
+                        if not self.sign_in_simple():
+                            return False
+                        time.sleep(random.uniform(1, 2))
+                        self.final_points = self.get_points() or self.initial_points
+                        self.points_reward = self.final_points - self.initial_points
+                    elif isinstance(raw2, dict) and is_duplicate_claim_error(raw2):
+                        if not self.sign_in_simple():
+                            return False
+                        time.sleep(random.uniform(1, 2))
+                        self.final_points = self.get_points() or self.initial_points
+                        self.points_reward = self.final_points - self.initial_points
+                    else:
+                        self.sign_status = "领取奖励失败"
+                        return False
+
+        if is_zero_reward_abnormal(self.points_reward, pre_signed):
+            self.sign_status = "奖励异常(+0)"
+            log(f"账号{self.account_index} - ❌ 非已签到场景出现 +0 金豆，判定异常")
+            return False
         return True
 
 # ==============================================================================
@@ -709,7 +783,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
 
             # ---------- 登录流程 ----------
             log(f"账号{account_index} - 打开移动登录页...")
-            page.goto(PASSPORT_URL, timeout=60000)
+            page.goto(PASSPORT_URL, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_selector('input[placeholder*="手机号码"], input[placeholder*="邮箱"]', timeout=30000)
             log("✅ 登录页加载完成")
 
