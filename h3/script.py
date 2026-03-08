@@ -98,10 +98,20 @@ def truncate_text(s: str, limit: int = 1200) -> str:
         return s
     return s[:limit] + f"...(truncated, len={len(s)})"
 
+
 def redact_sensitive(s: str) -> str:
     if not s:
         return ""
     return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
+
+
+def brief_api_payload(data, limit: int = 800) -> str:
+    try:
+        txt = json.dumps(data, ensure_ascii=False)
+    except Exception:
+        txt = str(data)
+    txt = redact_sensitive(txt)
+    return truncate_text(txt, limit)
 
 def is_unclaimed_reward_error(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -114,17 +124,6 @@ def is_duplicate_claim_error(data: dict) -> bool:
         return False
     msg = str(data.get("message") or "")
     return "重复领取金豆" in msg
-
-def has_valid_reward_data(data: dict) -> bool:
-    if not isinstance(data, dict):
-        return False
-    v = data.get("data")
-    if v is None:
-        return False
-    if isinstance(v, (int, float)):
-        return v != 0
-    s = str(v).strip().lower()
-    return s not in ("", "0", "0.0", "null", "none", "false")
 
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
@@ -407,8 +406,6 @@ class ApiClient:
         self.has_reward = False
 
         self.today_day = 0
-        self.last_sign_data = None
-        self.last_receive_data = None
 
     def _refresh_token(self) -> bool:
         try:
@@ -497,40 +494,39 @@ class ApiClient:
 
         self.today_day = today_day
         log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
+        log(f"账号{self.account_index} - 🧩 签到配置原始返回: {brief_api_payload(data)}")
         return have_signed, today_day, have_receive, data
 
     def receive_voucher(self):
         url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
         data = self.get_json_retry1(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
-        self.last_receive_data = data
 
-        if data and data.get("success") and has_valid_reward_data(data):
+        if data and data.get("success"):
             jindou = safe_int(data.get("data"), 0)
             log(f"账号{self.account_index} - ✅ 奖励领取成功（+{jindou} 金豆）")
+            log(f"账号{self.account_index} - 🧩 领取奖励接口返回: {brief_api_payload(data)}")
             return True, jindou, data
 
-        if data and data.get("success") and not has_valid_reward_data(data):
-            log(f"账号{self.account_index} - ⚠️ 领取奖励返回 success=true，但 data 为 0/null，按失败处理")
-
         log(f"账号{self.account_index} - ❌ 奖励领取失败")
+        log(f"账号{self.account_index} - 🧩 领取奖励接口返回: {brief_api_payload(data)}")
         return False, 0, data
 
     def sign_in_simple(self):
         """
         单纯做一次签到（只GET，失败重试一次）
+        用于：非第7天“领取成功后额外签到”、第7天“重复领取金豆”兜底补签
         """
         url = f"{self.base_url}{API_SIGN_PATH}"
         log(f"账号{self.account_index} - 🧾 执行一次签到（只GET，失败重试一次）...")
         data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-        self.last_sign_data = data
-        if data and data.get("success") and has_valid_reward_data(data):
+        if data and data.get("success"):
             self.sign_status = "签到成功"
             log(f"账号{self.account_index} - ✅ 签到成功")
+            log(f"账号{self.account_index} - 🧩 签到接口返回: {brief_api_payload(data)}")
             return True
-        if data and data.get("success") and not has_valid_reward_data(data):
-            log(f"账号{self.account_index} - ⚠️ 签到返回 success=true，但 data 为 0/null，按失败处理")
         self.sign_status = "签到失败"
         log(f"账号{self.account_index} - ❌ 签到失败")
+        log(f"账号{self.account_index} - 🧩 签到接口返回: {brief_api_payload(data)}")
         return False
 
     def sign_in(self):
@@ -547,6 +543,7 @@ class ApiClient:
         if data1 and isinstance(data1, dict) and data1.get("success") is True:
             self.sign_status = "签到成功"
             log(f"账号{self.account_index} - ✅ 签到成功")
+            log(f"账号{self.account_index} - 🧩 首次签到接口返回: {brief_api_payload(data1)}")
             return True
 
         if isinstance(data1, dict) and is_unclaimed_reward_error(data1):
@@ -578,6 +575,7 @@ class ApiClient:
         if data2 and isinstance(data2, dict) and data2.get("success") is True:
             self.sign_status = "签到成功"
             log(f"账号{self.account_index} - ✅ 签到成功")
+            log(f"账号{self.account_index} - 🧩 重试签到接口返回: {brief_api_payload(data2)}")
             return True
 
         # 重试后才出现“未领取”：也要处理（不再继续重试签到）
@@ -601,6 +599,8 @@ class ApiClient:
 
         self.sign_status = "签到失败"
         log(f"账号{self.account_index} - ❌ 签到失败")
+        log(f"账号{self.account_index} - 🧩 首次签到接口返回: {brief_api_payload(data1)}")
+        log(f"账号{self.account_index} - 🧩 重试签到接口返回: {brief_api_payload(data2)}")
         return False
 
     def execute_full_process(self):
@@ -613,35 +613,28 @@ class ApiClient:
             self.sign_status = "检查失败"
             return False
 
-        have_signed, today_day, have_receive, _raw = cfg
+        have_signed, today_day, have_receive, raw_cfg = cfg
 
-        # 第7天：先签到，再领取；不再回查接口，只按两个接口自身返回判定
-        if today_day == 7:
-            if not have_signed:
-                log(f"账号{self.account_index} - 🎯 今天第7天，先执行签到，再领取奖励")
-                time.sleep(random.uniform(1, 2))
-                if not self.sign_in_simple():
-                    return False
+        if today_day == 7 and have_receive:
+            log(f"账号{self.account_index} - ℹ️ 第7天配置接口显示 haveReceive=True，按配置看像是已领取")
+            log(f"账号{self.account_index} - 🧩 第7天签到配置完整返回: {brief_api_payload(raw_cfg)}")
+
+        # 第7天：优先领；重复领取则补签一次；其它失败即失败
+        if today_day == 7 and not have_receive:
+            log(f"账号{self.account_index} - 🎁 今天第7天且奖励未领取，开始领取奖励")
+            ok, _jindou, raw = self.receive_voucher()
+            if ok:
+                self.has_reward = True
+                self.sign_status = "领取奖励成功"
             else:
-                self.sign_status = "已签到过"
-
-            if not have_receive:
-                time.sleep(random.uniform(1, 2))
-                log(f"账号{self.account_index} - 🎁 今天第7天，开始领取奖励")
-                ok, _jindou, raw = self.receive_voucher()
-                if ok:
-                    self.has_reward = True
-                    self.sign_status = "签到并领取奖励成功"
-                else:
-                    if isinstance(raw, dict) and is_duplicate_claim_error(raw):
-                        log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，按已领取处理")
-                        self.has_reward = True
-                        self.sign_status = "签到成功（奖励已领取）"
-                    else:
-                        self.sign_status = "领取奖励失败"
+                log(f"账号{self.account_index} - 🧩 第7天领取失败原始返回: {brief_api_payload(raw)}")
+                if isinstance(raw, dict) and is_duplicate_claim_error(raw):
+                    log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
+                    if not self.sign_in_simple():
                         return False
-            else:
-                log(f"账号{self.account_index} - ℹ️ 今天第7天奖励已领取，无需再次领取")
+                else:
+                    self.sign_status = "领取奖励失败"
+                    return False
 
             time.sleep(random.uniform(1, 2))
             self.final_points = self.get_points() or self.initial_points
