@@ -1,4 +1,4 @@
-name: 账户组4
+name: test
 
 on:
   workflow_dispatch:
@@ -22,14 +22,14 @@ jobs:
       - id: matrix
         shell: bash
         env:
-          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH4 }}
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
         run: |
           python - <<'PY'
           import os, json
           lines = [l.strip() for l in os.environ['ACCOUNTS'].splitlines() if l.strip()]
           count = len(lines)
           if count == 0:
-              raise SystemExit("ACCOUNTS_BATCH4 为空")
+              raise SystemExit("ACCOUNTS_BATCH5 为空")
           matrix = {"account_index": list(range(1, count + 1))}
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               f.write(f"matrix={json.dumps(matrix)}\n")
@@ -57,7 +57,7 @@ jobs:
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
-      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH4 }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -178,7 +178,7 @@ jobs:
           SMTP_TO: ${{ secrets.SMTP_TO }}
           SMTP_SSL: ${{ secrets.SMTP_SSL }}
           SMTP_USE_SSL: ${{ secrets.SMTP_SSL }}
-          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH4 }}
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
         run: |
           python h3/aggregate.py results
 
