@@ -622,30 +622,47 @@ class ApiClient:
 
         have_signed, today_day, have_receive, _raw = cfg
 
-        # 第7天固定死逻辑：一律先签到，再调用领取奖励接口；不再用 haveReceive 辅助判断是否已领取
+        # 第7天特殊逻辑：
+        # 1) 不信任 haveReceive，不用它判断是否已领
+        # 2) 如果配置显示已签到，则直接调用领奖接口
+        # 3) 如果未签到，则先签到；若接口提示“当前用户当天已经签到”，也直接转领奖
+        # 4) 如果领奖接口提示“重复领取金豆”，按“已经领取过”处理，算成功
         if today_day == 7:
             sign_url = f"{self.base_url}{API_SIGN_PATH}"
-            log(f"账号{self.account_index} - 🎯 今天第7天，固定流程：先签到，再领取奖励（忽略 haveReceive 判断）")
+            log(f"账号{self.account_index} - 🎯 今天第7天：已签到则直接领奖；未签到则先签到再领奖（忽略 haveReceive 判断）")
 
-            sign_data = self.get_json_retry1(sign_url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-            log(f"账号{self.account_index} - 🧩 第7天签到接口返回: {redact_sensitive(truncate_text(json.dumps(sign_data, ensure_ascii=False), 2000)) if sign_data is not None else 'null'}")
+            if have_signed:
+                log(f"账号{self.account_index} - ℹ️ 第7天配置显示今日已签到，直接调用领取奖励接口")
+            else:
+                sign_data = self.get_json_retry1(sign_url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
+                log(f"账号{self.account_index} - 🧩 第7天签到接口返回: {redact_sensitive(truncate_text(json.dumps(sign_data, ensure_ascii=False), 2000)) if sign_data is not None else 'null'}")
 
-            gain_num = get_sign_gain_num(sign_data) if isinstance(sign_data, dict) else None
-            if not (isinstance(sign_data, dict) and sign_data.get("success") is True and is_nonzero_reward_value(gain_num)):
-                self.sign_status = "第7天签到失败"
-                log(f"账号{self.account_index} - ❌ 第7天签到未拿到有效金豆，gainNum={gain_num}")
-                return False
-
-            log(f"账号{self.account_index} - ✅ 第7天签到成功（gainNum={gain_num}）")
+                already_signed = isinstance(sign_data, dict) and ("当前用户当天已经签到" in str(sign_data.get("message") or ""))
+                if isinstance(sign_data, dict) and sign_data.get("success") is True:
+                    gain_num = get_sign_gain_num(sign_data)
+                    if is_nonzero_reward_value(gain_num):
+                        log(f"账号{self.account_index} - ✅ 第7天签到成功（gainNum={gain_num}）")
+                    else:
+                        log(f"账号{self.account_index} - ⚠️ 第7天签到返回 success=true，但 gainNum={gain_num}，继续尝试领取第7天奖励")
+                elif already_signed:
+                    log(f"账号{self.account_index} - ℹ️ 第7天签到接口提示“当前用户当天已经签到”，直接转领取奖励")
+                else:
+                    self.sign_status = "第7天签到失败"
+                    log(f"账号{self.account_index} - ❌ 第7天签到失败，且不是“当天已签到”场景")
+                    return False
 
             ok, _jindou, raw = self.receive_voucher()
             log(f"账号{self.account_index} - 🧩 第7天领取奖励接口返回: {redact_sensitive(truncate_text(json.dumps(raw, ensure_ascii=False), 2000)) if raw is not None else 'null'}")
-            if not ok:
+            if ok:
+                self.has_reward = True
+                self.sign_status = "第7天签到并领取成功"
+            elif isinstance(raw, dict) and is_duplicate_claim_error(raw):
+                self.has_reward = True
+                self.sign_status = "第7天奖励已领取"
+                log(f"账号{self.account_index} - ℹ️ 第7天领取接口提示“重复领取金豆”，按已领取处理")
+            else:
                 self.sign_status = "第7天领取奖励失败"
                 return False
-
-            self.has_reward = True
-            self.sign_status = "第7天签到并领取成功"
 
             time.sleep(random.uniform(1, 2))
             self.final_points = self.get_points() or self.initial_points
