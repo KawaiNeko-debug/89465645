@@ -138,6 +138,43 @@ def get_sign_gain_num(data: dict):
         return payload.get("gainNum")
     return payload
 
+def extract_message(value):
+    if isinstance(value, dict):
+        for key in ("message", "msg", "errorMessage", "error", "detail"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for nested in value.values():
+            candidate = extract_message(nested)
+            if candidate:
+                return candidate
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            candidate = extract_message(item)
+            if candidate:
+                return candidate
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+def build_detail_reason(value, default=""):
+    msg = extract_message(value)
+    if msg:
+        return redact_sensitive(truncate_text(msg, 800))
+    if value is None:
+        return default
+    try:
+        dumped = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        dumped = str(value)
+    dumped = redact_sensitive(truncate_text(dumped, 800))
+    return dumped or default
+
+def is_risk_control_response(data) -> bool:
+    return "签到失败，疑似违反签到规则" in build_detail_reason(data)
+
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
 # ==============================================================================
@@ -419,6 +456,18 @@ class ApiClient:
         self.has_reward = False
 
         self.today_day = 0
+        self.detail_reason = ""
+        self.risk_controlled = False
+
+    def _mark_failure(self, status, raw=None, detail=""):
+        reason = detail or build_detail_reason(raw, default=status)
+        if is_risk_control_response(raw) or ("签到失败，疑似违反签到规则" in reason):
+            self.sign_status = "签到风控"
+            self.detail_reason = reason or "签到失败，疑似违反签到规则"
+            self.risk_controlled = True
+            return
+        self.sign_status = status
+        self.detail_reason = reason or status
 
     def _refresh_token(self) -> bool:
         try:
@@ -460,6 +509,9 @@ class ApiClient:
             if dump_json_on_success_false and isinstance(data, dict) and data.get("success") is False:
                 log(f"账号{self.account_index} - ⚠️ {tag}返回success=false: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
 
+            if is_risk_control_response(data):
+                self.risk_controlled = True
+                self.detail_reason = build_detail_reason(data, "签到失败，疑似违反签到规则")
             return data
 
         except Exception as e:
@@ -518,6 +570,9 @@ class ApiClient:
             log(f"账号{self.account_index} - ✅ 奖励领取成功（+{jindou} 金豆）")
             return True, jindou, data
 
+        if is_risk_control_response(data):
+            self._mark_failure("签到风控", raw=data)
+            return False
         if data and data.get("success"):
             log(f"账号{self.account_index} - ❌ 领取奖励接口 success=true 但 data 异常: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
         else:
@@ -703,7 +758,9 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'secretkey_extracted': False,
         'retry_count': retry_count,
         'is_final_retry': is_final_retry,
-        'password_error': False
+        'password_error': False,
+        'risk_controlled': False,
+        'detail_reason': ''
     }
 
     ua_string = get_random_mobile_ua()
@@ -849,11 +906,13 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                 success = client.execute_full_process()
                 result.update({
                     'sign_success': success,
-                    'sign_status': client.sign_status,
+                    'sign_status': '签到风控' if client.risk_controlled and not success else client.sign_status,
                     'initial_points': client.initial_points,
                     'final_points': client.final_points,
                     'points_reward': client.points_reward,
                     'has_reward': client.has_reward,
+                    'risk_controlled': client.risk_controlled,
+                    'detail_reason': client.detail_reason,
                 })
             else:
                 log(f"账号{account_index} - ❌ 未提取到 token")
@@ -894,7 +953,9 @@ def process_single_account(username, password, account_index, total_accounts):
         'secretkey_extracted': False,
         'retry_count': 0,
         'is_final_retry': False,
-        'password_error': False
+        'password_error': False,
+        'risk_controlled': False,
+        'detail_reason': ''
     }
     max_retries = 3
     for attempt in range(max_retries + 1):
@@ -905,11 +966,15 @@ def process_single_account(username, password, account_index, total_accounts):
             merged['sign_status'] = '密码错误'
             merged['username'] = username
             merged['masked_username'] = mask_account(username)
+            merged['detail_reason'] = res.get('detail_reason') or '密码错误'
             break
 
         if res['sign_success'] and not merged['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason']:
                 merged[k] = res[k]
+        elif not merged['sign_success']:
+            for k in ['sign_status', 'risk_controlled', 'detail_reason']:
+                merged[k] = res.get(k)
 
         merged['retry_count'] = res['retry_count']
 
@@ -952,13 +1017,17 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                 'sign_status': '密码错误',
                 'username': f['username'],
                 'masked_username': mask_account(f['username']),
+                'detail_reason': final.get('detail_reason') or '密码错误',
                 'is_final_retry': True
             })
             continue
 
         if final['sign_success'] and not orig['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason']:
                 orig[k] = final[k]
+        elif not orig['sign_success']:
+            for k in ['sign_status', 'risk_controlled', 'detail_reason']:
+                orig[k] = final.get(k)
 
         orig.update({
             'is_final_retry': True,
@@ -1050,9 +1119,16 @@ def should_notify(failed_exists):
 def write_results_json(path, all_results, total_accounts):
     try:
         sanitized = []
+        group_name = os.getenv('GROUP_NAME', '') or os.getenv('BATCH_NAME', '')
+        group_number = safe_int(os.getenv('GROUP_NUMBER'), 0)
+        execution_order = safe_int(os.getenv('EXECUTION_ORDER'), 0)
         for r in all_results:
             sanitized.append({
                 "account_index": r.get("account_index"),
+                "execution_order": execution_order or r.get("account_index"),
+                "group_name": group_name,
+                "group_number": group_number,
+                "group_position": f"{group_number}组账号{r.get('account_index')}" if group_number > 0 else f"账号{r.get('account_index')}",
                 "sign_success": r.get("sign_success"),
                 "sign_status": r.get("sign_status"),
                 "initial_points": r.get("initial_points"),
@@ -1060,13 +1136,17 @@ def write_results_json(path, all_results, total_accounts):
                 "points_reward": r.get("points_reward"),
                 "has_reward": r.get("has_reward"),
                 "password_error": r.get("password_error"),
+                "risk_controlled": r.get("risk_controlled"),
                 "retry_count": r.get("retry_count"),
                 "is_final_retry": r.get("is_final_retry"),
+                "detail_reason": r.get("detail_reason"),
             })
 
         payload = {
             "generated_at": datetime.now().isoformat(),
             "batch_name": os.getenv('BATCH_NAME', ''),
+            "group_name": group_name,
+            "group_number": group_number,
             "total_accounts": total_accounts,
             "results": sanitized,
         }
