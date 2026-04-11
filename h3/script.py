@@ -73,6 +73,7 @@ URL_PATTERN = f"**/{HOST}/**"
 # 小工具函数
 # ==============================================================================
 _UUID_RE = re.compile(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b')
+_PUBLIC_IP_CACHE = {"loaded": False, "value": ""}
 
 def truthy(v) -> bool:
     if v is True:
@@ -265,6 +266,40 @@ def mask_account(account):
     if len(s) <= 4:
         return "*" * len(s)
     return s[:-4] + "****"
+
+def current_time_text() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+def get_public_ip() -> str:
+    if _PUBLIC_IP_CACHE["loaded"]:
+        return _PUBLIC_IP_CACHE["value"]
+
+    candidates = (
+        ("https://api.ipify.org?format=json", "json"),
+        ("https://ifconfig.me/ip", "text"),
+    )
+    ip_value = ""
+    for url, response_type in candidates:
+        try:
+            response = requests.get(url, timeout=8)
+            if response.status_code != 200:
+                continue
+            if response_type == "json":
+                ip_value = str((response.json() or {}).get("ip") or "").strip()
+            else:
+                ip_value = response.text.strip()
+            if ip_value:
+                break
+        except Exception:
+            continue
+
+    _PUBLIC_IP_CACHE["loaded"] = True
+    _PUBLIC_IP_CACHE["value"] = ip_value
+    return ip_value
+
+def finalize_result_metadata(result: dict):
+    result["sign_time"] = str(result.get("sign_time") or current_time_text()).strip()
+    result["sign_ip"] = str(result.get("sign_ip") or get_public_ip()).strip()
 
 def masked_label(result):
     if result.get('masked_username'):
@@ -760,7 +795,9 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'is_final_retry': is_final_retry,
         'password_error': False,
         'risk_controlled': False,
-        'detail_reason': ''
+        'detail_reason': '',
+        'sign_time': '',
+        'sign_ip': '',
     }
 
     ua_string = get_random_mobile_ua()
@@ -926,6 +963,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                 context.close()
             if browser:
                 browser.close()
+            finalize_result_metadata(result)
             time.sleep(1)
 
     return result
@@ -955,7 +993,9 @@ def process_single_account(username, password, account_index, total_accounts):
         'is_final_retry': False,
         'password_error': False,
         'risk_controlled': False,
-        'detail_reason': ''
+        'detail_reason': '',
+        'sign_time': '',
+        'sign_ip': '',
     }
     max_retries = 3
     for attempt in range(max_retries + 1):
@@ -967,13 +1007,15 @@ def process_single_account(username, password, account_index, total_accounts):
             merged['username'] = username
             merged['masked_username'] = mask_account(username)
             merged['detail_reason'] = res.get('detail_reason') or '密码错误'
+            merged['sign_time'] = res.get('sign_time', '')
+            merged['sign_ip'] = res.get('sign_ip', '')
             break
 
         if res['sign_success'] and not merged['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip']:
                 merged[k] = res[k]
         elif not merged['sign_success']:
-            for k in ['sign_status', 'risk_controlled', 'detail_reason']:
+            for k in ['sign_status', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip']:
                 merged[k] = res.get(k)
 
         merged['retry_count'] = res['retry_count']
@@ -1018,15 +1060,17 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                 'username': f['username'],
                 'masked_username': mask_account(f['username']),
                 'detail_reason': final.get('detail_reason') or '密码错误',
+                'sign_time': final.get('sign_time', ''),
+                'sign_ip': final.get('sign_ip', ''),
                 'is_final_retry': True
             })
             continue
 
         if final['sign_success'] and not orig['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip']:
                 orig[k] = final[k]
         elif not orig['sign_success']:
-            for k in ['sign_status', 'risk_controlled', 'detail_reason']:
+            for k in ['sign_status', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip']:
                 orig[k] = final.get(k)
 
         orig.update({
@@ -1140,6 +1184,8 @@ def write_results_json(path, all_results, total_accounts):
                 "retry_count": r.get("retry_count"),
                 "is_final_retry": r.get("is_final_retry"),
                 "detail_reason": r.get("detail_reason"),
+                "sign_time": r.get("sign_time"),
+                "sign_ip": r.get("sign_ip"),
             })
 
         payload = {

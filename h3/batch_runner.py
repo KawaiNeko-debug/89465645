@@ -103,6 +103,8 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "retry_count": 0,
         "is_final_retry": False,
         "detail_reason": reason,
+        "sign_time": "",
+        "sign_ip": "",
         "pause_applied": False,
     }
 
@@ -137,6 +139,8 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "retry_count": safe_int(raw.get("retry_count"), 0),
             "is_final_retry": truthy(raw.get("is_final_retry")),
             "detail_reason": str(raw.get("detail_reason") or "").strip(),
+            "sign_time": str(raw.get("sign_time") or "").strip(),
+            "sign_ip": str(raw.get("sign_ip") or "").strip(),
         }
     )
 
@@ -222,6 +226,8 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "retry_count": item["retry_count"],
                 "is_final_retry": item["is_final_retry"],
                 "detail_reason": item["detail_reason"],
+                "sign_time": item.get("sign_time", ""),
+                "sign_ip": item.get("sign_ip", ""),
                 "pause_applied": item["pause_applied"],
             }
         )

@@ -122,6 +122,8 @@ def main():
                 "retry_count": safe_int(row.get("retry_count"), 0),
                 "is_final_retry": truthy(row.get("is_final_retry")),
                 "detail_reason": row.get("detail_reason", ""),
+                "sign_time": row.get("sign_time", ""),
+                "sign_ip": row.get("sign_ip", ""),
             }
         )
 

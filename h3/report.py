@@ -13,6 +13,14 @@ import requests
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
+for stream_name in ("stdout", "stderr"):
+    stream = getattr(sys, stream_name, None)
+    if hasattr(stream, "reconfigure"):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 
 os.environ.setdefault("TZ", "Asia/Shanghai")
 try:
@@ -47,8 +55,19 @@ def safe_float(value, default=0.0) -> float:
         return default
 
 
-def load_account_lookup() -> dict[tuple[int, int], str]:
+def default_group_name(group_number: int) -> str:
+    return f"{group_number}组" if group_number > 0 else ""
+
+
+def default_group_position(group_number: int, account_index: int) -> str:
+    if group_number > 0 and account_index > 0:
+        return f"{group_number}组账号{account_index}"
+    return f"账号{account_index}" if account_index > 0 else "未知账号"
+
+
+def load_account_lookup() -> tuple[dict[tuple[int, int], str], int]:
     lookup = {}
+    total = 0
     for group_number in range(1, 5):
         raw = os.getenv(f"ACCOUNTS_BATCH{group_number}", "") or ""
         for account_index, line in enumerate(raw.splitlines(), start=1):
@@ -57,7 +76,8 @@ def load_account_lookup() -> dict[tuple[int, int], str]:
                 continue
             username = line.split(",", 1)[0].strip()
             lookup[(group_number, account_index)] = username
-    return lookup
+            total += 1
+    return lookup, total
 
 
 def load_manifest(results_dir: str) -> dict:
@@ -71,6 +91,22 @@ def load_manifest(results_dir: str) -> dict:
         return {}
 
 
+def target_date_text(manifest: dict) -> str:
+    if isinstance(manifest, dict) and manifest.get("target_date"):
+        return str(manifest["target_date"]).strip()
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def resolve_output_xlsx_path(results_dir: str, manifest: dict) -> str:
+    filename = f"{target_date_text(manifest)}签到汇总.xlsx"
+    configured_path = os.getenv("OUTPUT_XLSX_PATH") or ""
+    if configured_path:
+        directory = os.path.dirname(configured_path) or results_dir
+    else:
+        directory = results_dir
+    return os.path.join(directory, filename)
+
+
 def find_json_files(results_dir: str) -> list[str]:
     paths = set()
     for path in glob.glob(os.path.join(results_dir, "**", "*.json"), recursive=True):
@@ -81,6 +117,14 @@ def find_json_files(results_dir: str) -> list[str]:
     return sorted(paths)
 
 
+def record_key(record: dict):
+    group_number = safe_int(record.get("group_number"), 0)
+    account_index = safe_int(record.get("account_index"), 0)
+    if group_number > 0 and account_index > 0:
+        return group_number, account_index
+    return None
+
+
 def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int, int], str]) -> dict:
     group_number = safe_int(record.get("group_number", payload.get("group_number")), 0)
     account_index = safe_int(record.get("account_index"), 0)
@@ -89,15 +133,16 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         or record.get("masked_username")
         or account_lookup.get((group_number, account_index))
         or f"账号{account_index}"
-    )
+    ).strip()
     detail_reason = str(record.get("detail_reason") or "").strip()
     risk_controlled = truthy(record.get("risk_controlled")) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in detail_reason)
-    group_position = str(record.get("group_position") or (f"{group_number}组账号{account_index}" if group_number > 0 else f"账号{account_index}"))
+    group_name = str(record.get("group_name") or payload.get("group_name") or payload.get("batch_name") or default_group_name(group_number)).strip()
+    group_position = str(record.get("group_position") or default_group_position(group_number, account_index)).strip()
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
         "username": username,
-        "group_name": str(record.get("group_name") or payload.get("group_name") or payload.get("batch_name") or ""),
+        "group_name": group_name,
         "group_number": group_number,
         "group_position": group_position,
         "sign_success": truthy(record.get("sign_success")),
@@ -111,12 +156,14 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "retry_count": safe_int(record.get("retry_count"), 0),
         "is_final_retry": truthy(record.get("is_final_retry")),
         "detail_reason": detail_reason,
+        "sign_time": str(record.get("sign_time") or "").strip(),
+        "sign_ip": str(record.get("sign_ip") or "").strip(),
     }
 
 
-def load_results(results_dir: str) -> list[dict]:
-    account_lookup = load_account_lookup()
-    results = []
+def load_results(results_dir: str, account_lookup: dict[tuple[int, int], str]) -> list[dict]:
+    records_by_key = {}
+    extras = []
     for path in find_json_files(results_dir):
         try:
             with open(path, "r", encoding="utf-8") as file:
@@ -127,71 +174,174 @@ def load_results(results_dir: str) -> list[dict]:
         if not isinstance(rows, list):
             continue
         for record in rows:
-            if isinstance(record, dict):
-                results.append(normalize_record(record, payload, account_lookup))
-    return results
+            if not isinstance(record, dict):
+                continue
+            normalized = normalize_record(record, payload, account_lookup)
+            key = record_key(normalized)
+            if key is None:
+                extras.append(normalized)
+            else:
+                records_by_key[key] = normalized
+    return list(records_by_key.values()) + extras
+
+
+def build_missing_record(group_number: int, account_index: int, username: str) -> dict:
+    return {
+        "account_index": account_index,
+        "execution_order": account_index,
+        "username": username,
+        "group_name": default_group_name(group_number),
+        "group_number": group_number,
+        "group_position": default_group_position(group_number, account_index),
+        "sign_success": False,
+        "sign_status": "签到异常",
+        "initial_points": 0.0,
+        "final_points": 0.0,
+        "points_reward": 0.0,
+        "has_reward": False,
+        "password_error": False,
+        "risk_controlled": False,
+        "retry_count": 0,
+        "is_final_retry": False,
+        "detail_reason": "缺少签到结果",
+        "sign_time": "",
+        "sign_ip": "",
+    }
+
+
+def merge_records_with_expected(records: list[dict], account_lookup: dict[tuple[int, int], str]) -> list[dict]:
+    indexed = {}
+    extras = []
+    for record in records:
+        key = record_key(record)
+        if key is None:
+            extras.append(record)
+        else:
+            indexed[key] = record
+
+    if not account_lookup:
+        return list(indexed.values()) + extras
+
+    merged = []
+    for key in sorted(account_lookup):
+        record = indexed.pop(key, None)
+        if record is None:
+            merged.append(build_missing_record(key[0], key[1], account_lookup[key]))
+            continue
+        if not record.get("username"):
+            record["username"] = account_lookup[key]
+        merged.append(record)
+
+    unexpected = sorted(
+        list(indexed.values()) + extras,
+        key=lambda item: (
+            safe_int(item.get("group_number"), 999999),
+            safe_int(item.get("account_index"), 999999),
+            str(item.get("username") or ""),
+        ),
+    )
+    merged.extend(unexpected)
+    return merged
 
 
 def status_label(record: dict) -> str:
-    raw_status = record["sign_status"]
-    if record["risk_controlled"]:
+    raw_status = str(record.get("sign_status") or "")
+    if truthy(record.get("risk_controlled")):
         return "签到风控"
-    if record["sign_success"]:
+    if truthy(record.get("sign_success")):
         return "签到成功"
-    if record["password_error"] or any(keyword in raw_status for keyword in ("失败", "错误", "Token", "token")):
+    if truthy(record.get("password_error")) or any(keyword in raw_status for keyword in ("失败", "错误", "Token", "token")):
         return "签到失败"
     return "签到异常"
 
 
 def detail_reason(record: dict) -> str:
-    reason = record["detail_reason"]
+    reason = str(record.get("detail_reason") or "").strip()
     if reason:
         return reason
-    if record["risk_controlled"]:
+    if record.get("risk_controlled"):
         return RISK_CONTROL_MESSAGE
-    if record["sign_status"]:
-        return record["sign_status"]
-    return ""
+    if record.get("sign_status"):
+        return str(record["sign_status"]).strip()
+    return "签到异常"
+
+
+def detail_text(record: dict) -> str:
+    if truthy(record.get("sign_success")):
+        return str(record.get("sign_status") or "签到成功").strip()
+    return detail_reason(record)
+
+
+def is_problem_record(record: dict) -> bool:
+    return not truthy(record.get("sign_success"))
 
 
 def sort_records(records: list[dict]) -> list[dict]:
-    return sorted(records, key=lambda item: (-item["final_points"], item["group_number"], item["account_index"], item["username"]))
+    return sorted(
+        records,
+        key=lambda item: (
+            0 if is_problem_record(item) else 1,
+            -safe_float(item.get("final_points"), 0.0),
+            safe_int(item.get("group_number"), 999999),
+            safe_int(item.get("account_index"), 999999),
+            str(item.get("username") or ""),
+        ),
+    )
 
 
-def build_message(records: list[dict], manifest: dict) -> tuple[str, dict]:
-    sorted_records = sort_records(records)
-    summary = {
-        "total": len(sorted_records),
-        "success": sum(1 for item in sorted_records if item["sign_success"]),
-        "risk": sum(1 for item in sorted_records if status_label(item) == "签到风控"),
-        "failed": sum(1 for item in sorted_records if status_label(item) == "签到失败"),
-        "abnormal": sum(1 for item in sorted_records if status_label(item) == "签到异常"),
-        "reward": sum(item["points_reward"] for item in sorted_records),
+def format_percent(value: float) -> str:
+    return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def build_summary(records: list[dict], expected_total: int) -> dict:
+    total = expected_total or len(records)
+    success = sum(1 for item in records if truthy(item.get("sign_success")))
+    risk = sum(1 for item in records if status_label(item) == "签到风控")
+    failed = sum(1 for item in records if status_label(item) == "签到失败")
+    abnormal = sum(1 for item in records if status_label(item) == "签到异常")
+    reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
+    success_rate = (success / total * 100) if total > 0 else 0.0
+    return {
+        "total": total,
+        "success": success,
+        "risk": risk,
+        "failed": failed,
+        "abnormal": abnormal,
+        "problem_count": risk + failed + abnormal,
+        "reward": reward,
+        "success_rate": success_rate,
     }
 
-    missing_groups = []
-    for batch in manifest.get("batches", []) if isinstance(manifest, dict) else []:
-        if not truthy(batch.get("found")):
-            missing_groups.append(batch.get("group_name") or f"{batch.get('group_number')}组")
 
-    date_text = manifest.get("target_date") if isinstance(manifest, dict) and manifest.get("target_date") else datetime.now().strftime("%Y-%m-%d")
-    lines = [
-        f"{date_text} 签到汇总",
-        f"总账号 {summary['total']} | 成功 {summary['success']} | 风控 {summary['risk']} | 失败 {summary['failed']} | 异常 {summary['abnormal']} | 总收益 +{summary['reward']:.1f} 🌽",
+def build_stats_lines(summary: dict) -> list[str]:
+    return [
+        "📈 总体统计",
+        f"  ├── 总账号数: {summary['total']}",
+        f"  ├── 签到成功: {summary['success']}/{summary['total']}",
+        f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
+        f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
-    if missing_groups:
-        lines.append("缺少批次: " + ", ".join(missing_groups))
-    if sorted_records:
-        lines.append("")
-        lines.append("按金豆数量排序:")
-        for record in sorted_records:
-            lines.append(
-                f"{record['username']}：{status_label(record)}（{record['final_points']:.1f}）{record['points_reward']:+.1f} 🌽｜{record['group_position']}"
-                + (f"｜{detail_reason(record)}" if detail_reason(record) and status_label(record) != "签到成功" else "")
-            )
-    else:
-        lines.append("")
-        lines.append("未读取到任何签到结果。")
+
+
+def build_message(records: list[dict], manifest: dict, expected_total: int) -> tuple[str, dict]:
+    sorted_records = sort_records(records)
+    summary = build_summary(sorted_records, expected_total)
+    problem_records = [record for record in sorted_records if is_problem_record(record)]
+
+    if problem_records:
+        lines = ["NO❗今天出现问题了捏"]
+        for record in problem_records:
+            lines.append(f"{record['username']}：{detail_reason(record)}❌")
+        lines.extend(build_stats_lines(summary))
+        return "\n".join(lines), summary
+
+    if not sorted_records:
+        lines = ["NO❗今天出现问题了捏", "未读取到任何签到结果❌"]
+        lines.extend(build_stats_lines(summary))
+        return "\n".join(lines), summary
+
+    lines = ["喵喵~今天一切正常捏"]
+    lines.extend(build_stats_lines(summary))
     return "\n".join(lines), summary
 
 
@@ -204,20 +354,22 @@ def color_for_points(points: float):
         return PatternFill("solid", fgColor="9DC3E6")
     if points < 200:
         return PatternFill("solid", fgColor="C6E0B4")
+    if 200 <= points < 300:
+        return PatternFill("solid", fgColor="DAF2D0")
+    if 300 <= points <= 500:
+        return PatternFill("solid", fgColor="F4CCCC")
     return None
 
 
 def font_for_status(label: str) -> Font:
-    if label in {"签到失败", "签到风控"}:
-        return Font(color="C00000")
-    return Font(color="008000")
+    return Font(color="008000" if label == "签到成功" else "C00000")
 
 
 def write_xlsx(path: str, records: list[dict]):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "签到汇总"
-    headers = ["序号", "金豆数量", "账户", "组别", "签到情况", "详细原因"]
+    headers = ["序号", "金豆数量", "账户", "组别", "签到情况", "详细原因", "签到时间", "签到IP"]
     sheet.append(headers)
 
     header_fill = PatternFill("solid", fgColor="D9E2F3")
@@ -235,11 +387,13 @@ def write_xlsx(path: str, records: list[dict]):
         label = status_label(record)
         row = [
             index,
-            record["final_points"],
-            record["username"],
-            record["group_position"],
+            safe_float(record.get("final_points"), 0.0),
+            str(record.get("username") or ""),
+            str(record.get("group_position") or ""),
             label,
-            detail_reason(record),
+            detail_text(record),
+            str(record.get("sign_time") or ""),
+            str(record.get("sign_ip") or ""),
         ]
         sheet.append(row)
         row_index = sheet.max_row
@@ -250,14 +404,17 @@ def write_xlsx(path: str, records: list[dict]):
         sheet.cell(row_index, 2).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 4).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 5).alignment = Alignment(horizontal="center", vertical="center")
+        sheet.cell(row_index, 7).alignment = Alignment(horizontal="center", vertical="center")
+        sheet.cell(row_index, 8).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        sheet.cell(row_index, 6).alignment = Alignment(vertical="center", wrap_text=True)
         sheet.cell(row_index, 2).number_format = "0.0"
-        fill = color_for_points(record["final_points"])
+        fill = color_for_points(safe_float(record.get("final_points"), 0.0))
         if fill:
             sheet.cell(row_index, 2).fill = fill
         sheet.cell(row_index, 5).font = font_for_status(label)
 
     sheet.freeze_panes = "A2"
-    widths = {"A": 8, "B": 14, "C": 20, "D": 16, "E": 14, "F": 48}
+    widths = {"A": 8, "B": 14, "C": 24, "D": 16, "E": 14, "F": 36, "G": 14, "H": 18}
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 
@@ -308,7 +465,7 @@ def send_telegram_document(path: str) -> bool:
         with open(path, "rb") as file:
             response = requests.post(
                 f"https://api.telegram.org/bot{token}/sendDocument",
-                data={"chat_id": chat_id, "caption": f"{datetime.now().strftime('%Y-%m-%d')} 签到汇总 xlsx"},
+                data={"chat_id": chat_id},
                 files={"document": (os.path.basename(path), file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
                 timeout=40,
             )
@@ -362,10 +519,12 @@ def is_enabled(env_name: str, default: str = "true") -> bool:
 
 def main():
     results_dir = sys.argv[1] if len(sys.argv) > 1 else "results"
-    output_xlsx = os.getenv("OUTPUT_XLSX_PATH") or os.path.join(results_dir, "summary.xlsx")
+    account_lookup, expected_total = load_account_lookup()
     manifest = load_manifest(results_dir)
-    records = load_results(results_dir)
-    message, summary = build_message(records, manifest)
+    output_xlsx = resolve_output_xlsx_path(results_dir, manifest)
+    raw_records = load_results(results_dir, account_lookup)
+    records = merge_records_with_expected(raw_records, account_lookup)
+    message, summary = build_message(records, manifest, expected_total)
 
     channels = parse_channels()
     send_tg_text = is_enabled("TELEGRAM_SEND_TEXT", "true")
@@ -384,7 +543,7 @@ def main():
                 write_xlsx(output_xlsx, records)
             sent = send_telegram_document(output_xlsx) or sent
     if "email" in channels or "smtp" in channels:
-        subject = f"{datetime.now().strftime('%Y-%m-%d')} 签到汇总"
+        subject = f"{target_date_text(manifest)} 签到汇总"
         sent = send_email(subject, message) or sent
 
     print(message)
@@ -394,7 +553,7 @@ def main():
         f"tg_xlsx={'on' if send_tg_xlsx else 'off'} xlsx_generated={'yes' if os.path.exists(output_xlsx) else 'no'}"
     )
 
-    if truthy(os.getenv("FAIL_ON_FAILURE", "false")) and (summary["failed"] > 0 or summary["risk"] > 0 or summary["abnormal"] > 0):
+    if truthy(os.getenv("FAIL_ON_FAILURE", "false")) and summary["problem_count"] > 0:
         sys.exit(1)
     sys.exit(0)
 
