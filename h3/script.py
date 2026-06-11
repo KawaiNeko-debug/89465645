@@ -50,13 +50,22 @@ PASSWORD_ERROR_HINTS = ["账号或密码不正确", "请重新输入", "密码�
 # 首页元素（用于判断是否进入首页）
 HOME_SELECTOR = 'div.uni-tabbar__label:has-text("首页")'
 
-# 签到相关接口
+# 抽奖相关接口
 SIGN_CONFIG_PATH = "/api/activity/sign/getCurrentUserSignInConfig"
 RECEIVE_VOUCHER_PATH = "/api/activity/sign/receiveVoucher"
 CUSTOMER_INTEGRAL_PATH = "/api/activity/front/getCustomerIntegral"
 SECKILL_RECORDS_PATH = "/api/activity/seckill/selectSeckillRecords"
 LOTTERY_WINS_PATH = "/api/cgi/operationService/front/lottery/queryWins"
 VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRecord"
+BRAND_ACTIVITY_CONFIG_PATH = "/api/activity/brand/activity/ns/selectActivityConfig"
+ACTIVITY_SIGNUP_PATH = "/api/activity/brand/activity/activitySignUp"
+ACTIVITY_SIGNUP_INFO_PATH = "/api/activity/integral/activity/selectCustomerActivitySignUpInfo"
+VOUCHER_LOTTERY_DETAIL_PATH = "/api/activity/brand/activity/ns/getVoucherLotteryDetail"
+EXCHANGE_LOTTERY_CHANCE_PATH = "/api/activity/brand/activity/exchangeLotteryChance"
+LOTTERY_KEY_COUNT_PATH = "/api/cgi/operationService/front/lottery/getLuckyKeyCount"
+LOTTERY_TURN_PATH = "/api/cgi/operationService/front/lottery/turn"
+DEFAULT_LOTTERY_ACTIVITY_CODE = os.getenv("LOTTERY_ACTIVITY_CODE", "LAKU")
+LOTTERY_SIGNUP_BATCHES = ([6], [7, 8], [9], [10])
 
 # 检查必要变量
 required_vars = [
@@ -297,7 +306,7 @@ def apply_expiry_dates(records: list[dict], expiry_lookup: dict[str, str]):
         item["status_text"] = f"未领取 {expiry_date}"
 
 def make_empty_extra_records() -> dict:
-    return {"seckill": [], "lottery": []}
+    return {"lottery": []}
 
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
@@ -392,6 +401,21 @@ def mask_account(account):
 
 def current_time_text() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+def random_delay(min_seconds: float, max_seconds: float, label: str = ""):
+    low = max(0.0, float(min_seconds))
+    high = max(low, float(max_seconds))
+    seconds = random.uniform(low, high)
+    if label:
+        log(f"{label}，等待 {seconds:.1f}s")
+    time.sleep(seconds)
+
+def env_delay_range(prefix: str, default_min: float, default_max: float) -> tuple[float, float]:
+    low = safe_float(os.getenv(f"{prefix}_MIN"), default_min)
+    high = safe_float(os.getenv(f"{prefix}_MAX"), default_max)
+    if high < low:
+        high = low
+    return low, high
 
 def get_public_ip() -> str:
     if _PUBLIC_IP_CACHE["loaded"]:
@@ -622,6 +646,8 @@ class ApiClient:
         self.banned_account = False
         self.sign_completed_at = ""
         self.activity_records = make_empty_extra_records()
+        self.lottery_activity_code = DEFAULT_LOTTERY_ACTIVITY_CODE
+        self.draw_results = []
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -682,6 +708,47 @@ class ApiClient:
             log(f"账号{self.account_index} - {tag}异常: {e}")
             return None
 
+    def _post_json_once(self, url, payload=None, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        try:
+            headers = dict(self.headers)
+            headers.setdefault("content-type", "application/json;charset=UTF-8")
+            if payload is None:
+                resp = requests.post(url, headers=headers, timeout=12)
+            else:
+                resp = requests.post(url, headers=headers, json=payload, timeout=12)
+
+            if resp.status_code != 200:
+                allow = resp.headers.get("Allow") or resp.headers.get("allow") or ""
+                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} (POST {url})"
+                if allow:
+                    msg += f" Allow={allow}"
+                log(msg)
+                if dump_body_on_error:
+                    body = redact_sensitive(truncate_text(resp.text, 2000))
+                    log(f"账号{self.account_index} - {tag}响应内容: {body}")
+                return None
+
+            try:
+                data = resp.json()
+            except Exception:
+                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 POST {url})")
+                if dump_body_on_error:
+                    body = redact_sensitive(truncate_text(resp.text, 2000))
+                    log(f"账号{self.account_index} - {tag}响应内容: {body}")
+                return None
+
+            if dump_json_on_success_false and isinstance(data, dict) and data.get("success") is False:
+                log(f"账号{self.account_index} - ⚠️ {tag}返回success=false: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
+
+            if is_risk_control_response(data):
+                self.risk_controlled = True
+                self.detail_reason = build_detail_reason(data, "抽奖失败，疑似触发活动限制")
+            return data
+
+        except Exception as e:
+            log(f"账号{self.account_index} - {tag}异常: {e}")
+            return None
+
     def get_json_retry1(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
         data = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
         if isinstance(data, dict) and data.get("success") is True:
@@ -690,6 +757,16 @@ class ApiClient:
         time.sleep(random.uniform(0.6, 1.2))
         log(f"账号{self.account_index} - 🔁 {tag}GET失败，重试一次GET...")
         data2 = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
+        return data2 if data2 is not None else data
+
+    def post_json_retry1(self, url, payload=None, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        data = self._post_json_once(url, payload=payload, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
+        if isinstance(data, dict) and data.get("success") is True:
+            return data
+
+        time.sleep(random.uniform(0.6, 1.2))
+        log(f"账号{self.account_index} - 🔁 {tag}POST失败，重试一次POST...")
+        data2 = self._post_json_once(url, payload=payload, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
         return data2 if data2 is not None else data
 
     @with_retry
@@ -717,77 +794,261 @@ class ApiClient:
         log(f"账号{self.account_index} - 金豆变更记录 {len(records)} 条")
         return records
 
-    def fetch_seckill_records(self, expiry_lookup: dict[str, str]) -> list[dict]:
-        data = self.get_json_retry1(
-            f"{self.base_url}{SECKILL_RECORDS_PATH}",
-            tag="秒杀记录",
-            dump_body_on_error=True,
-            dump_json_on_success_false=True,
-        )
+    def _build_lottery_record(self, prize: dict, draw_time: datetime | None = None, draw_index: int | None = None) -> dict:
+        draw_time = draw_time or datetime.now()
+        title = str(
+            prize.get("prizeTitle")
+            or prize.get("goodsName")
+            or prize.get("skuTitle")
+            or prize.get("title")
+            or "未知奖品"
+        ).strip()
+        expiry_date = (draw_time + timedelta(days=7)).strftime("%Y-%m-%d")
+        return {
+            "draw_index": draw_index,
+            "title": title,
+            "prize_code": str(prize.get("prizeCode") or "").strip(),
+            "win_code": str(prize.get("winCode") or "").strip(),
+            "turn_code": str(prize.get("turnCode") or "").strip(),
+            "won_at": draw_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "expiry_date": expiry_date,
+            "status_text": expiry_date,
+            "claimed": False,
+        }
+
+    def _parse_turn_prizes(self, data: dict, draw_index: int) -> list[dict]:
+        if not isinstance(data, dict):
+            return []
+        payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+        prizes = payload.get("prizeList")
+        if not isinstance(prizes, list):
+            prizes = [payload] if payload else []
+        draw_time = datetime.now()
         rows = []
-        for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:2]:
-            title = str(item.get("skuTitle") or item.get("goodsName") or "").strip()
-            status = safe_int(item.get("status"), 0)
-            claimed = status == 2
-            expiry_date = "" if claimed else find_expiry_date(title, expiry_lookup)
-            if status == 1:
-                status_text = "暂未领取"
-            elif status == 2:
-                status_text = "已经领取"
-            else:
-                status_text = str(item.get("statusText") or item.get("statusName") or "").strip()
-            if not claimed and expiry_date:
-                status_text = f"未领取 {expiry_date}"
-            rows.append({
-                "title": title,
-                "status": status,
-                "claimed": claimed,
-                "status_text": status_text,
-                "expiry_date": expiry_date,
-            })
-        log(f"账号{self.account_index} - 秒杀记录解析 {len(rows)} 条")
+        for prize in prizes:
+            if not isinstance(prize, dict):
+                continue
+            row = self._build_lottery_record(prize, draw_time=draw_time, draw_index=draw_index)
+            if payload.get("turnCode") and not row["turn_code"]:
+                row["turn_code"] = str(payload.get("turnCode") or "").strip()
+            rows.append(row)
         return rows
 
-    def fetch_lottery_wins(self, expiry_lookup: dict[str, str]) -> list[dict]:
-        data = self.get_json_retry1(
+    def fetch_lottery_wins(self) -> list[dict]:
+        data = self.post_json_retry1(
             f"{self.base_url}{LOTTERY_WINS_PATH}",
-            tag="抽奖记录",
+            payload={},
+            tag="我的中奖记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
         )
         rows = []
-        for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:3]:
-            title = str(item.get("prizeTitle") or item.get("goodsName") or "").strip()
-            is_points_prize = "金豆" in title
-            expiry_date = "" if is_points_prize else find_expiry_date(title, expiry_lookup)
-            status_text = "已经领取" if is_points_prize else "未领取"
-            if not is_points_prize and expiry_date:
-                status_text = f"未领取 {expiry_date}"
-            rows.append({
-                "title": title,
-                "claimed": is_points_prize,
-                "status_text": status_text,
-                "expiry_date": expiry_date,
-            })
-        log(f"账号{self.account_index} - 抽奖记录解析 {len(rows)} 条")
+        for index, item in enumerate([row for row in extract_data_list(data) if isinstance(row, dict)][:3], start=1):
+            created = parse_datetime_value(
+                item.get("createTime")
+                or item.get("createdAt")
+                or item.get("winTime")
+                or item.get("winningTime")
+            ) or datetime.now()
+            rows.append(self._build_lottery_record(item, draw_time=created, draw_index=index))
+        log(f"账号{self.account_index} - 我的中奖记录解析 {len(rows)} 条")
         return rows
 
     def fetch_activity_records(self) -> dict:
         try:
-            seckill_records = self.fetch_seckill_records({})
-            lottery_records = self.fetch_lottery_wins({})
-            change_records = self.fetch_voucher_change_records()
-            expiry_lookup = build_expiry_lookup(change_records)
-            apply_expiry_dates(seckill_records, expiry_lookup)
-            apply_expiry_dates(lottery_records, expiry_lookup)
-            self.activity_records = {
-                "seckill": seckill_records,
-                "lottery": lottery_records,
-            }
+            lottery_records = self.draw_results[:3]
+            if not lottery_records:
+                lottery_records = self.fetch_lottery_wins()
+            self.activity_records = {"lottery": lottery_records[:3]}
         except Exception as e:
             log(f"账号{self.account_index} - 活动记录抓取异常: {e}")
             self.activity_records = make_empty_extra_records()
         return self.activity_records
+
+    def load_brand_activity_config(self) -> str:
+        data = self.post_json_retry1(
+            f"{self.base_url}{BRAND_ACTIVITY_CONFIG_PATH}",
+            payload={},
+            tag="活动配置",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
+        common = payload.get("brandActivityCommonConfigVO") if isinstance(payload.get("brandActivityCommonConfigVO"), dict) else {}
+        activity_code = str(common.get("lotteryActivityId") or DEFAULT_LOTTERY_ACTIVITY_CODE).strip()
+        self.lottery_activity_code = activity_code or DEFAULT_LOTTERY_ACTIVITY_CODE
+        log(f"账号{self.account_index} - 抽奖活动ID: {self.lottery_activity_code}")
+        return self.lottery_activity_code
+
+    def signup_activity_batch(self, sub_activity_types: list[int]) -> bool:
+        payload = {"activityType": 2, "subActivityTypes": sub_activity_types}
+        label = ",".join(str(item) for item in sub_activity_types)
+        data = self.post_json_retry1(
+            f"{self.base_url}{ACTIVITY_SIGNUP_PATH}",
+            payload=payload,
+            tag=f"报名活动[{label}]",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        if isinstance(data, dict) and data.get("success") is True:
+            log(f"账号{self.account_index} - ✅ 报名活动[{label}]完成")
+            return True
+        message = build_detail_reason(data, default=f"报名活动[{label}]失败")
+        if "已报名" in message or "重复" in message:
+            log(f"账号{self.account_index} - ℹ️ 活动[{label}]已报名，继续后续流程")
+            return True
+        self._mark_failure(f"报名活动[{label}]失败", raw=data)
+        return False
+
+    def fetch_signup_info(self, sub_activity_types: list[int]) -> list[dict]:
+        data = self.post_json_retry1(
+            f"{self.base_url}{ACTIVITY_SIGNUP_INFO_PATH}",
+            payload={"activityType": 2, "subActivityTypes": sub_activity_types},
+            tag="报名状态",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        return [item for item in extract_data_list(data) if isinstance(item, dict)]
+
+    def signup_all_lottery_activities(self) -> bool:
+        delay_min, delay_max = env_delay_range("LOTTERY_SIGNUP_DELAY", 3, 5)
+        for index, batch in enumerate(LOTTERY_SIGNUP_BATCHES, start=1):
+            if not self.signup_activity_batch(list(batch)):
+                return False
+            self.fetch_signup_info(list(batch))
+            if index < len(LOTTERY_SIGNUP_BATCHES):
+                random_delay(delay_min, delay_max, f"账号{self.account_index} - 报名间隔")
+        return True
+
+    def get_voucher_lottery_detail(self) -> dict:
+        data = self.post_json_retry1(
+            f"{self.base_url}{VOUCHER_LOTTERY_DETAIL_PATH}",
+            payload=None,
+            tag="兑换状态",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        detail = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
+        log(
+            f"账号{self.account_index} - 兑换状态: "
+            f"status={detail.get('status')} exchangeNum={detail.get('exchangeNum')} exchangeMaxNum={detail.get('exchangeMaxNum')}"
+        )
+        return detail
+
+    def can_exchange_lottery_chance(self, detail: dict) -> bool:
+        exchange_num = safe_int(detail.get("exchangeNum"), 0)
+        exchange_max = safe_int(detail.get("exchangeMaxNum"), 3)
+        status = safe_int(detail.get("status"), 0)
+        if exchange_max > 0 and exchange_num >= exchange_max:
+            return False
+        return status in (0, 5)
+
+    def exchange_lottery_chance_once(self) -> bool:
+        data = self.post_json_retry1(
+            f"{self.base_url}{EXCHANGE_LOTTERY_CHANCE_PATH}",
+            payload={},
+            tag="兑换抽奖次数",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        if isinstance(data, dict) and data.get("success") is True:
+            log(f"账号{self.account_index} - ✅ 兑换抽奖次数成功")
+            return True
+        self._mark_failure("兑换抽奖次数失败", raw=data)
+        return False
+
+    def exchange_lottery_chances(self) -> int:
+        delay_min, delay_max = env_delay_range("LOTTERY_EXCHANGE_DELAY", 3, 5)
+        exchanged = 0
+        for _ in range(safe_int(os.getenv("LOTTERY_EXCHANGE_MAX_ATTEMPTS"), 3)):
+            detail = self.get_voucher_lottery_detail()
+            if not self.can_exchange_lottery_chance(detail):
+                log(f"账号{self.account_index} - 已无法继续兑换抽奖次数，停止兑换")
+                break
+            random_delay(delay_min, delay_max, f"账号{self.account_index} - 兑换前随机延迟")
+            if not self.exchange_lottery_chance_once():
+                break
+            exchanged += 1
+        return exchanged
+
+    def get_lucky_key_count(self) -> int:
+        data = self.post_json_retry1(
+            f"{self.base_url}{LOTTERY_KEY_COUNT_PATH}",
+            payload={"activityCode": self.lottery_activity_code},
+            tag="抽奖次数",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        payload = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else {}
+        count = safe_int(payload.get("count"), 0)
+        log(f"账号{self.account_index} - 当前可用抽奖次数: {count}")
+        return count
+
+    def turn_lottery_once(self, draw_index: int) -> list[dict]:
+        data = self.post_json_retry1(
+            f"{self.base_url}{LOTTERY_TURN_PATH}",
+            payload={"clientType": "WEB", "activityCode": self.lottery_activity_code},
+            tag=f"抽奖{draw_index}",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        if not (isinstance(data, dict) and data.get("success") is True):
+            self._mark_failure(f"抽奖{draw_index}失败", raw=data)
+            return []
+        prizes = self._parse_turn_prizes(data, draw_index)
+        if prizes:
+            names = "、".join(item["title"] for item in prizes)
+            log(f"账号{self.account_index} - 🎉 抽奖{draw_index}获得: {names}")
+        else:
+            log(f"账号{self.account_index} - ⚠️ 抽奖{draw_index}成功但未解析到奖品")
+        return prizes
+
+    def draw_lottery_chances(self) -> list[dict]:
+        delay_min, delay_max = env_delay_range("LOTTERY_DRAW_DELAY", 7, 10)
+        max_draws = safe_int(os.getenv("LOTTERY_MAX_DRAWS"), 3)
+        count = min(self.get_lucky_key_count(), max_draws)
+        results = []
+        for draw_index in range(1, count + 1):
+            random_delay(delay_min, delay_max, f"账号{self.account_index} - 抽奖{draw_index}前随机延迟")
+            prizes = self.turn_lottery_once(draw_index)
+            results.extend(prizes)
+            self.draw_results = results[:3]
+            if draw_index < count:
+                self.get_lucky_key_count()
+        return results[:3]
+
+    def execute_lottery_process(self):
+        time.sleep(random.uniform(1, 2))
+        self.initial_points = self.get_points() or 0
+        self.load_brand_activity_config()
+
+        if not self.signup_all_lottery_activities():
+            return False
+
+        exchanged = self.exchange_lottery_chances()
+        draw_records = self.draw_lottery_chances()
+        self.draw_results = draw_records[:3]
+
+        time.sleep(random.uniform(1, 2))
+        self.final_points = self.get_points() or self.initial_points
+        self.points_reward = self.final_points - self.initial_points
+        self.sign_completed_at = current_time_text()
+        self.has_reward = bool(draw_records)
+
+        if draw_records:
+            self.sign_status = f"抽奖完成，获得{len(draw_records)}个奖品"
+            self.detail_reason = ""
+            return True
+
+        remaining = self.get_lucky_key_count()
+        if exchanged == 0 and remaining == 0:
+            self.sign_status = "已无可兑换/抽奖次数"
+            self.detail_reason = "兑换次数已达上限或没有可用抽奖次数"
+            return True
+
+        self.sign_status = "抽奖完成但未解析到奖品"
+        self.detail_reason = "抽奖接口未返回可解析的 prizeList"
+        return False
 
     def execute_banned_process(self):
         self.banned_account = True
@@ -796,7 +1057,7 @@ class ApiClient:
         self.final_points = points or 0.0
         self.points_reward = 0.0
         self.sign_status = "账号封禁"
-        self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
+        self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过抽奖"
         return True
 
     def get_sign_config(self):
@@ -926,6 +1187,8 @@ class ApiClient:
         return False
 
     def execute_full_process(self):
+        return self.execute_lottery_process()
+
         time.sleep(random.uniform(1, 2))
         self.initial_points = self.get_points() or 0
         time.sleep(random.uniform(1, 2))
