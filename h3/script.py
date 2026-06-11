@@ -27,6 +27,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
+SCRIPT_VERSION = "2026-06-11-post-record-api-v2"
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -729,6 +730,7 @@ class ApiClient:
         payloads = payloads or [{}]
         last_data = None
         first_success = None
+        log(f"账号{self.account_index} - {tag}使用POST查询，候选参数 {len(payloads)} 组")
         for index, payload in enumerate(payloads, start=1):
             data = self._post_json_once(
                 url,
@@ -1562,6 +1564,7 @@ def main():
     enable_failure_exit = len(sys.argv) >= 4 and sys.argv[3].lower() == 'true'
 
     log(f"失败退出功能: {'开启' if enable_failure_exit else '关闭'}")
+    log(f"脚本版本: {SCRIPT_VERSION}")
     if len(usernames) != len(passwords):
         log("❌ 账号与密码数量不匹配!")
         sys.exit(1)
