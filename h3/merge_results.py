@@ -51,7 +51,13 @@ def score(row: dict):
 def pick_result(initial: dict, retry: dict | None):
     if retry is None:
         return initial
-    return retry if score(retry) >= score(initial) else initial
+    picked = retry if score(retry) >= score(initial) else initial
+    fallback = initial if picked is retry else retry
+    if fallback:
+        for key in ("activity_records", "final_points", "sign_time", "sign_completed_at"):
+            if not picked.get(key) and fallback.get(key):
+                picked[key] = fallback[key]
+    return picked
 
 
 def main():
@@ -88,15 +94,18 @@ def main():
 
     group_name = ""
     group_number = 0
+    task_start_date = ""
     if merged:
         group_name = merged[0].get("group_name") or merged[0].get("_group_name") or merged[0].get("_batch_name") or ""
         group_number = safe_int(merged[0].get("group_number", merged[0].get("_group_number")), 0)
+        task_start_date = str(merged[0].get("task_start_date") or "").strip()
 
     payload = {
         "generated_at": datetime.now().isoformat(),
         "batch_name": group_name,
         "group_name": group_name,
         "group_number": group_number,
+        "task_start_date": task_start_date,
         "total_accounts": len(merged),
         "results": [],
     }
@@ -119,11 +128,16 @@ def main():
                 "has_reward": truthy(row.get("has_reward")),
                 "password_error": truthy(row.get("password_error")),
                 "risk_controlled": truthy(row.get("risk_controlled")),
+                "banned_account": truthy(row.get("banned_account")),
+                "next_day_success": truthy(row.get("next_day_success")),
+                "task_start_date": row.get("task_start_date", ""),
+                "sign_completed_at": row.get("sign_completed_at", ""),
                 "retry_count": safe_int(row.get("retry_count"), 0),
                 "is_final_retry": truthy(row.get("is_final_retry")),
                 "detail_reason": row.get("detail_reason", ""),
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
+                "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
             }
         )
 

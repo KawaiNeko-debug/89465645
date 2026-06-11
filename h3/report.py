@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import re
 import smtplib
 import ssl
 import sys
@@ -30,6 +31,15 @@ except Exception:
 
 RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "签到失败，疑似违反签到规则").strip()
 
+STATUS_RED_FILL = PatternFill("solid", fgColor="F8696B")
+STATUS_YELLOW_FILL = PatternFill("solid", fgColor="FFD966")
+STATUS_BLUE_FILL = PatternFill("solid", fgColor="9DC3E6")
+STATUS_GREEN_FILL = PatternFill("solid", fgColor="C6E0B4")
+FONT_GREEN = Font(color="008000")
+FONT_RED = Font(color="C00000")
+FONT_BLUE = Font(color="1F4E79")
+FONT_DARK = Font(color="000000")
+
 
 def truthy(value) -> bool:
     if value is True:
@@ -53,6 +63,11 @@ def safe_float(value, default=0.0) -> float:
         return float(str(value).strip())
     except Exception:
         return default
+
+
+def date_part(value="") -> str:
+    match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
+    return match.group(0) if match else ""
 
 
 def default_group_name(group_number: int) -> str:
@@ -125,6 +140,29 @@ def record_key(record: dict):
     return None
 
 
+def normalize_activity_records(value) -> dict:
+    if not isinstance(value, dict):
+        return {"seckill": [], "lottery": []}
+
+    normalized = {"seckill": [], "lottery": []}
+    for key, limit in (("seckill", 2), ("lottery", 3)):
+        rows = value.get(key)
+        if not isinstance(rows, list):
+            continue
+        for item in rows[:limit]:
+            if not isinstance(item, dict):
+                continue
+            normalized[key].append(
+                {
+                    "title": str(item.get("title") or item.get("skuTitle") or item.get("prizeTitle") or "").strip(),
+                    "status_text": str(item.get("status_text") or "").strip(),
+                    "claimed": truthy(item.get("claimed")),
+                    "expiry_date": str(item.get("expiry_date") or "").strip(),
+                }
+            )
+    return normalized
+
+
 def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int, int], str]) -> dict:
     group_number = safe_int(record.get("group_number", payload.get("group_number")), 0)
     account_index = safe_int(record.get("account_index"), 0)
@@ -138,6 +176,11 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     risk_controlled = truthy(record.get("risk_controlled")) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in detail_reason)
     group_name = str(record.get("group_name") or payload.get("group_name") or payload.get("batch_name") or default_group_name(group_number)).strip()
     group_position = str(record.get("group_position") or default_group_position(group_number, account_index)).strip()
+    task_start_date = str(record.get("task_start_date") or payload.get("task_start_date") or "").strip()
+    sign_time = str(record.get("sign_time") or record.get("sign_completed_at") or "").strip()
+    next_day_success = truthy(record.get("next_day_success")) or (
+        truthy(record.get("sign_success")) and date_part(task_start_date) and date_part(sign_time) and date_part(sign_time) > date_part(task_start_date)
+    )
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
@@ -153,11 +196,16 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "has_reward": truthy(record.get("has_reward")),
         "password_error": truthy(record.get("password_error")),
         "risk_controlled": risk_controlled,
+        "banned_account": truthy(record.get("banned_account")),
+        "next_day_success": next_day_success,
+        "task_start_date": task_start_date,
+        "sign_completed_at": str(record.get("sign_completed_at") or "").strip(),
         "retry_count": safe_int(record.get("retry_count"), 0),
         "is_final_retry": truthy(record.get("is_final_retry")),
         "detail_reason": detail_reason,
-        "sign_time": str(record.get("sign_time") or "").strip(),
+        "sign_time": sign_time,
         "sign_ip": str(record.get("sign_ip") or "").strip(),
+        "activity_records": normalize_activity_records(record.get("activity_records")),
     }
 
 
@@ -201,11 +249,16 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "has_reward": False,
         "password_error": False,
         "risk_controlled": False,
+        "banned_account": False,
+        "next_day_success": False,
+        "task_start_date": "",
+        "sign_completed_at": "",
         "retry_count": 0,
         "is_final_retry": False,
         "detail_reason": "缺少签到结果",
         "sign_time": "",
         "sign_ip": "",
+        "activity_records": {"seckill": [], "lottery": []},
     }
 
 
@@ -246,6 +299,10 @@ def merge_records_with_expected(records: list[dict], account_lookup: dict[tuple[
 
 def status_label(record: dict) -> str:
     raw_status = str(record.get("sign_status") or "")
+    if truthy(record.get("banned_account")):
+        return "账号封禁"
+    if truthy(record.get("next_day_success")):
+        return "签到成功但次日"
     if truthy(record.get("risk_controlled")):
         return "签到风控"
     if truthy(record.get("sign_success")):
@@ -267,20 +324,31 @@ def detail_reason(record: dict) -> str:
 
 
 def detail_text(record: dict) -> str:
+    if truthy(record.get("banned_account")):
+        return str(record.get("detail_reason") or "账号在封禁列表中，已跳过签到").strip()
     if truthy(record.get("sign_success")):
         return str(record.get("sign_status") or "签到成功").strip()
     return detail_reason(record)
 
 
 def is_problem_record(record: dict) -> bool:
-    return not truthy(record.get("sign_success"))
+    return status_sort_bucket(record) == 0
+
+
+def status_sort_bucket(record: dict) -> int:
+    label = status_label(record)
+    if label in {"签到失败", "签到异常", "签到风控"}:
+        return 0
+    if label == "签到成功但次日":
+        return 1
+    return 2
 
 
 def sort_records(records: list[dict]) -> list[dict]:
     return sorted(
         records,
         key=lambda item: (
-            0 if is_problem_record(item) else 1,
+            status_sort_bucket(item),
             -safe_float(item.get("final_points"), 0.0),
             safe_int(item.get("group_number"), 999999),
             safe_int(item.get("account_index"), 999999),
@@ -295,7 +363,9 @@ def format_percent(value: float) -> str:
 
 def build_summary(records: list[dict], expected_total: int) -> dict:
     total = expected_total or len(records)
-    success = sum(1 for item in records if truthy(item.get("sign_success")))
+    success = sum(1 for item in records if status_label(item) in {"签到成功", "签到成功但次日"})
+    banned = sum(1 for item in records if status_label(item) == "账号封禁")
+    next_day = sum(1 for item in records if status_label(item) == "签到成功但次日")
     risk = sum(1 for item in records if status_label(item) == "签到风控")
     failed = sum(1 for item in records if status_label(item) == "签到失败")
     abnormal = sum(1 for item in records if status_label(item) == "签到异常")
@@ -304,6 +374,8 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
     return {
         "total": total,
         "success": success,
+        "banned": banned,
+        "next_day": next_day,
         "risk": risk,
         "failed": failed,
         "abnormal": abnormal,
@@ -318,6 +390,8 @@ def build_stats_lines(summary: dict) -> list[str]:
         "📈 总体统计",
         f"  ├── 总账号数: {summary['total']}",
         f"  ├── 签到成功: {summary['success']}/{summary['total']}",
+        f"  ├── 次日成功: {summary['next_day']}",
+        f"  ├── 账号封禁: {summary['banned']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
@@ -362,14 +436,84 @@ def color_for_points(points: float):
 
 
 def font_for_status(label: str) -> Font:
-    return Font(color="008000" if label == "签到成功" else "C00000")
+    if label in {"签到失败", "签到异常", "签到风控"}:
+        return Font(color="FFFFFF", bold=True)
+    if label == "签到成功但次日":
+        return Font(color="9C6500", bold=True)
+    if label == "账号封禁":
+        return Font(color="FFFFFF", bold=True)
+    if label == "签到成功":
+        return FONT_GREEN
+    return FONT_DARK
+
+
+def fill_for_status(label: str):
+    if label in {"签到失败", "签到异常", "签到风控"}:
+        return STATUS_RED_FILL
+    if label == "签到成功但次日":
+        return STATUS_YELLOW_FILL
+    if label == "账号封禁":
+        return STATUS_BLUE_FILL
+    return None
+
+
+def font_for_claim_status(value: str) -> Font:
+    text = str(value or "")
+    if "已经领取" in text:
+        return FONT_GREEN
+    if "未领取" in text or "暂未领取" in text:
+        return FONT_RED
+    return FONT_DARK
+
+
+def activity_status_text(item: dict) -> str:
+    status_text = str(item.get("status_text") or "").strip()
+    if status_text:
+        return status_text
+    if truthy(item.get("claimed")):
+        return "已经领取"
+    expiry_date = str(item.get("expiry_date") or "").strip()
+    return f"未领取 {expiry_date}".strip() if expiry_date else "未领取"
+
+
+def activity_columns(record: dict) -> list[str]:
+    activity = normalize_activity_records(record.get("activity_records"))
+    values = []
+    for key, limit in (("seckill", 2), ("lottery", 3)):
+        rows = activity.get(key) or []
+        for index in range(limit):
+            item = rows[index] if index < len(rows) else {}
+            if item:
+                values.extend([str(item.get("title") or "").strip(), activity_status_text(item)])
+            else:
+                values.extend(["", ""])
+    return values
 
 
 def write_xlsx(path: str, records: list[dict]):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "签到汇总"
-    headers = ["序号", "金豆数量", "账户", "组别", "签到情况", "详细原因", "签到时间", "签到IP"]
+    headers = [
+        "序号",
+        "金豆数量",
+        "账户",
+        "组别",
+        "签到情况",
+        "详细原因",
+        "签到时间",
+        "签到IP",
+        "秒杀一",
+        "领取情况",
+        "秒杀二",
+        "领取情况",
+        "抽奖一",
+        "领取情况",
+        "抽奖二",
+        "领取情况",
+        "抽奖三",
+        "领取情况",
+    ]
     sheet.append(headers)
 
     header_fill = PatternFill("solid", fgColor="D9E2F3")
@@ -394,7 +538,7 @@ def write_xlsx(path: str, records: list[dict]):
             detail_text(record),
             str(record.get("sign_time") or ""),
             str(record.get("sign_ip") or ""),
-        ]
+        ] + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
         for cell in sheet[row_index]:
@@ -407,14 +551,40 @@ def write_xlsx(path: str, records: list[dict]):
         sheet.cell(row_index, 7).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 8).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 6).alignment = Alignment(vertical="center", wrap_text=True)
+        for column_index in range(9, 19):
+            sheet.cell(row_index, column_index).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 2).number_format = "0.0"
         fill = color_for_points(safe_float(record.get("final_points"), 0.0))
         if fill:
             sheet.cell(row_index, 2).fill = fill
+        status_fill = fill_for_status(label)
+        if status_fill:
+            sheet.cell(row_index, 5).fill = status_fill
         sheet.cell(row_index, 5).font = font_for_status(label)
+        for column_index in (10, 12, 14, 16, 18):
+            sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
     sheet.freeze_panes = "A2"
-    widths = {"A": 8, "B": 14, "C": 24, "D": 16, "E": 14, "F": 36, "G": 14, "H": 18}
+    widths = {
+        "A": 8,
+        "B": 14,
+        "C": 24,
+        "D": 16,
+        "E": 18,
+        "F": 36,
+        "G": 20,
+        "H": 18,
+        "I": 28,
+        "J": 18,
+        "K": 28,
+        "L": 18,
+        "M": 28,
+        "N": 18,
+        "O": 28,
+        "P": 18,
+        "Q": 28,
+        "R": 18,
+    }
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 

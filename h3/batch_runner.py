@@ -100,6 +100,11 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "has_reward": False,
         "password_error": False,
         "risk_controlled": False,
+        "banned_account": False,
+        "next_day_success": False,
+        "task_start_date": os.getenv("SIGN_TASK_START_DATE", ""),
+        "sign_completed_at": "",
+        "activity_records": {"seckill": [], "lottery": []},
         "retry_count": 0,
         "is_final_retry": False,
         "detail_reason": reason,
@@ -136,6 +141,11 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "has_reward": truthy(raw.get("has_reward")),
             "password_error": truthy(raw.get("password_error")),
             "risk_controlled": truthy(raw.get("risk_controlled")),
+            "banned_account": truthy(raw.get("banned_account")),
+            "next_day_success": truthy(raw.get("next_day_success")),
+            "task_start_date": str(raw.get("task_start_date") or "").strip(),
+            "sign_completed_at": str(raw.get("sign_completed_at") or "").strip(),
+            "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": []},
             "retry_count": safe_int(raw.get("retry_count"), 0),
             "is_final_retry": truthy(raw.get("is_final_retry")),
             "detail_reason": str(raw.get("detail_reason") or "").strip(),
@@ -197,6 +207,7 @@ def run_single_account(account: dict, temp_dir: str) -> dict:
     env["ACCOUNT_INDEX"] = str(account["account_index"])
     env["GROUP_NAME"] = account.get("group_name", "")
     env["GROUP_NUMBER"] = str(account.get("group_number", 0))
+    env["SIGN_TASK_START_DATE"] = os.getenv("SIGN_TASK_START_DATE") or datetime.now().strftime("%Y-%m-%d")
 
     command = [sys.executable, SCRIPT_PATH, account["username"], account["password"], "false"]
     completed = subprocess.run(command, cwd=os.getcwd(), env=env, check=False)
@@ -223,11 +234,16 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "has_reward": item["has_reward"],
                 "password_error": item["password_error"],
                 "risk_controlled": item["risk_controlled"],
+                "banned_account": item.get("banned_account", False),
+                "next_day_success": item.get("next_day_success", False),
+                "task_start_date": item.get("task_start_date", ""),
+                "sign_completed_at": item.get("sign_completed_at", ""),
                 "retry_count": item["retry_count"],
                 "is_final_retry": item["is_final_retry"],
                 "detail_reason": item["detail_reason"],
                 "sign_time": item.get("sign_time", ""),
                 "sign_ip": item.get("sign_ip", ""),
+                "activity_records": item.get("activity_records") or {"seckill": [], "lottery": []},
                 "pause_applied": item["pause_applied"],
             }
         )
@@ -236,6 +252,7 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
         "batch_name": os.getenv("BATCH_NAME", "") or os.getenv("GROUP_NAME", ""),
         "group_name": os.getenv("GROUP_NAME", "") or os.getenv("BATCH_NAME", ""),
         "group_number": safe_int(os.getenv("GROUP_NUMBER"), 0),
+        "task_start_date": os.getenv("SIGN_TASK_START_DATE", ""),
         "total_accounts": len(results),
         "risk_pause_seconds": controller.pause_seconds,
         "risk_pause_count": controller.pause_count,
@@ -251,12 +268,14 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
 
 def print_summary(results: list[dict], controller: PauseController):
     success_count = sum(1 for item in results if item["sign_success"])
+    banned_count = sum(1 for item in results if item.get("banned_account"))
     risk_count = sum(1 for item in results if item["risk_controlled"] and not item["sign_success"])
-    failed_count = sum(1 for item in results if not item["sign_success"])
+    failed_count = sum(1 for item in results if not item["sign_success"] and not item.get("banned_account"))
     total_reward = sum(safe_float(item["points_reward"], 0.0) for item in results)
     log("=" * 60)
     log(f"批次总账号数: {len(results)}")
     log(f"签到成功: {success_count}")
+    log(f"账号封禁: {banned_count}")
     log(f"签到风控: {risk_count}")
     log(f"签到失败: {failed_count}")
     log(f"总奖励: +{total_reward:.1f} 金豆")
@@ -290,7 +309,7 @@ def main():
         write_batch_result(result_json_path, results, controller)
         print_summary(results, controller)
 
-        if enable_failure_exit and any(not item["sign_success"] for item in results):
+        if enable_failure_exit and any(not item["sign_success"] and not item.get("banned_account") for item in results):
             sys.exit(1)
         sys.exit(0)
     finally:
