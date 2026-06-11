@@ -1,0 +1,28 @@
+name: 空
+
+on:
+  schedule:
+    - cron: '0 0 */7 * *'  # 每7天运行一次
+  workflow_dispatch:
+
+permissions:
+  contents: write  # 需要写入权限
+
+jobs:
+  empty-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 配置 Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 空
+        run: |
+          git commit --allow-empty -m "空 [skip ci]"
+          git push origin HEAD:${GITHUB_REF#refs/heads/}

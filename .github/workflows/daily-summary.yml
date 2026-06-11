@@ -1,0 +1,72 @@
+﻿name: daily-summary
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["sign-batch4"]
+    types: [completed]
+
+env:
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  summary:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install summary deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests openpyxl
+
+      - name: Fetch batch results
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TARGET_DATE_HINT: ${{ github.event.workflow_run.created_at }}
+        run: |
+          python h3/fetch_results.py results
+
+      - name: Build report and notify
+        env:
+          OUTPUT_XLSX_PATH: results/sign-summary.xlsx
+          NOTIFY_CHANNELS: telegram
+          TELEGRAM_SEND_TEXT: "true"
+          TELEGRAM_SEND_XLSX: "true"
+          ACCOUNTS_BATCH1: ${{ secrets.ACCOUNTS_BATCH1 }}
+          ACCOUNTS_BATCH2: ${{ secrets.ACCOUNTS_BATCH2 }}
+          ACCOUNTS_BATCH3: ${{ secrets.ACCOUNTS_BATCH3 }}
+          ACCOUNTS_BATCH4: ${{ secrets.ACCOUNTS_BATCH4 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_SSL }}
+        run: |
+          python h3/report.py results
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-summary
+          path: results/manifest.json
+          if-no-files-found: ignore
+          retention-days: 2
