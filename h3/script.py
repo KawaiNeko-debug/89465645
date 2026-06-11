@@ -57,6 +57,12 @@ CUSTOMER_INTEGRAL_PATH = "/api/activity/front/getCustomerIntegral"
 SECKILL_RECORDS_PATH = "/api/activity/seckill/selectSeckillRecords"
 LOTTERY_WINS_PATH = "/api/cgi/operationService/front/lottery/queryWins"
 VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRecord"
+RECORD_POST_PAYLOADS = [
+    {"pageNum": 1, "pageSize": 10},
+    {"pageNo": 1, "pageSize": 10},
+    {"current": 1, "size": 10},
+    {},
+]
 
 # 检查必要变量
 required_vars = [
@@ -646,15 +652,23 @@ class ApiClient:
             log(f"账号{self.account_index} - 🔄 token 刷新失败: {e}")
         return False
 
-    def _get_json_once(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+    def _request_json_once(self, method, url, tag="API", payload=None, dump_body_on_error=False, dump_json_on_success_false=True):
+        method = str(method or "GET").upper()
         try:
-            resp = requests.get(url, headers=self.headers, timeout=12)
+            headers = dict(self.headers)
+            if method == "POST":
+                headers.setdefault("content-type", "application/json;charset=UTF-8")
+                resp = requests.post(url, headers=headers, json=payload or {}, timeout=20)
+            else:
+                resp = requests.get(url, headers=headers, timeout=12)
 
             if resp.status_code != 200:
                 allow = resp.headers.get("Allow") or resp.headers.get("allow") or ""
-                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} (GET {url})"
+                msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} ({method} {url})"
                 if allow:
                     msg += f" Allow={allow}"
+                if method == "POST":
+                    msg += f" payload={redact_sensitive(truncate_text(json.dumps(payload or {}, ensure_ascii=False), 500))}"
                 log(msg)
                 if dump_body_on_error:
                     body = redact_sensitive(truncate_text(resp.text, 2000))
@@ -664,7 +678,7 @@ class ApiClient:
             try:
                 data = resp.json()
             except Exception:
-                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 GET {url})")
+                log(f"账号{self.account_index} - {tag}响应JSON解析失败 (200 {method} {url})")
                 if dump_body_on_error:
                     body = redact_sensitive(truncate_text(resp.text, 2000))
                     log(f"账号{self.account_index} - {tag}响应内容: {body}")
@@ -682,6 +696,25 @@ class ApiClient:
             log(f"账号{self.account_index} - {tag}异常: {e}")
             return None
 
+    def _get_json_once(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        return self._request_json_once(
+            "GET",
+            url,
+            tag=tag,
+            dump_body_on_error=dump_body_on_error,
+            dump_json_on_success_false=dump_json_on_success_false,
+        )
+
+    def _post_json_once(self, url, payload=None, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
+        return self._request_json_once(
+            "POST",
+            url,
+            tag=tag,
+            payload=payload or {},
+            dump_body_on_error=dump_body_on_error,
+            dump_json_on_success_false=dump_json_on_success_false,
+        )
+
     def get_json_retry1(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
         data = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
         if isinstance(data, dict) and data.get("success") is True:
@@ -691,6 +724,35 @@ class ApiClient:
         log(f"账号{self.account_index} - 🔁 {tag}GET失败，重试一次GET...")
         data2 = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
         return data2 if data2 is not None else data
+
+    def post_json_retry_candidates(self, url, payloads=None, tag="API", dump_body_on_error=False, dump_json_on_success_false=True, prefer_records=False):
+        payloads = payloads or [{}]
+        last_data = None
+        first_success = None
+        for index, payload in enumerate(payloads, start=1):
+            data = self._post_json_once(
+                url,
+                payload=payload,
+                tag=tag,
+                dump_body_on_error=dump_body_on_error,
+                dump_json_on_success_false=dump_json_on_success_false,
+            )
+            if isinstance(data, dict) and data.get("success") is True:
+                if first_success is None:
+                    first_success = data
+                if not prefer_records or extract_data_list(data):
+                    return data
+                log(f"账号{self.account_index} - {tag}POST成功但列表为空，继续尝试兼容参数...")
+                last_data = data
+                continue
+            if isinstance(data, dict) and data.get("success") is None and extract_data_list(data):
+                return data
+            if data is not None:
+                last_data = data
+            if index < len(payloads):
+                time.sleep(random.uniform(0.4, 0.9))
+                log(f"账号{self.account_index} - 🔁 {tag}POST未成功，尝试下一组参数...")
+        return first_success or last_data
 
     @with_retry
     def get_points(self):
@@ -707,22 +769,26 @@ class ApiClient:
         return None
 
     def fetch_voucher_change_records(self) -> list[dict]:
-        data = self.get_json_retry1(
+        data = self.post_json_retry_candidates(
             f"{self.base_url}{VOUCHER_CHANGE_RECORD_PATH}",
+            payloads=RECORD_POST_PAYLOADS,
             tag="金豆变更记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
+            prefer_records=True,
         )
         records = [item for item in extract_data_list(data) if isinstance(item, dict)]
         log(f"账号{self.account_index} - 金豆变更记录 {len(records)} 条")
         return records
 
     def fetch_seckill_records(self, expiry_lookup: dict[str, str]) -> list[dict]:
-        data = self.get_json_retry1(
+        data = self.post_json_retry_candidates(
             f"{self.base_url}{SECKILL_RECORDS_PATH}",
+            payloads=RECORD_POST_PAYLOADS,
             tag="秒杀记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
+            prefer_records=True,
         )
         rows = []
         for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:2]:
@@ -749,11 +815,13 @@ class ApiClient:
         return rows
 
     def fetch_lottery_wins(self, expiry_lookup: dict[str, str]) -> list[dict]:
-        data = self.get_json_retry1(
+        data = self.post_json_retry_candidates(
             f"{self.base_url}{LOTTERY_WINS_PATH}",
+            payloads=RECORD_POST_PAYLOADS,
             tag="抽奖记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
+            prefer_records=True,
         )
         rows = []
         for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:3]:
