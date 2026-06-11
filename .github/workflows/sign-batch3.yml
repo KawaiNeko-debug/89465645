@@ -65,6 +65,8 @@ jobs:
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
+      SECKILL_CATEGORY_ACCESS_IDS: ${{ secrets.SECKILL_CATEGORY_ACCESS_IDS }}
+      LOTTERY_ACTIVITY_CODE: ${{ secrets.LOTTERY_ACTIVITY_CODE }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
       GROUP_NAME: batch3
       GROUP_NUMBER: "3"
@@ -252,6 +254,8 @@ jobs:
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
+      SECKILL_CATEGORY_ACCESS_IDS: ${{ secrets.SECKILL_CATEGORY_ACCESS_IDS }}
+      LOTTERY_ACTIVITY_CODE: ${{ secrets.LOTTERY_ACTIVITY_CODE }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
       GROUP_NAME: batch3
       GROUP_NUMBER: "3"

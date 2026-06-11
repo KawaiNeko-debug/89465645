@@ -27,7 +27,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-11-post-record-api-v2"
+SCRIPT_VERSION = "2026-06-11-activity-config-v3"
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -58,6 +58,8 @@ CUSTOMER_INTEGRAL_PATH = "/api/activity/front/getCustomerIntegral"
 SECKILL_RECORDS_PATH = "/api/activity/seckill/selectSeckillRecords"
 LOTTERY_WINS_PATH = "/api/cgi/operationService/front/lottery/queryWins"
 VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRecord"
+BRAND_ACTIVITY_CONFIG_PATH = "/api/activity/brand/activity/ns/selectActivityConfig"
+SECKILL_GOODS_PATH = "/api/activity/seckill/ns/getSeckillGoods"
 RECORD_POST_PAYLOADS = [
     {"pageNum": 1, "pageSize": 10},
     {"pageNo": 1, "pageSize": 10},
@@ -254,6 +256,44 @@ def extract_data_list(payload) -> list:
             if nested:
                 return nested
     return []
+
+def parse_string_list(raw=None) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    text = str(raw).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, (list, tuple, set)):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [item.strip() for item in re.split(r"[,;\n\r]+", text) if item.strip()]
+
+def find_values_by_key(payload, target_keys: set[str]) -> list:
+    found = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key in target_keys and value not in (None, ""):
+                found.append(value)
+            found.extend(find_values_by_key(value, target_keys))
+    elif isinstance(payload, list):
+        for item in payload:
+            found.extend(find_values_by_key(item, target_keys))
+    return found
+
+def unique_text_values(values) -> list[str]:
+    result = []
+    seen = set()
+    for value in values:
+        text = str(value).strip()
+        if text and text not in seen:
+            result.append(text)
+            seen.add(text)
+    return result
 
 def parse_datetime_value(value):
     text = str(value or "").strip()
@@ -629,6 +669,7 @@ class ApiClient:
         self.banned_account = False
         self.sign_completed_at = ""
         self.activity_records = make_empty_extra_records()
+        self.brand_activity_config = None
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -783,10 +824,59 @@ class ApiClient:
         log(f"账号{self.account_index} - 金豆变更记录 {len(records)} 条")
         return records
 
-    def fetch_seckill_records(self, expiry_lookup: dict[str, str]) -> list[dict]:
+    def fetch_brand_activity_config(self) -> dict:
+        if isinstance(self.brand_activity_config, dict):
+            return self.brand_activity_config
+        data = self.post_json_retry_candidates(
+            f"{self.base_url}{BRAND_ACTIVITY_CONFIG_PATH}",
+            payloads=[{}],
+            tag="品牌活动配置",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+        self.brand_activity_config = data if isinstance(data, dict) else {}
+        return self.brand_activity_config
+
+    def get_seckill_category_ids(self, config=None) -> list[str]:
+        configured = parse_string_list(os.getenv("SECKILL_CATEGORY_ACCESS_IDS") or os.getenv("SECKILL_CATEGORY_ACCESS_ID"))
+        if configured:
+            log(f"账号{self.account_index} - 使用环境变量中的秒杀分类ID: {', '.join(configured)}")
+            return configured
+        config = config if isinstance(config, dict) else self.fetch_brand_activity_config()
+        values = find_values_by_key(config, {"seckillActivityId", "categoryAccessId"})
+        ids = unique_text_values(values)
+        if ids:
+            log(f"账号{self.account_index} - 从活动配置发现秒杀分类ID: {', '.join(ids)}")
+        else:
+            log(f"账号{self.account_index} - 未发现秒杀分类ID，跳过秒杀记录查询")
+        return ids
+
+    def get_lottery_activity_code(self, config=None) -> str:
+        configured = (os.getenv("LOTTERY_ACTIVITY_CODE") or "").strip()
+        if configured:
+            log(f"账号{self.account_index} - 使用环境变量中的抽奖活动码: {configured}")
+            return configured
+        config = config if isinstance(config, dict) else self.fetch_brand_activity_config()
+        values = find_values_by_key(config, {"lotteryActivityId", "activityCode"})
+        codes = unique_text_values(values)
+        if codes:
+            log(f"账号{self.account_index} - 从活动配置发现抽奖活动码: {codes[0]}")
+            return codes[0]
+        log(f"账号{self.account_index} - 未发现抽奖活动码，抽奖记录将尝试通用查询")
+        return ""
+
+    def fetch_seckill_records(self, expiry_lookup: dict[str, str], category_ids=None) -> list[dict]:
+        category_ids = unique_text_values(category_ids or self.get_seckill_category_ids())
+        if not category_ids:
+            return []
+        payloads = [
+            {"categoryAccessIds": category_ids},
+            {"categoryAccessIds": category_ids, "pageNum": 1, "pageSize": 20},
+            {"categoryAccessIds": category_ids, "pageNo": 1, "pageSize": 20},
+        ]
         data = self.post_json_retry_candidates(
             f"{self.base_url}{SECKILL_RECORDS_PATH}",
-            payloads=RECORD_POST_PAYLOADS,
+            payloads=payloads,
             tag="秒杀记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
@@ -816,10 +906,21 @@ class ApiClient:
         log(f"账号{self.account_index} - 秒杀记录解析 {len(rows)} 条")
         return rows
 
-    def fetch_lottery_wins(self, expiry_lookup: dict[str, str]) -> list[dict]:
+    def fetch_lottery_wins(self, expiry_lookup: dict[str, str], activity_code="") -> list[dict]:
+        activity_code = str(activity_code or self.get_lottery_activity_code()).strip()
+        payloads = [
+            {"pageNum": 1, "pageSize": 1000, "activityCode": activity_code},
+            {"pageNum": 1, "pageSize": 1000},
+            {"pageNo": 1, "pageSize": 1000, "activityCode": activity_code},
+            {},
+        ] if activity_code else [
+            {"pageNum": 1, "pageSize": 1000},
+            {"pageNo": 1, "pageSize": 1000},
+            {},
+        ]
         data = self.post_json_retry_candidates(
             f"{self.base_url}{LOTTERY_WINS_PATH}",
-            payloads=RECORD_POST_PAYLOADS,
+            payloads=payloads,
             tag="抽奖记录",
             dump_body_on_error=True,
             dump_json_on_success_false=True,
@@ -844,8 +945,11 @@ class ApiClient:
 
     def fetch_activity_records(self) -> dict:
         try:
-            seckill_records = self.fetch_seckill_records({})
-            lottery_records = self.fetch_lottery_wins({})
+            config = self.fetch_brand_activity_config()
+            seckill_category_ids = self.get_seckill_category_ids(config)
+            lottery_activity_code = self.get_lottery_activity_code(config)
+            seckill_records = self.fetch_seckill_records({}, seckill_category_ids)
+            lottery_records = self.fetch_lottery_wins({}, lottery_activity_code)
             change_records = self.fetch_voucher_change_records()
             expiry_lookup = build_expiry_lookup(change_records)
             apply_expiry_dates(seckill_records, expiry_lookup)
