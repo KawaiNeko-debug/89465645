@@ -137,7 +137,7 @@ def main():
                 "detail_reason": row.get("detail_reason", ""),
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
-                "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "activity_records": row.get("activity_records") or {"lottery": []},
             }
         )
 

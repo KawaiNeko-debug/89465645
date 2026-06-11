@@ -180,12 +180,12 @@ def load_results(results_dir: str) -> list[dict]:
 
 def is_success_record(r: dict) -> bool:
     """
-    兼容极端情况下 sign_success 没写对，但 sign_status 表示成功。
+    兼容极端情况下 sign_success 没写对，但 sign_status 表示抽奖成功。
     """
     if truthy(r.get("sign_success")):
         return True
     status = str(r.get("sign_status") or "")
-    return any(k in status for k in ("签到成功", "已签到过", "领取奖励成功"))
+    return any(k in status for k in ("抽奖成功", "抽奖完成"))
 
 
 def pick_better(old: dict, new: dict) -> dict:
@@ -218,8 +218,8 @@ def map_reason(res: dict) -> str:
         return "未进入首页❗"
     if "登录失败" in status:
         return "登录失败❗"
-    if "签到失败" in status:
-        return "签到失败❗"
+    if "抽奖失败" in status:
+        return "抽奖失败❗"
     if "执行异常" in status:
         return "执行异常❗"
     if not status or status == "未知":
@@ -290,9 +290,9 @@ def build_message(group: str, total: int, results_by_index: dict[int, dict], acc
     # -------- 最后统计 --------
     lines.append("📈 总体统计")
     lines.append(f"  ├── 总账号数: {total}")
-    lines.append(f"  ├── 签到成功: {success_count}/{total}")
+    lines.append(f"  ├── 抽奖成功: {success_count}/{total}")
     lines.append(f"  ├── 总计获得 +{total_reward:.1f} 🌽")
-    lines.append(f"  └── 签到成功率: {success_rate:.1f}%")
+    lines.append(f"  └── 抽奖成功率: {success_rate:.1f}%")
     lines.append("")
     lines.append("=" * 50)
 

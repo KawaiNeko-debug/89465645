@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 
 
-RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "签到失败，疑似违反签到规则").strip()
+RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "抽奖失败，疑似触发活动限制").strip()
 RISK_PAUSE_SECONDS = max(0, int(os.getenv("RISK_PAUSE_SECONDS", "600") or 600))
 MAX_RISK_PAUSES = max(0, int(os.getenv("MAX_RISK_PAUSES", "2") or 2))
 
@@ -83,7 +83,7 @@ def shuffle_accounts(accounts: list[dict]) -> list[dict]:
     return shuffled
 
 
-def build_placeholder_result(account: dict, status="签到异常", reason="工作流未生成 result.json") -> dict:
+def build_placeholder_result(account: dict, status="抽奖异常", reason="工作流未生成 result.json") -> dict:
     return {
         "account_index": account["account_index"],
         "execution_order": account.get("execution_order", 0),
@@ -104,7 +104,7 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "next_day_success": False,
         "task_start_date": os.getenv("SIGN_TASK_START_DATE", ""),
         "sign_completed_at": "",
-        "activity_records": {"seckill": [], "lottery": []},
+        "activity_records": {"lottery": []},
         "retry_count": 0,
         "is_final_retry": False,
         "detail_reason": reason,
@@ -145,7 +145,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "next_day_success": truthy(raw.get("next_day_success")),
             "task_start_date": str(raw.get("task_start_date") or "").strip(),
             "sign_completed_at": str(raw.get("sign_completed_at") or "").strip(),
-            "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": []},
+            "activity_records": raw.get("activity_records") or {"lottery": []},
             "retry_count": safe_int(raw.get("retry_count"), 0),
             "is_final_retry": truthy(raw.get("is_final_retry")),
             "detail_reason": str(raw.get("detail_reason") or "").strip(),
@@ -164,7 +164,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
 
     if RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in normalized["detail_reason"]:
         normalized["risk_controlled"] = True
-        normalized["sign_status"] = "签到风控"
+        normalized["sign_status"] = "抽奖风控"
 
     return normalized
 
@@ -243,7 +243,7 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "detail_reason": item["detail_reason"],
                 "sign_time": item.get("sign_time", ""),
                 "sign_ip": item.get("sign_ip", ""),
-                "activity_records": item.get("activity_records") or {"seckill": [], "lottery": []},
+                "activity_records": item.get("activity_records") or {"lottery": []},
                 "pause_applied": item["pause_applied"],
             }
         )
@@ -274,10 +274,10 @@ def print_summary(results: list[dict], controller: PauseController):
     total_reward = sum(safe_float(item["points_reward"], 0.0) for item in results)
     log("=" * 60)
     log(f"批次总账号数: {len(results)}")
-    log(f"签到成功: {success_count}")
+    log(f"抽奖成功: {success_count}")
     log(f"账号封禁: {banned_count}")
-    log(f"签到风控: {risk_count}")
-    log(f"签到失败: {failed_count}")
+    log(f"抽奖风控: {risk_count}")
+    log(f"抽奖失败: {failed_count}")
     log(f"总奖励: +{total_reward:.1f} 金豆")
     log(f"风控暂停次数: {controller.pause_count}/{controller.max_pauses}")
     log("=" * 60)
@@ -294,7 +294,7 @@ def main():
     controller = PauseController(RISK_PAUSE_SECONDS, MAX_RISK_PAUSES)
     shuffled_accounts = shuffle_accounts(accounts)
 
-    temp_dir = tempfile.mkdtemp(prefix="sign-batch-")
+    temp_dir = tempfile.mkdtemp(prefix="lottery-batch-")
     try:
         results = []
         for offset, account in enumerate(shuffled_accounts):

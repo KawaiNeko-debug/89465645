@@ -29,7 +29,7 @@ try:
 except Exception:
     pass
 
-RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "签到失败，疑似违反签到规则").strip()
+RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "抽奖失败，疑似触发活动限制").strip()
 
 STATUS_RED_FILL = PatternFill("solid", fgColor="F8696B")
 STATUS_YELLOW_FILL = PatternFill("solid", fgColor="FFD966")
@@ -113,7 +113,7 @@ def target_date_text(manifest: dict) -> str:
 
 
 def resolve_output_xlsx_path(results_dir: str, manifest: dict) -> str:
-    filename = f"{target_date_text(manifest)}签到汇总.xlsx"
+    filename = f"{target_date_text(manifest)}抽奖汇总.xlsx"
     configured_path = os.getenv("OUTPUT_XLSX_PATH") or ""
     if configured_path:
         directory = os.path.dirname(configured_path) or results_dir
@@ -142,24 +142,24 @@ def record_key(record: dict):
 
 def normalize_activity_records(value) -> dict:
     if not isinstance(value, dict):
-        return {"seckill": [], "lottery": []}
+        return {"lottery": []}
 
-    normalized = {"seckill": [], "lottery": []}
-    for key, limit in (("seckill", 2), ("lottery", 3)):
-        rows = value.get(key)
-        if not isinstance(rows, list):
+    normalized = {"lottery": []}
+    rows = value.get("lottery")
+    if not isinstance(rows, list):
+        rows = []
+    for item in rows[:3]:
+        if not isinstance(item, dict):
             continue
-        for item in rows[:limit]:
-            if not isinstance(item, dict):
-                continue
-            normalized[key].append(
-                {
-                    "title": str(item.get("title") or item.get("skuTitle") or item.get("prizeTitle") or "").strip(),
-                    "status_text": str(item.get("status_text") or "").strip(),
-                    "claimed": truthy(item.get("claimed")),
-                    "expiry_date": str(item.get("expiry_date") or "").strip(),
-                }
-            )
+        normalized["lottery"].append(
+            {
+                "title": str(item.get("title") or item.get("skuTitle") or item.get("prizeTitle") or "").strip(),
+                "status_text": str(item.get("status_text") or "").strip(),
+                "claimed": truthy(item.get("claimed")),
+                "expiry_date": str(item.get("expiry_date") or "").strip(),
+                "won_at": str(item.get("won_at") or "").strip(),
+            }
+        )
     return normalized
 
 
@@ -242,7 +242,7 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "group_number": group_number,
         "group_position": default_group_position(group_number, account_index),
         "sign_success": False,
-        "sign_status": "签到异常",
+        "sign_status": "抽奖异常",
         "initial_points": 0.0,
         "final_points": 0.0,
         "points_reward": 0.0,
@@ -255,10 +255,10 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "sign_completed_at": "",
         "retry_count": 0,
         "is_final_retry": False,
-        "detail_reason": "缺少签到结果",
+        "detail_reason": "缺少抽奖结果",
         "sign_time": "",
         "sign_ip": "",
-        "activity_records": {"seckill": [], "lottery": []},
+        "activity_records": {"lottery": []},
     }
 
 
@@ -301,15 +301,13 @@ def status_label(record: dict) -> str:
     raw_status = str(record.get("sign_status") or "")
     if truthy(record.get("banned_account")):
         return "账号封禁"
-    if truthy(record.get("next_day_success")):
-        return "签到成功但次日"
     if truthy(record.get("risk_controlled")):
-        return "签到风控"
+        return "抽奖风控"
     if truthy(record.get("sign_success")):
-        return "签到成功"
+        return "抽奖成功"
     if truthy(record.get("password_error")) or any(keyword in raw_status for keyword in ("失败", "错误", "Token", "token")):
-        return "签到失败"
-    return "签到异常"
+        return "抽奖失败"
+    return "抽奖异常"
 
 
 def detail_reason(record: dict) -> str:
@@ -320,14 +318,14 @@ def detail_reason(record: dict) -> str:
         return RISK_CONTROL_MESSAGE
     if record.get("sign_status"):
         return str(record["sign_status"]).strip()
-    return "签到异常"
+    return "抽奖异常"
 
 
 def detail_text(record: dict) -> str:
     if truthy(record.get("banned_account")):
-        return str(record.get("detail_reason") or "账号在封禁列表中，已跳过签到").strip()
+        return str(record.get("detail_reason") or "账号在封禁列表中，已跳过抽奖").strip()
     if truthy(record.get("sign_success")):
-        return str(record.get("sign_status") or "签到成功").strip()
+        return str(record.get("sign_status") or "抽奖成功").strip()
     return detail_reason(record)
 
 
@@ -337,10 +335,8 @@ def is_problem_record(record: dict) -> bool:
 
 def status_sort_bucket(record: dict) -> int:
     label = status_label(record)
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"抽奖失败", "抽奖异常", "抽奖风控"}:
         return 0
-    if label == "签到成功但次日":
-        return 1
     return 2
 
 
@@ -363,12 +359,12 @@ def format_percent(value: float) -> str:
 
 def build_summary(records: list[dict], expected_total: int) -> dict:
     total = expected_total or len(records)
-    success = sum(1 for item in records if status_label(item) in {"签到成功", "签到成功但次日"})
+    success = sum(1 for item in records if status_label(item) == "抽奖成功")
     banned = sum(1 for item in records if status_label(item) == "账号封禁")
-    next_day = sum(1 for item in records if status_label(item) == "签到成功但次日")
-    risk = sum(1 for item in records if status_label(item) == "签到风控")
-    failed = sum(1 for item in records if status_label(item) == "签到失败")
-    abnormal = sum(1 for item in records if status_label(item) == "签到异常")
+    next_day = 0
+    risk = sum(1 for item in records if status_label(item) == "抽奖风控")
+    failed = sum(1 for item in records if status_label(item) == "抽奖失败")
+    abnormal = sum(1 for item in records if status_label(item) == "抽奖异常")
     reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
     success_rate = (success / total * 100) if total > 0 else 0.0
     return {
@@ -389,11 +385,10 @@ def build_stats_lines(summary: dict) -> list[str]:
     return [
         "📈 总体统计",
         f"  ├── 总账号数: {summary['total']}",
-        f"  ├── 签到成功: {summary['success']}/{summary['total']}",
-        f"  ├── 次日成功: {summary['next_day']}",
+        f"  ├── 抽奖成功: {summary['success']}/{summary['total']}",
         f"  ├── 账号封禁: {summary['banned']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
-        f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
+        f"  └── 抽奖成功率: {format_percent(summary['success_rate'])}%",
     ]
 
 
@@ -410,7 +405,7 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
         return "\n".join(lines), summary
 
     if not sorted_records:
-        lines = ["NO❗今天出现问题了捏", "未读取到任何签到结果❌"]
+        lines = ["NO❗今天出现问题了捏", "未读取到任何抽奖结果❌"]
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
@@ -436,83 +431,58 @@ def color_for_points(points: float):
 
 
 def font_for_status(label: str) -> Font:
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"抽奖失败", "抽奖异常", "抽奖风控"}:
         return Font(color="FFFFFF", bold=True)
-    if label == "签到成功但次日":
-        return Font(color="9C6500", bold=True)
     if label == "账号封禁":
         return Font(color="FFFFFF", bold=True)
-    if label == "签到成功":
+    if label == "抽奖成功":
         return FONT_GREEN
     return FONT_DARK
 
 
 def fill_for_status(label: str):
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"抽奖失败", "抽奖异常", "抽奖风控"}:
         return STATUS_RED_FILL
-    if label == "签到成功但次日":
-        return STATUS_YELLOW_FILL
     if label == "账号封禁":
         return STATUS_BLUE_FILL
     return None
 
 
-def font_for_claim_status(value: str) -> Font:
-    text = str(value or "")
-    if "已经领取" in text:
-        return FONT_GREEN
-    if "未领取" in text or "暂未领取" in text:
-        return FONT_RED
-    return FONT_DARK
-
-
-def activity_status_text(item: dict) -> str:
-    status_text = str(item.get("status_text") or "").strip()
-    if status_text:
-        return status_text
-    if truthy(item.get("claimed")):
-        return "已经领取"
-    expiry_date = str(item.get("expiry_date") or "").strip()
-    return f"未领取 {expiry_date}".strip() if expiry_date else "未领取"
-
-
-def activity_columns(record: dict) -> list[str]:
+def lottery_columns(record: dict) -> list[str]:
     activity = normalize_activity_records(record.get("activity_records"))
     values = []
-    for key, limit in (("seckill", 2), ("lottery", 3)):
-        rows = activity.get(key) or []
-        for index in range(limit):
-            item = rows[index] if index < len(rows) else {}
-            if item:
-                values.extend([str(item.get("title") or "").strip(), activity_status_text(item)])
-            else:
-                values.extend(["", ""])
+    rows = activity.get("lottery") or []
+    for index in range(3):
+        item = rows[index] if index < len(rows) else {}
+        if item:
+            values.extend([
+                str(item.get("title") or "").strip(),
+                str(item.get("expiry_date") or "").strip(),
+            ])
+        else:
+            values.extend(["", ""])
     return values
 
 
 def write_xlsx(path: str, records: list[dict]):
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "签到汇总"
+    sheet.title = "抽奖汇总"
     headers = [
         "序号",
         "金豆数量",
         "账户",
         "组别",
-        "签到情况",
+        "抽奖情况",
         "详细原因",
-        "签到时间",
-        "签到IP",
-        "秒杀一",
-        "领取情况",
-        "秒杀二",
-        "领取情况",
-        "抽奖一",
-        "领取情况",
-        "抽奖二",
-        "领取情况",
-        "抽奖三",
-        "领取情况",
+        "抽奖时间",
+        "抽奖IP",
+        "抽奖1",
+        "过期时间",
+        "抽奖2",
+        "过期时间",
+        "抽奖3",
+        "过期时间",
     ]
     sheet.append(headers)
 
@@ -538,7 +508,7 @@ def write_xlsx(path: str, records: list[dict]):
             detail_text(record),
             str(record.get("sign_time") or ""),
             str(record.get("sign_ip") or ""),
-        ] + activity_columns(record)
+        ] + lottery_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
         for cell in sheet[row_index]:
@@ -551,7 +521,7 @@ def write_xlsx(path: str, records: list[dict]):
         sheet.cell(row_index, 7).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 8).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 6).alignment = Alignment(vertical="center", wrap_text=True)
-        for column_index in range(9, 19):
+        for column_index in range(9, 15):
             sheet.cell(row_index, column_index).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 2).number_format = "0.0"
         fill = color_for_points(safe_float(record.get("final_points"), 0.0))
@@ -561,8 +531,8 @@ def write_xlsx(path: str, records: list[dict]):
         if status_fill:
             sheet.cell(row_index, 5).fill = status_fill
         sheet.cell(row_index, 5).font = font_for_status(label)
-        for column_index in (10, 12, 14, 16, 18):
-            sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
+        for column_index in (10, 12, 14):
+            sheet.cell(row_index, column_index).font = FONT_RED if sheet.cell(row_index, column_index).value else FONT_DARK
 
     sheet.freeze_panes = "A2"
     widths = {
@@ -580,10 +550,6 @@ def write_xlsx(path: str, records: list[dict]):
         "L": 18,
         "M": 28,
         "N": 18,
-        "O": 28,
-        "P": 18,
-        "Q": 28,
-        "R": 18,
     }
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
@@ -713,7 +679,7 @@ def main():
                 write_xlsx(output_xlsx, records)
             sent = send_telegram_document(output_xlsx) or sent
     if "email" in channels or "smtp" in channels:
-        subject = f"{target_date_text(manifest)} 签到汇总"
+        subject = f"{target_date_text(manifest)} 抽奖汇总"
         sent = send_email(subject, message) or sent
 
     print(message)

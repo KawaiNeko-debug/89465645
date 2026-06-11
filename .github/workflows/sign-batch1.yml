@@ -2,8 +2,6 @@ name: sign-batch1
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
 
 env:
   TZ: Asia/Shanghai
@@ -63,7 +61,6 @@ jobs:
       HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
       TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
-      API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
       GROUP_NAME: batch1
@@ -109,7 +106,7 @@ jobs:
               f.write(f'ACCOUNT_PASSWORD={password}\n')
           PY
 
-      - name: Sign in
+      - name: Run lottery
         env:
           RESULT_JSON_PATH: result.json
         run: |
@@ -141,7 +138,7 @@ jobs:
                   'group_number': group_number,
                   'group_position': '',
                   'sign_success': False,
-                  'sign_status': 'error',
+                  'sign_status': '抽奖异常',
                   'initial_points': 0.0,
                   'final_points': 0.0,
                   'points_reward': 0.0,
@@ -155,7 +152,7 @@ jobs:
                   'retry_count': 0,
                   'is_final_retry': False,
                   'detail_reason': 'result.json missing',
-                  'activity_records': {'seckill': [], 'lottery': []},
+                  'activity_records': {'lottery': []},
               }],
           }
           with open(path, 'w', encoding='utf-8') as f:
@@ -250,7 +247,6 @@ jobs:
       HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
       TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
-      API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
       GROUP_NAME: batch1
@@ -288,7 +284,7 @@ jobs:
               f.write(f'ACCOUNT_PASSWORD={password}\n')
           PY
 
-      - name: Retry sign in on fresh runner
+      - name: Retry lottery on fresh runner
         env:
           RESULT_JSON_PATH: result.json
         run: |
@@ -319,7 +315,7 @@ jobs:
                   'group_number': group_number,
                   'group_position': '',
                   'sign_success': False,
-                  'sign_status': 'error',
+                  'sign_status': '抽奖异常',
                   'initial_points': 0.0,
                   'final_points': 0.0,
                   'points_reward': 0.0,
@@ -333,7 +329,7 @@ jobs:
                   'retry_count': 0,
                   'is_final_retry': True,
                   'detail_reason': 'retry result.json missing',
-                  'activity_records': {'seckill': [], 'lottery': []},
+                  'activity_records': {'lottery': []},
               }],
           }
           with open(path, 'w', encoding='utf-8') as f:

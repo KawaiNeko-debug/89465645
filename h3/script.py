@@ -26,8 +26,6 @@ except Exception:
 BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
-API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
     for k in os.getenv('HEADER_ACCESS_TOKEN_FALLBACKS', '').split(',')
@@ -51,10 +49,7 @@ PASSWORD_ERROR_HINTS = ["账号或密码不正确", "请重新输入", "密码�
 HOME_SELECTOR = 'div.uni-tabbar__label:has-text("首页")'
 
 # 抽奖相关接口
-SIGN_CONFIG_PATH = "/api/activity/sign/getCurrentUserSignInConfig"
-RECEIVE_VOUCHER_PATH = "/api/activity/sign/receiveVoucher"
 CUSTOMER_INTEGRAL_PATH = "/api/activity/front/getCustomerIntegral"
-SECKILL_RECORDS_PATH = "/api/activity/seckill/selectSeckillRecords"
 LOTTERY_WINS_PATH = "/api/cgi/operationService/front/lottery/queryWins"
 VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRecord"
 BRAND_ACTIVITY_CONFIG_PATH = "/api/activity/brand/activity/ns/selectActivityConfig"
@@ -123,41 +118,6 @@ def redact_sensitive(s: str) -> str:
         return ""
     return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
 
-def is_unclaimed_reward_error(data: dict) -> bool:
-    if not isinstance(data, dict):
-        return False
-    msg = str(data.get("message") or "")
-    return ("存在签到未领取" in msg and "请先领取" in msg) or ("未领取" in msg and "先领取" in msg)
-
-def is_duplicate_claim_error(data: dict) -> bool:
-    if not isinstance(data, dict):
-        return False
-    msg = str(data.get("message") or "")
-    return "重复领取金豆" in msg
-
-def is_nonzero_reward_value(v) -> bool:
-    if v is None:
-        return False
-    if isinstance(v, (int, float)):
-        return v != 0
-    if isinstance(v, str):
-        t = v.strip().lower()
-        if t in ("", "0", "0.0", "null", "none", "false"):
-            return False
-        try:
-            return float(t) != 0
-        except Exception:
-            return True
-    return True
-
-def get_sign_gain_num(data: dict):
-    if not isinstance(data, dict):
-        return None
-    payload = data.get("data")
-    if isinstance(payload, dict):
-        return payload.get("gainNum")
-    return payload
-
 def extract_message(value):
     if isinstance(value, dict):
         for key in ("message", "msg", "errorMessage", "error", "detail"):
@@ -193,7 +153,12 @@ def build_detail_reason(value, default=""):
     return dumped or default
 
 def is_risk_control_response(data) -> bool:
-    return "签到失败，疑似违反签到规则" in build_detail_reason(data)
+    reason = build_detail_reason(data)
+    return (
+        "抽奖失败，疑似触发活动限制" in reason
+        or "风险" in reason
+        or "风控" in reason
+    )
 
 def parse_banned_accounts(raw=None) -> set[str]:
     raw = os.getenv("BANNED_ACCOUNTS", "") if raw is None else raw
@@ -447,9 +412,7 @@ def get_public_ip() -> str:
 def finalize_result_metadata(result: dict):
     result["sign_time"] = str(result.get("sign_completed_at") or result.get("sign_time") or current_time_text()).strip()
     result["sign_ip"] = str(result.get("sign_ip") or get_public_ip()).strip()
-    if result.get("sign_success") and not result.get("banned_account"):
-        task_start_date = str(result.get("task_start_date") or "").strip()
-        result["next_day_success"] = has_next_day_success(task_start_date, result["sign_time"])
+    result["next_day_success"] = False
 
 def masked_label(result):
     if result.get('masked_username'):
@@ -651,9 +614,9 @@ class ApiClient:
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
-        if is_risk_control_response(raw) or ("签到失败，疑似违反签到规则" in reason):
-            self.sign_status = "签到风控"
-            self.detail_reason = reason or "签到失败，疑似违反签到规则"
+        if is_risk_control_response(raw) or ("风控" in reason) or ("风险" in reason):
+            self.sign_status = "抽奖风控"
+            self.detail_reason = reason or "抽奖失败，疑似触发活动限制"
             self.risk_controlled = True
             return
         self.sign_status = status
@@ -701,7 +664,7 @@ class ApiClient:
 
             if is_risk_control_response(data):
                 self.risk_controlled = True
-                self.detail_reason = build_detail_reason(data, "签到失败，疑似违反签到规则")
+                self.detail_reason = build_detail_reason(data, "抽奖失败，疑似触发活动限制")
             return data
 
         except Exception as e:
@@ -1060,214 +1023,11 @@ class ApiClient:
         self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过抽奖"
         return True
 
-    def get_sign_config(self):
-        url = f"{self.base_url}{SIGN_CONFIG_PATH}"
-        data = self.get_json_retry1(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
-        if not (data and data.get("success")):
-            self._refresh_token()
-            data = self.get_json_retry1(url, tag="签到配置", dump_body_on_error=True, dump_json_on_success_false=True)
-
-        if not (data and data.get("success")):
-            return None
-
-        raw = data.get("data") or {}
-        have_signed = truthy(raw.get("haveSignIn")) or truthy(raw.get("haveSign"))
-        have_receive = truthy(raw.get("haveReceive"))
-        today_day = safe_int(raw.get("day"), 0)
-
-        self.today_day = today_day
-        log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
-        return have_signed, today_day, have_receive, data
-
-    def receive_voucher(self):
-        url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
-        data = self.get_json_retry1(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
-
-        if data and data.get("success") and is_nonzero_reward_value(data.get("data")):
-            jindou = safe_int(data.get("data"), 0)
-            log(f"账号{self.account_index} - ✅ 奖励领取成功（+{jindou} 金豆）")
-            return True, jindou, data
-
-        if is_risk_control_response(data):
-            self._mark_failure("签到风控", raw=data)
-            return False
-        if data and data.get("success"):
-            log(f"账号{self.account_index} - ❌ 领取奖励接口 success=true 但 data 异常: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
-        else:
-            log(f"账号{self.account_index} - ❌ 奖励领取失败")
-        return False, 0, data
-
-    def sign_in_simple(self):
-        """
-        单纯做一次签到（只GET，失败重试一次）
-        用于：非第7天“领取成功后额外签到”、第7天“重复领取金豆”兜底补签
-        """
-        url = f"{self.base_url}{API_SIGN_PATH}"
-        log(f"账号{self.account_index} - 🧾 执行一次签到（只GET，失败重试一次）...")
-        data = self.get_json_retry1(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-        if data and data.get("success"):
-            self.sign_status = "签到成功"
-            self.sign_completed_at = current_time_text()
-            log(f"账号{self.account_index} - ✅ 签到成功")
-            return True
-        self.sign_status = "签到失败"
-        log(f"账号{self.account_index} - ❌ 签到失败")
-        return False
-
-    def sign_in(self):
-        """
-        ✅ 修复点1：第一次就检查“未领取”，不再先重试签到
-        ✅ 修复点2：非第7天，领取成功后必须额外签到一次
-        """
-        url = f"{self.base_url}{API_SIGN_PATH}"
-        log(f"账号{self.account_index} - 尝试使用 GET 方法签到...")
-
-        # 第一次请求：先判断“未领取”
-        data1 = self._get_json_once(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-
-        if data1 and isinstance(data1, dict) and data1.get("success") is True:
-            self.sign_status = "签到成功"
-            self.sign_completed_at = current_time_text()
-            log(f"账号{self.account_index} - ✅ 签到成功")
-            return True
-
-        if isinstance(data1, dict) and is_unclaimed_reward_error(data1):
-            log(f"账号{self.account_index} - 🎁 检测到“存在签到未领取”，开始领取奖励...")
-            ok, _jindou, raw = self.receive_voucher()
-            if ok:
-                self.has_reward = True
-                # 只要不是第7天：领取后再额外签到一次
-                if self.today_day != 7:
-                    log(f"账号{self.account_index} - ➕ 非第7天：领取奖励后需要额外签到一次")
-                    return self.sign_in_simple()
-                # 第7天：领取成功即完成（不再签到）
-                self.sign_status = "领取奖励成功"
-                return True
-
-            # 领取失败：第7天如果是“重复领取金豆” -> 额外签到一次
-            if isinstance(raw, dict) and is_duplicate_claim_error(raw):
-                log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
-                return self.sign_in_simple()
-
-            self.sign_status = "领取奖励失败"
-            return False
-
-        # 不是“未领取”情况：才重试一次签到
-        time.sleep(random.uniform(0.6, 1.2))
-        log(f"账号{self.account_index} - 🔁 签到GET失败，重试一次GET...")
-        data2 = self._get_json_once(url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-
-        if data2 and isinstance(data2, dict) and data2.get("success") is True:
-            self.sign_status = "签到成功"
-            self.sign_completed_at = current_time_text()
-            log(f"账号{self.account_index} - ✅ 签到成功")
-            return True
-
-        # 重试后才出现“未领取”：也要处理（不再继续重试签到）
-        if isinstance(data2, dict) and is_unclaimed_reward_error(data2):
-            log(f"账号{self.account_index} - 🎁 重试后检测到“存在签到未领取”，开始领取奖励...")
-            ok, _jindou, raw = self.receive_voucher()
-            if ok:
-                self.has_reward = True
-                if self.today_day != 7:
-                    log(f"账号{self.account_index} - ➕ 非第7天：领取奖励后需要额外签到一次")
-                    return self.sign_in_simple()
-                self.sign_status = "领取奖励成功"
-                return True
-
-            if isinstance(raw, dict) and is_duplicate_claim_error(raw):
-                log(f"账号{self.account_index} - ♻️ 领取返回“重复领取金豆”，改为额外执行一次签到")
-                return self.sign_in_simple()
-
-            self.sign_status = "领取奖励失败"
-            return False
-
-        self.sign_status = "签到失败"
-        log(f"账号{self.account_index} - ❌ 签到失败")
-        return False
-
     def execute_full_process(self):
         return self.execute_lottery_process()
 
-        time.sleep(random.uniform(1, 2))
-        self.initial_points = self.get_points() or 0
-        time.sleep(random.uniform(1, 2))
-
-        cfg = self.get_sign_config()
-        if cfg is None:
-            self.sign_status = "检查失败"
-            return False
-
-        have_signed, today_day, have_receive, _raw = cfg
-
-        # 第7天特殊逻辑：
-        # 1) 不信任 haveReceive，不用它判断是否已领
-        # 2) 如果配置显示已签到，则直接调用领奖接口
-        # 3) 如果未签到，则先签到；若接口提示“当前用户当天已经签到”，也直接转领奖
-        # 4) 如果领奖接口提示“重复领取金豆”，按“已经领取过”处理，算成功
-        if today_day == 7:
-            sign_url = f"{self.base_url}{API_SIGN_PATH}"
-            log(f"账号{self.account_index} - 🎯 今天第7天：已签到则直接领奖；未签到则先签到再领奖（忽略 haveReceive 判断）")
-
-            if have_signed:
-                log(f"账号{self.account_index} - ℹ️ 第7天配置显示今日已签到，直接调用领取奖励接口")
-            else:
-                sign_data = self.get_json_retry1(sign_url, tag="签到", dump_body_on_error=True, dump_json_on_success_false=True)
-                log(f"账号{self.account_index} - 🧩 第7天签到接口返回: {redact_sensitive(truncate_text(json.dumps(sign_data, ensure_ascii=False), 2000)) if sign_data is not None else 'null'}")
-
-                already_signed = isinstance(sign_data, dict) and ("当前用户当天已经签到" in str(sign_data.get("message") or ""))
-                if isinstance(sign_data, dict) and sign_data.get("success") is True:
-                    self.sign_completed_at = current_time_text()
-                    gain_num = get_sign_gain_num(sign_data)
-                    if is_nonzero_reward_value(gain_num):
-                        log(f"账号{self.account_index} - ✅ 第7天签到成功（gainNum={gain_num}）")
-                    else:
-                        log(f"账号{self.account_index} - ⚠️ 第7天签到返回 success=true，但 gainNum={gain_num}，继续尝试领取第7天奖励")
-                elif already_signed:
-                    log(f"账号{self.account_index} - ℹ️ 第7天签到接口提示“当前用户当天已经签到”，直接转领取奖励")
-                else:
-                    self.sign_status = "第7天签到失败"
-                    log(f"账号{self.account_index} - ❌ 第7天签到失败，且不是“当天已签到”场景")
-                    return False
-
-            ok, _jindou, raw = self.receive_voucher()
-            log(f"账号{self.account_index} - 🧩 第7天领取奖励接口返回: {redact_sensitive(truncate_text(json.dumps(raw, ensure_ascii=False), 2000)) if raw is not None else 'null'}")
-            if ok:
-                self.has_reward = True
-                self.sign_status = "第7天签到并领取成功"
-                if not self.sign_completed_at:
-                    self.sign_completed_at = current_time_text()
-            elif isinstance(raw, dict) and is_duplicate_claim_error(raw):
-                self.has_reward = True
-                self.sign_status = "第7天奖励已领取"
-                if not self.sign_completed_at:
-                    self.sign_completed_at = current_time_text()
-                log(f"账号{self.account_index} - ℹ️ 第7天领取接口提示“重复领取金豆”，按已领取处理")
-            else:
-                self.sign_status = "第7天领取奖励失败"
-                return False
-
-            time.sleep(random.uniform(1, 2))
-            self.final_points = self.get_points() or self.initial_points
-            self.points_reward = self.final_points - self.initial_points
-            return True
-
-        # 非第7天：如果已签到，结束；否则走 sign_in()（里面会处理未领取 -> 领取 -> 再签）
-        if have_signed:
-            self.sign_status = "已签到过"
-            self.sign_completed_at = current_time_text()
-        else:
-            time.sleep(random.uniform(1, 2))
-            if not self.sign_in():
-                return False
-
-        time.sleep(random.uniform(1, 2))
-        self.final_points = self.get_points() or 0
-        self.points_reward = self.final_points - self.initial_points
-        return True
-
 # ==============================================================================
-# 单个账号登录与签到主流程
+# 单个账号登录与抽奖主流程
 # ==============================================================================
 def sign_in_account(username, password, account_index, total_accounts, retry_count=0, is_final_retry=False):
     label = f" (重试{retry_count})" if retry_count > 0 else (" (最终重试)" if is_final_retry else "")
@@ -1275,7 +1035,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     task_start_date = normalize_task_start_date()
     banned_account = is_banned_account(username)
     if banned_account:
-        log(f"账号{account_index} - 命中 BANNED_ACCOUNTS，登录后只获取金豆与活动记录，跳过签到")
+        log(f"账号{account_index} - 命中 BANNED_ACCOUNTS，登录后只获取金豆数量，跳过抽奖")
 
     result = {
         'account_index': account_index,
@@ -1447,7 +1207,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     client.execute_banned_process()
                     success = False
                 else:
-                    log(f"账号{account_index} - 使用 token 进行签到（只GET；未领取先领；非第7天领完再签一次）")
+                    log(f"账号{account_index} - 使用 token 执行抽奖流程（报名、兑换、抽奖）")
                     success = client.execute_full_process()
                     if client.final_points == 0:
                         latest_points = client.get_points()
@@ -1458,7 +1218,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                 client.fetch_activity_records()
                 result.update({
                     'sign_success': success,
-                    'sign_status': '账号封禁' if banned_account else ('签到风控' if client.risk_controlled and not success else client.sign_status),
+                    'sign_status': '账号封禁' if banned_account else ('抽奖风控' if client.risk_controlled and not success else client.sign_status),
                     'initial_points': client.initial_points,
                     'final_points': client.final_points,
                     'points_reward': client.points_reward,
@@ -1637,7 +1397,7 @@ def summarize_results(all_results):
         except Exception:
             pass
 
-        if r.get('has_reward') and r.get('sign_success') and r.get('sign_status') == "领取奖励成功":
+        if r.get('has_reward') and r.get('sign_success'):
             reward_count += 1
 
     return {
@@ -1653,7 +1413,7 @@ def print_summary(all_results, total_accounts):
     global in_summary
     in_summary = True
     log("=" * 70)
-    log("📊 签到任务总结")
+    log("📊 抽奖任务总结")
     log("=" * 70)
 
     summary = summarize_results(all_results)
@@ -1665,26 +1425,26 @@ def print_summary(all_results, total_accounts):
 
     log("📈 总体统计:")
     log(f"  ├── 总账号数: {total_accounts}")
-    log(f"  ├── 签到成功: {success_count}/{total_accounts}")
+    log(f"  ├── 抽奖成功: {success_count}/{total_accounts}")
 
     success_rate = (success_count / total_accounts) * 100 if total_accounts > 0 else 0
-    log(f"  └── 签到成功率: {success_rate:.1f}%")
+    log(f"  └── 抽奖成功率: {success_rate:.1f}%")
 
     if reward_count > 0:
-        log(f"  ✅ 有额外奖励账号数: {reward_count}")
+        log(f"  ✅ 有中奖记录账号数: {reward_count}")
     if banned_accounts:
         labels = [masked_label(r) for r in banned_accounts]
-        log(f"  ℹ️ 封禁跳过签到账号: {', '.join(labels)}")
+        log(f"  ℹ️ 封禁跳过抽奖账号: {', '.join(labels)}")
 
     if not password_error and not other_failed:
-        log("  🎉 所有账户签到正常!")
+        log("  🎉 所有账号抽奖流程正常!")
     else:
         if password_error:
             labels = [masked_label(r) for r in password_error]
             log(f"  ⚠️ 密码错误账号: {', '.join(labels)}")
         if other_failed:
             labels = [masked_label(r) for r in other_failed]
-            log(f"  ⚠️ 签到失败账号: {', '.join(labels)}")
+            log(f"  ⚠️ 抽奖失败账号: {', '.join(labels)}")
 
     log("=" * 70)
 
@@ -1762,7 +1522,7 @@ def main():
         sys.exit(1)
 
     total = len(usernames)
-    log(f"总计 {total} 个账号")
+    log(f"总计 {total} 个账号，开始抽奖流程")
 
     index_base = 1
     env_index = os.getenv('ACCOUNT_INDEX')
@@ -1795,7 +1555,7 @@ def main():
         log("❌ 存在失败账号，退出码设为1")
         sys.exit(1)
 
-    log("✅ 程序正常结束")
+    log("✅ 抽奖程序正常结束")
     sys.exit(0)
 
 if __name__ == "__main__":
