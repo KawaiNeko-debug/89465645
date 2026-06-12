@@ -27,7 +27,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-11-activity-config-v3"
+SCRIPT_VERSION = "2026-06-12-activity-export-v5"
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -61,10 +61,8 @@ VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRec
 BRAND_ACTIVITY_CONFIG_PATH = "/api/activity/brand/activity/ns/selectActivityConfig"
 SECKILL_GOODS_PATH = "/api/activity/seckill/ns/getSeckillGoods"
 RECORD_POST_PAYLOADS = [
-    {"pageNum": 1, "pageSize": 10},
-    {"pageNo": 1, "pageSize": 10},
-    {"current": 1, "size": 10},
-    {},
+    {"pageNum": 1, "pageSize": 50},
+    {"pageNo": 1, "pageSize": 50},
 ]
 
 # 检查必要变量
@@ -341,7 +339,17 @@ def apply_expiry_dates(records: list[dict], expiry_lookup: dict[str, str]):
         if not expiry_date:
             continue
         item["expiry_date"] = expiry_date
-        item["status_text"] = f"未领取 {expiry_date}"
+        status_text = str(item.get("status_text") or "").strip() or "未领取"
+        item["status_text"] = f"{status_text} {expiry_date}" if expiry_date not in status_text else status_text
+
+def needs_expiry_lookup(records: list[dict]) -> bool:
+    return any(
+        isinstance(item, dict)
+        and item.get("title")
+        and not truthy(item.get("claimed"))
+        and not item.get("expiry_date")
+        for item in records
+    )
 
 def make_empty_extra_records() -> dict:
     return {"seckill": [], "lottery": []}
@@ -438,7 +446,7 @@ def mask_account(account):
     return s[:-4] + "****"
 
 def current_time_text() -> str:
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def get_public_ip() -> str:
     if _PUBLIC_IP_CACHE["loaded"]:
@@ -770,7 +778,6 @@ class ApiClient:
     def post_json_retry_candidates(self, url, payloads=None, tag="API", dump_body_on_error=False, dump_json_on_success_false=True, prefer_records=False):
         payloads = payloads or [{}]
         last_data = None
-        first_success = None
         log(f"账号{self.account_index} - {tag}使用POST查询，候选参数 {len(payloads)} 组")
         for index, payload in enumerate(payloads, start=1):
             data = self._post_json_once(
@@ -781,13 +788,9 @@ class ApiClient:
                 dump_json_on_success_false=dump_json_on_success_false,
             )
             if isinstance(data, dict) and data.get("success") is True:
-                if first_success is None:
-                    first_success = data
-                if not prefer_records or extract_data_list(data):
-                    return data
-                log(f"账号{self.account_index} - {tag}POST成功但列表为空，继续尝试兼容参数...")
-                last_data = data
-                continue
+                if prefer_records and not extract_data_list(data):
+                    log(f"账号{self.account_index} - {tag}POST成功，列表为空，按正常结果处理")
+                return data
             if isinstance(data, dict) and data.get("success") is None and extract_data_list(data):
                 return data
             if data is not None:
@@ -795,7 +798,7 @@ class ApiClient:
             if index < len(payloads):
                 time.sleep(random.uniform(0.4, 0.9))
                 log(f"账号{self.account_index} - 🔁 {tag}POST未成功，尝试下一组参数...")
-        return first_success or last_data
+        return last_data
 
     @with_retry
     def get_points(self):
@@ -871,8 +874,7 @@ class ApiClient:
             return []
         payloads = [
             {"categoryAccessIds": category_ids},
-            {"categoryAccessIds": category_ids, "pageNum": 1, "pageSize": 20},
-            {"categoryAccessIds": category_ids, "pageNo": 1, "pageSize": 20},
+            {"categoryAccessId": category_ids[0]},
         ]
         data = self.post_json_retry_candidates(
             f"{self.base_url}{SECKILL_RECORDS_PATH}",
@@ -895,7 +897,7 @@ class ApiClient:
             else:
                 status_text = str(item.get("statusText") or item.get("statusName") or "").strip()
             if not claimed and expiry_date:
-                status_text = f"未领取 {expiry_date}"
+                status_text = f"{status_text or '未领取'} {expiry_date}"
             rows.append({
                 "title": title,
                 "status": status,
@@ -911,12 +913,8 @@ class ApiClient:
         payloads = [
             {"pageNum": 1, "pageSize": 1000, "activityCode": activity_code},
             {"pageNum": 1, "pageSize": 1000},
-            {"pageNo": 1, "pageSize": 1000, "activityCode": activity_code},
-            {},
         ] if activity_code else [
             {"pageNum": 1, "pageSize": 1000},
-            {"pageNo": 1, "pageSize": 1000},
-            {},
         ]
         data = self.post_json_retry_candidates(
             f"{self.base_url}{LOTTERY_WINS_PATH}",
@@ -950,10 +948,13 @@ class ApiClient:
             lottery_activity_code = self.get_lottery_activity_code(config)
             seckill_records = self.fetch_seckill_records({}, seckill_category_ids)
             lottery_records = self.fetch_lottery_wins({}, lottery_activity_code)
-            change_records = self.fetch_voucher_change_records()
-            expiry_lookup = build_expiry_lookup(change_records)
-            apply_expiry_dates(seckill_records, expiry_lookup)
-            apply_expiry_dates(lottery_records, expiry_lookup)
+            if needs_expiry_lookup(seckill_records + lottery_records):
+                change_records = self.fetch_voucher_change_records()
+                expiry_lookup = build_expiry_lookup(change_records)
+                apply_expiry_dates(seckill_records, expiry_lookup)
+                apply_expiry_dates(lottery_records, expiry_lookup)
+            else:
+                log(f"账号{self.account_index} - 未发现需要补截止时间的未领取奖品，跳过过期时间查询")
             self.activity_records = {
                 "seckill": seckill_records,
                 "lottery": lottery_records,
