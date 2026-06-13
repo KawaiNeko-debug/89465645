@@ -1,9 +1,9 @@
-name: sign-batch1
+name: sign-batch5
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 11 * * *"
 
 env:
   TZ: Asia/Shanghai
@@ -24,7 +24,7 @@ jobs:
       - id: matrix
         shell: bash
         env:
-          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH1 }}
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
         run: |
           python - <<'PY'
           import json, os, random
@@ -69,11 +69,11 @@ jobs:
       SECKILL_CATEGORY_ACCESS_IDS: ${{ secrets.SECKILL_CATEGORY_ACCESS_IDS }}
       LOTTERY_ACTIVITY_CODE: ${{ secrets.LOTTERY_ACTIVITY_CODE }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
-      GROUP_NAME: batch1
-      GROUP_NUMBER: "1"
+      GROUP_NAME: batch5
+      GROUP_NUMBER: "5"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       EXECUTION_ORDER: ${{ matrix.execution_order }}
-      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH1 }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -270,11 +270,11 @@ jobs:
       SECKILL_CATEGORY_ACCESS_IDS: ${{ secrets.SECKILL_CATEGORY_ACCESS_IDS }}
       LOTTERY_ACTIVITY_CODE: ${{ secrets.LOTTERY_ACTIVITY_CODE }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
-      GROUP_NAME: batch1
-      GROUP_NUMBER: "1"
+      GROUP_NAME: batch5
+      GROUP_NUMBER: "5"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       EXECUTION_ORDER: ${{ matrix.account_index }}
-      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH1 }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -399,7 +399,7 @@ jobs:
       - name: Upload final batch artifact
         uses: actions/upload-artifact@v4
         with:
-          name: batch1-result
+          name: batch5-result
           path: merged/result.json
           if-no-files-found: error
           retention-days: 2

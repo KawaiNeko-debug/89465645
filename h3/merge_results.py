@@ -4,6 +4,8 @@ import os
 import sys
 from datetime import datetime
 
+RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+
 
 def truthy(value) -> bool:
     if value is True:
@@ -13,6 +15,21 @@ def truthy(value) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def has_risk_control_text(*values) -> bool:
+    if not RISK_CONTROL_MESSAGE:
+        return False
+    return any(RISK_CONTROL_MESSAGE in str(value or "") for value in values)
+
+
+def is_risk_control_result(row: dict) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return truthy(row.get("risk_controlled")) or has_risk_control_text(
+        row.get("detail_reason"),
+        row.get("sign_status"),
+    )
 
 
 def safe_int(value, default=0) -> int:
@@ -51,7 +68,12 @@ def score(row: dict):
 def pick_result(initial: dict, retry: dict | None):
     if retry is None:
         return initial
-    picked = retry if score(retry) >= score(initial) else initial
+    if is_risk_control_result(initial):
+        picked = initial
+    elif is_risk_control_result(retry) and not truthy(initial.get("sign_success")):
+        picked = retry
+    else:
+        picked = retry if score(retry) >= score(initial) else initial
     fallback = initial if picked is retry else retry
     if fallback:
         for key in ("activity_records", "final_points", "sign_time", "sign_completed_at"):

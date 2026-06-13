@@ -3,11 +3,12 @@
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["sign-batch4"]
+    workflows: ["sign-batch5"]
     types: [completed]
 
 env:
   TZ: Asia/Shanghai
+  RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
 
 permissions:
   contents: read
@@ -49,6 +50,7 @@ jobs:
           ACCOUNTS_BATCH2: ${{ secrets.ACCOUNTS_BATCH2 }}
           ACCOUNTS_BATCH3: ${{ secrets.ACCOUNTS_BATCH3 }}
           ACCOUNTS_BATCH4: ${{ secrets.ACCOUNTS_BATCH4 }}
+          ACCOUNTS_BATCH5: ${{ secrets.ACCOUNTS_BATCH5 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}

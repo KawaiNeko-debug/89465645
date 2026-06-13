@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 
 
-RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "签到失败，疑似违反签到规则").strip()
+RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 RISK_PAUSE_SECONDS = max(0, int(os.getenv("RISK_PAUSE_SECONDS", "600") or 600))
 MAX_RISK_PAUSES = max(0, int(os.getenv("MAX_RISK_PAUSES", "2") or 2))
 

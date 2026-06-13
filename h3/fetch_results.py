@@ -14,6 +14,7 @@ WORKFLOWS = [
     {"workflow_file": "sign-batch2.yml", "artifact_name": "batch2-result", "group_number": 2, "group_name": "2组"},
     {"workflow_file": "sign-batch3.yml", "artifact_name": "batch3-result", "group_number": 3, "group_name": "3组"},
     {"workflow_file": "sign-batch4.yml", "artifact_name": "batch4-result", "group_number": 4, "group_name": "4组"},
+    {"workflow_file": "sign-batch5.yml", "artifact_name": "batch5-result", "group_number": 5, "group_name": "5组"},
 ]
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")

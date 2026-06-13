@@ -29,7 +29,7 @@ try:
 except Exception:
     pass
 
-RISK_CONTROL_MESSAGE = os.getenv("RISK_CONTROL_MESSAGE", "签到失败，疑似违反签到规则").strip()
+RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 
 STATUS_RED_FILL = PatternFill("solid", fgColor="F8696B")
 STATUS_YELLOW_FILL = PatternFill("solid", fgColor="FFD966")
@@ -83,7 +83,7 @@ def default_group_position(group_number: int, account_index: int) -> str:
 def load_account_lookup() -> tuple[dict[tuple[int, int], str], int]:
     lookup = {}
     total = 0
-    for group_number in range(1, 5):
+    for group_number in range(1, 6):
         raw = os.getenv(f"ACCOUNTS_BATCH{group_number}", "") or ""
         for account_index, line in enumerate(raw.splitlines(), start=1):
             line = line.strip()

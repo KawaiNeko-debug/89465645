@@ -3,10 +3,11 @@ name: sign-batch2
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 1 * * *"
 
 env:
   TZ: Asia/Shanghai
+  RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
 
 permissions:
   contents: read
@@ -217,13 +218,25 @@ jobs:
         run: |
           python - <<'PY'
           import glob, json, os
+          RISK_CONTROL_MESSAGE = os.getenv('RISK_CONTROL_MESSAGE') or '签到失败，疑似违反签到规则'
+          def truthy(value):
+              if value is True:
+                  return True
+              if value is False or value is None:
+                  return False
+              if isinstance(value, (int, float)):
+                  return value != 0
+              return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+          def is_risk_controlled(row):
+              text = f"{row.get('detail_reason', '')} {row.get('sign_status', '')}"
+              return truthy(row.get('risk_controlled')) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in text)
           failed = []
           for path in glob.glob('initial-results/**/result.json', recursive=True):
               with open(path, 'r', encoding='utf-8') as f:
                   payload = json.load(f)
               rows = payload.get('results') or []
               row = rows[0] if rows else {}
-              if row and not row.get('sign_success') and not row.get('banned_account'):
+              if row and not truthy(row.get('sign_success')) and not truthy(row.get('banned_account')) and not is_risk_controlled(row):
                   failed.append({'account_index': int(row.get('account_index', 0))})
           failed.sort(key=lambda item: item['account_index'])
           matrix = {'include': failed}

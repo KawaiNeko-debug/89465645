@@ -27,7 +27,8 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-12-activity-export-v5"
+SCRIPT_VERSION = "2026-06-14-banned-points-batch5-v7"
+RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -156,6 +157,18 @@ def get_sign_gain_num(data: dict):
         return payload.get("gainNum")
     return payload
 
+def extract_integral_voucher(data):
+    if not isinstance(data, dict):
+        return None
+    payload = data.get("data")
+    if isinstance(payload, dict) and payload.get("integralVoucher") is not None:
+        return safe_float(payload.get("integralVoucher"), None)
+    for value in find_values_by_key(data, {"integralVoucher"}):
+        points = safe_float(value, None)
+        if points is not None:
+            return points
+    return None
+
 def extract_message(value):
     if isinstance(value, dict):
         for key in ("message", "msg", "errorMessage", "error", "detail"):
@@ -190,8 +203,21 @@ def build_detail_reason(value, default=""):
     dumped = redact_sensitive(truncate_text(dumped, 800))
     return dumped or default
 
+def has_risk_control_text(*values) -> bool:
+    if not RISK_CONTROL_MESSAGE:
+        return False
+    return any(RISK_CONTROL_MESSAGE in str(value or "") for value in values)
+
 def is_risk_control_response(data) -> bool:
-    return "签到失败，疑似违反签到规则" in build_detail_reason(data)
+    return has_risk_control_text(build_detail_reason(data))
+
+def is_risk_control_result(res: dict) -> bool:
+    if not isinstance(res, dict):
+        return False
+    return truthy(res.get("risk_controlled")) or has_risk_control_text(
+        res.get("detail_reason"),
+        res.get("sign_status"),
+    )
 
 def parse_banned_accounts(raw=None) -> set[str]:
     raw = os.getenv("BANNED_ACCOUNTS", "") if raw is None else raw
@@ -681,9 +707,9 @@ class ApiClient:
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
-        if is_risk_control_response(raw) or ("签到失败，疑似违反签到规则" in reason):
+        if is_risk_control_response(raw) or has_risk_control_text(reason):
             self.sign_status = "签到风控"
-            self.detail_reason = reason or "签到失败，疑似违反签到规则"
+            self.detail_reason = reason or RISK_CONTROL_MESSAGE
             self.risk_controlled = True
             return
         self.sign_status = status
@@ -765,9 +791,79 @@ class ApiClient:
             dump_json_on_success_false=dump_json_on_success_false,
         )
 
+    def _browser_fetch_json_once(self, method, url, tag="API", payload=None, dump_body_on_error=False, dump_json_on_success_false=True):
+        if not self.page:
+            return None
+        method = str(method or "GET").upper()
+        forbidden_headers = {"user-agent", "referer", "host", "origin", "content-length"}
+        headers = {
+            str(key): str(value)
+            for key, value in self.headers.items()
+            if key and value and str(key).lower() not in forbidden_headers
+        }
+        headers.setdefault("accept", "application/json, text/plain, */*")
+        if method == "POST":
+            headers.setdefault("content-type", "application/json;charset=UTF-8")
+        try:
+            result = self.page.evaluate(
+                """async ({url, method, payload, headers}) => {
+                    const options = {
+                        method,
+                        credentials: "include",
+                        headers,
+                    };
+                    if (method === "POST") {
+                        options.body = JSON.stringify(payload || {});
+                    }
+                    const response = await fetch(url, options);
+                    const text = await response.text();
+                    let data = null;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (error) {
+                        data = null;
+                    }
+                    return {
+                        status: response.status,
+                        ok: response.ok,
+                        allow: response.headers.get("allow") || "",
+                        data,
+                        text: text.slice(0, 2000),
+                    };
+                }""",
+                {"url": url, "method": method, "payload": payload or {}, "headers": headers},
+            )
+            status = safe_int(result.get("status"), 0) if isinstance(result, dict) else 0
+            data = result.get("data") if isinstance(result, dict) else None
+            if status != 200:
+                allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
+                msg = f"账号{self.account_index} - {tag}浏览器请求失败 {status} ({method} {url})"
+                if allow:
+                    msg += f" Allow={allow}"
+                log(msg)
+                if dump_body_on_error and isinstance(result, dict):
+                    log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
+                return None
+            if data is None:
+                log(f"账号{self.account_index} - {tag}浏览器响应JSON解析失败 (200 {method} {url})")
+                if dump_body_on_error and isinstance(result, dict):
+                    log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
+                return None
+            if dump_json_on_success_false and isinstance(data, dict) and data.get("success") is False:
+                log(f"账号{self.account_index} - ⚠️ {tag}浏览器返回success=false: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
+            return data
+        except Exception as e:
+            log(f"账号{self.account_index} - {tag}浏览器请求异常: {e}")
+            return None
+
     def get_json_retry1(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
         data = self._get_json_once(url, tag=tag, dump_body_on_error=dump_body_on_error, dump_json_on_success_false=dump_json_on_success_false)
         if isinstance(data, dict) and data.get("success") is True:
+            return data
+        if is_risk_control_response(data):
+            self.risk_controlled = True
+            self.detail_reason = build_detail_reason(data, RISK_CONTROL_MESSAGE)
+            log(f"账号{self.account_index} - {tag}触发风控，停止GET重试")
             return data
 
         time.sleep(random.uniform(0.6, 1.2))
@@ -800,18 +896,61 @@ class ApiClient:
                 log(f"账号{self.account_index} - 🔁 {tag}POST未成功，尝试下一组参数...")
         return last_data
 
-    @with_retry
     def get_points(self):
-        data = self.get_json_retry1(
-            f"{self.base_url}{CUSTOMER_INTEGRAL_PATH}",
-            tag="金豆",
-            dump_body_on_error=True,
-            dump_json_on_success_false=True
-        )
-        if data and data.get('success'):
-            return safe_float(data.get('data', {}).get('integralVoucher', 0), 0.0)
+        url = f"{self.base_url}{CUSTOMER_INTEGRAL_PATH}"
+        attempts = [
+            ("requests", "GET", None),
+            ("requests", "POST", {}),
+            ("browser", "GET", None),
+            ("browser", "POST", {}),
+        ]
+        for source, method, payload in attempts:
+            if source == "requests" and method == "GET":
+                data = self._get_json_once(
+                    url,
+                    tag="金豆",
+                    dump_body_on_error=True,
+                    dump_json_on_success_false=True,
+                )
+            elif source == "requests":
+                data = self._post_json_once(
+                    url,
+                    payload=payload,
+                    tag="金豆",
+                    dump_body_on_error=True,
+                    dump_json_on_success_false=True,
+                )
+            else:
+                data = self._browser_fetch_json_once(
+                    method,
+                    url,
+                    payload=payload,
+                    tag="金豆",
+                    dump_body_on_error=True,
+                    dump_json_on_success_false=True,
+                )
 
-        self._refresh_token()
+            points = extract_integral_voucher(data)
+            if points is not None:
+                log(f"账号{self.account_index} - 金豆数量获取成功: {points:.1f}")
+                return points
+
+            if isinstance(data, dict) and data.get("success") is True:
+                log(f"账号{self.account_index} - 金豆接口成功但未找到 integralVoucher: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 800))}")
+
+        if self._refresh_token():
+            data = self.get_json_retry1(
+                url,
+                tag="金豆",
+                dump_body_on_error=True,
+                dump_json_on_success_false=True,
+            )
+            points = extract_integral_voucher(data)
+            if points is not None:
+                log(f"账号{self.account_index} - 金豆数量刷新token后获取成功: {points:.1f}")
+                return points
+
+        log(f"账号{self.account_index} - 未获取到金豆数量")
         return None
 
     def fetch_voucher_change_records(self) -> list[dict]:
@@ -943,6 +1082,7 @@ class ApiClient:
 
     def fetch_activity_records(self) -> dict:
         try:
+            log(f"账号{self.account_index} - 开始获取秒杀/抽奖中奖记录")
             config = self.fetch_brand_activity_config()
             seckill_category_ids = self.get_seckill_category_ids(config)
             lottery_activity_code = self.get_lottery_activity_code(config)
@@ -959,6 +1099,7 @@ class ApiClient:
                 "seckill": seckill_records,
                 "lottery": lottery_records,
             }
+            log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
         except Exception as e:
             log(f"账号{self.account_index} - 活动记录抓取异常: {e}")
             self.activity_records = make_empty_extra_records()
@@ -971,7 +1112,7 @@ class ApiClient:
         self.final_points = points or 0.0
         self.points_reward = 0.0
         self.sign_status = "账号封禁"
-        self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
+        self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过签到" if points is not None else "账号在 BANNED_ACCOUNTS 中，已跳过签到；金豆数量获取失败"
         return True
 
     def get_sign_config(self):
@@ -1045,6 +1186,13 @@ class ApiClient:
             log(f"账号{self.account_index} - ✅ 签到成功")
             return True
 
+        if is_risk_control_response(data1):
+            self.risk_controlled = True
+            self.sign_status = "签到风控"
+            self.detail_reason = build_detail_reason(data1, RISK_CONTROL_MESSAGE)
+            log(f"账号{self.account_index} - 签到触发风控，停止本账号签到重试")
+            return False
+
         if isinstance(data1, dict) and is_unclaimed_reward_error(data1):
             log(f"账号{self.account_index} - 🎁 检测到“存在签到未领取”，开始领取奖励...")
             ok, _jindou, raw = self.receive_voucher()
@@ -1094,6 +1242,13 @@ class ApiClient:
                 return self.sign_in_simple()
 
             self.sign_status = "领取奖励失败"
+            return False
+
+        if is_risk_control_response(data2):
+            self.risk_controlled = True
+            self.sign_status = "签到风控"
+            self.detail_reason = build_detail_reason(data2, RISK_CONTROL_MESSAGE)
+            log(f"账号{self.account_index} - 签到重试触发风控，停止本账号签到重试")
             return False
 
         self.sign_status = "签到失败"
@@ -1405,6 +1560,8 @@ def should_retry(res):
     if res.get('banned_account'):
         return False
     if res.get('password_error'):
+        return False
+    if is_risk_control_result(res):
         return False
     return not res['sign_success']
 
