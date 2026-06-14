@@ -27,8 +27,10 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-14-banned-points-batch5-v7"
+SCRIPT_VERSION = "2026-06-15-points-expiry-v9"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+UNCLAIMED_EXCHANGE_STATES = {1}
+CLAIMED_EXCHANGE_STATES = {2, 6}
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -320,9 +322,25 @@ def unique_text_values(values) -> list[str]:
     return result
 
 def parse_datetime_value(value):
+    if isinstance(value, (int, float)):
+        try:
+            timestamp = float(value)
+            if timestamp > 100000000000:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp)
+        except Exception:
+            return None
     text = str(value or "").strip()
     if not text:
         return None
+    if re.fullmatch(r"\d{10,13}", text):
+        try:
+            timestamp = float(text)
+            if len(text) >= 13:
+                timestamp = timestamp / 1000
+            return datetime.fromtimestamp(timestamp)
+        except Exception:
+            pass
     if text.endswith("Z"):
         text = text[:-1] + "+00:00"
     try:
@@ -336,7 +354,21 @@ def parse_datetime_value(value):
             continue
     return None
 
-def build_expiry_lookup(change_records: list[dict]) -> dict[str, str]:
+def next_year_last_day(value=None) -> str:
+    dt = parse_datetime_value(value) or datetime.now()
+    return f"{dt.year + 1}-12-31"
+
+def exchange_claimed_state(exchange_state, customer_recipient_id=""):
+    state = safe_int(exchange_state, None)
+    if state in UNCLAIMED_EXCHANGE_STATES:
+        return False
+    if state in CLAIMED_EXCHANGE_STATES:
+        return True
+    if str(customer_recipient_id or "").strip():
+        return True
+    return None
+
+def build_expiry_lookup(change_records: list[dict]) -> dict[str, dict]:
     lookup = {}
     for item in change_records:
         if not isinstance(item, dict):
@@ -345,23 +377,46 @@ def build_expiry_lookup(change_records: list[dict]) -> dict[str, str]:
         created_at = parse_datetime_value(item.get("createTime") or item.get("createdAt") or item.get("createDate"))
         if not goods_name or not created_at:
             continue
-        lookup[goods_name] = (created_at + timedelta(days=7)).strftime("%Y-%m-%d")
+        exchange_state = item.get("exchangeStates", item.get("exchangeState"))
+        lookup[goods_name] = {
+            "expiry_date": (created_at + timedelta(days=7)).strftime("%Y-%m-%d"),
+            "exchange_state": safe_int(exchange_state, None),
+            "claimed": exchange_claimed_state(exchange_state, item.get("customerRecipientId")),
+        }
     return lookup
 
-def find_expiry_date(title: str, expiry_lookup: dict[str, str]) -> str:
+def find_exchange_info(title: str, expiry_lookup: dict) -> dict:
     title = str(title or "").strip()
     if not title:
-        return ""
-    for goods_name, expiry_date in expiry_lookup.items():
+        return {}
+    for goods_name, info in expiry_lookup.items():
         if goods_name and (goods_name == title or goods_name in title or title in goods_name):
-            return expiry_date
+            if isinstance(info, dict):
+                return info
+            return {"expiry_date": str(info or "").strip(), "claimed": None, "exchange_state": None}
+    return {}
+
+def find_expiry_date(title: str, expiry_lookup: dict) -> str:
+    info = find_exchange_info(title, expiry_lookup)
+    if info:
+        return str(info.get("expiry_date") or "").strip()
     return ""
 
-def apply_expiry_dates(records: list[dict], expiry_lookup: dict[str, str]):
+def apply_expiry_dates(records: list[dict], expiry_lookup: dict):
     for item in records:
+        info = find_exchange_info(item.get("title"), expiry_lookup)
+        if not info:
+            continue
+        claimed = info.get("claimed")
+        item["exchange_state"] = info.get("exchange_state")
+        if claimed is True:
+            item["claimed"] = True
+            item["expiry_date"] = ""
+            item["status_text"] = "已经领取"
+            continue
         if truthy(item.get("claimed")):
             continue
-        expiry_date = find_expiry_date(item.get("title"), expiry_lookup)
+        expiry_date = str(info.get("expiry_date") or "").strip()
         if not expiry_date:
             continue
         item["expiry_date"] = expiry_date
@@ -1067,8 +1122,8 @@ class ApiClient:
         for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:3]:
             title = str(item.get("prizeTitle") or item.get("goodsName") or "").strip()
             is_points_prize = "金豆" in title
-            expiry_date = "" if is_points_prize else find_expiry_date(title, expiry_lookup)
-            status_text = "已经领取" if is_points_prize else "未领取"
+            expiry_date = next_year_last_day(item.get("createTime")) if is_points_prize else find_expiry_date(title, expiry_lookup)
+            status_text = f"已经领取 {expiry_date}" if is_points_prize else "未领取"
             if not is_points_prize and expiry_date:
                 status_text = f"未领取 {expiry_date}"
             rows.append({
