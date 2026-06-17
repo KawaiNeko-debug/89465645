@@ -1,14 +1,19 @@
-name: 自动总结组6(免签到)
+name: 单独总结组6(免签到)
 
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: '【可选】输入之前签到成功的 Run ID。如果你的结果文件已直接保存在仓库的 results 文件夹中，请留空！'
+        required: false
+        type: string
 
 env:
   TZ: Asia/Shanghai
 
 permissions:
   contents: read
-  actions: read # 允许使用 gh cli 读取其他 workflow 的运行记录和下载 artifact
+  actions: read 
 
 jobs:
   prepare:
@@ -46,29 +51,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install requests openpyxl
 
-      - name: Auto-download latest results
+      - name: Fetch Artifacts by Run ID
+        if: ${{ github.event.inputs.run_id != '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "正在查找 账户组6 (sign-batch6.yml) 的最新运行记录..."
-          
-          # 自动获取 sign-batch6.yml 最近一次运行的 Run ID
-          RUN_ID=$(gh run list --workflow "sign-batch6.yml" --limit 1 --json databaseId --jq '.[0].databaseId')
-          
-          if [ -z "$RUN_ID" ] || [ "$RUN_ID" == "null" ]; then
-            echo "❌ 未找到 sign-batch6.yml 的运行记录，请确保之前执行过签到。"
-            exit 1
-          fi
-          
-          echo "✅ 找到最新的 Run ID: $RUN_ID"
-          echo "正在下载结果文件..."
-          
-          # 创建结果目录并下载该 run 产生的所有 artifacts
+          echo "正在根据提供的 Run ID: ${{ github.event.inputs.run_id }} 下载数据..."
           mkdir -p results
-          gh run download $RUN_ID --dir results
-          
-          echo "✅ 下载完成！文件列表如下："
-          ls -R results
+          gh run download ${{ github.event.inputs.run_id }} --dir results || echo "⚠️ 下载可能不完整或找不到该记录"
 
       - name: Summarize and notify
         env:
@@ -90,5 +80,10 @@ jobs:
           TELEGRAM_SEND_XLSX: "true"
           TELEGRAM_SEND_TEXT: "true"
         run: |
-          # 运行报表脚本生成 Excel 附件并发送
+          # 确保目录存在，防止 Python 报错
+          mkdir -p results
+          echo "当前 results 目录下的文件："
+          ls -R results
+          
+          # 执行汇总并发送
           python h3/report.py results
