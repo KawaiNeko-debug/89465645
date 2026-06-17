@@ -1,0 +1,87 @@
+name: 单独总结组6(免签到)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '【可选】请输入之前成功签到的 Workflow Run ID (用于跨任务提取结果)。如果结果文件已手动提交到代码库，请留空。'
+        required: false
+        type: string
+
+env:
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: read
+  actions: read # 允许跨 run 下载 artifact 所需的权限
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      count: ${{ steps.matrix.outputs.count }}
+    steps:
+      - id: matrix
+        shell: bash
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH6 }}
+        run: |
+          python - <<'PY'
+          import os
+          lines = [l.strip() for l in os.environ['ACCOUNTS'].splitlines() if l.strip()]
+          count = len(lines)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              f.write(f"count={count}\n")
+          PY
+
+  summary:
+    needs: [prepare]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install notify deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests openpyxl
+
+      - name: Download results from specified run
+        if: ${{ github.event.inputs.run_id != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.inputs.run_id }}
+          pattern: result-*
+          path: results
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true # 防止由于之前任务的 artifact 已被删除导致流程中断
+
+      - name: Summarize and notify
+        env:
+          GROUP_NAME: 账户组6
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.count }}
+          TOTAL_ACCOUNTS: ${{ needs.prepare.outputs.count }}
+          NOTIFY_CHANNELS: telegram
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_SSL }}
+          ACCOUNTS_BATCH6: ${{ secrets.ACCOUNTS_BATCH6 }}
+          TELEGRAM_SEND_XLSX: "true"
+          TELEGRAM_SEND_TEXT: "true"
+        run: |
+          # 确保 results 目录存在，如果之前的运行没有生成结果文件，也能防止 Python 脚本直接因找不到目录而报错
+          mkdir -p results
+          # 运行纯汇总脚本 (会生成并发送 Excel 附件)
+          python h3/report.py results
