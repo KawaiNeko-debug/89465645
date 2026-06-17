@@ -1,4 +1,4 @@
-name: 单独总结组6(免签到)
+name: summary-batch6
 
 on:
   workflow_dispatch:
@@ -17,6 +17,9 @@ on:
         required: false
         default: true
         type: boolean
+  workflow_run:
+    workflows: ["sign-batch6"]
+    types: [completed]
 
 env:
   TZ: Asia/Shanghai
@@ -46,6 +49,7 @@ jobs:
 
   summary:
     needs: [prepare]
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -66,6 +70,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
           PROVIDED_RUN_ID: ${{ inputs.run_id }}
         run: |
           python - <<'PY'
@@ -82,8 +87,12 @@ jobs:
                   return ""
               return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(tz).strftime("%Y-%m-%d")
 
+          event_run_id = (os.getenv("EVENT_RUN_ID") or "").strip()
           provided = (os.getenv("PROVIDED_RUN_ID") or "").strip()
-          if provided:
+          if event_run_id:
+              run_id = event_run_id
+              source = "workflow_run"
+          elif provided:
               run_id = provided
               source = "input"
           else:
@@ -124,19 +133,70 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
         run: |
-          mkdir -p results
-          echo "账户组6 run artifacts:"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
-            --paginate \
-            --jq '.artifacts[] | "\(.name)\texpired=\(.expired)"' || true
-          gh run download "$RUN_ID" --pattern "batch6-result" --dir results || true
-          gh run download "$RUN_ID" --pattern "result-*" --dir results || true
-          json_count="$(find results -type f -name '*.json' | wc -l)"
-          if [ "$json_count" -eq 0 ]; then
-            echo "::error::没有下载到 result.json。组6旧版 workflow 会删除 result-*，如果这个 run 没有 batch6-result，只能重新跑一次组6；新版会保留 batch6-result。"
-            exit 1
-          fi
-          echo "下载到 ${json_count} 个 JSON 结果文件。"
+          python - <<'PY'
+          import io
+          import os
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          import requests
+
+          token = os.getenv("GH_TOKEN")
+          repo = os.getenv("GITHUB_REPOSITORY")
+          run_id = os.getenv("RUN_ID")
+          if not token or not repo or not run_id:
+              raise SystemExit("缺少 GH_TOKEN/GITHUB_REPOSITORY/RUN_ID，无法下载 artifacts。")
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+          artifacts = []
+          page = 1
+          while True:
+              url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
+              response = requests.get(url, headers=headers, params={"per_page": 100, "page": page}, timeout=30)
+              response.raise_for_status()
+              items = response.json().get("artifacts", [])
+              artifacts.extend(items)
+              if len(items) < 100:
+                  break
+              page += 1
+
+          print("账户组6 run artifacts:")
+          for artifact in artifacts:
+              print(f"  - {artifact.get('name')} expired={artifact.get('expired')}")
+
+          selected = [
+              artifact
+              for artifact in artifacts
+              if not artifact.get("expired")
+              and (artifact.get("name") == "batch6-result" or str(artifact.get("name") or "").startswith("result-"))
+          ]
+          if not selected:
+              print("::error::没有找到可下载的 batch6-result 或 result-*。如果这是旧版组6 run，结果很可能已经被 Delete artifacts 删除了，需要重新跑一次账户组6。")
+              sys.exit(1)
+
+          output_dir = Path("results")
+          output_dir.mkdir(parents=True, exist_ok=True)
+          for artifact in selected:
+              name = artifact.get("name") or "artifact"
+              print(f"下载 artifact: {name}")
+              response = requests.get(artifact["archive_download_url"], headers=headers, timeout=60, allow_redirects=True)
+              response.raise_for_status()
+              target_dir = output_dir / name
+              target_dir.mkdir(parents=True, exist_ok=True)
+              with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+                  archive.extractall(target_dir)
+
+          json_count = len(list(output_dir.rglob("*.json")))
+          if json_count == 0:
+              print("::error::已下载 artifact，但里面没有 result.json。")
+              sys.exit(1)
+          print(f"下载到 {json_count} 个 JSON 结果文件。")
+          PY
 
       - name: Normalize group6 metadata
         shell: bash
@@ -194,9 +254,11 @@ jobs:
           SMTP_USE_SSL: ${{ secrets.SMTP_SSL }}
           RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
           ACCOUNTS_BATCH6: ${{ secrets.ACCOUNTS_BATCH6 }}
-          TELEGRAM_SEND_XLSX: ${{ inputs.telegram_xlsx }}
-          TELEGRAM_SEND_TEXT: ${{ inputs.telegram_text }}
+          TELEGRAM_SEND_XLSX_INPUT: ${{ inputs.telegram_xlsx }}
+          TELEGRAM_SEND_TEXT_INPUT: ${{ inputs.telegram_text }}
         run: |
+          export TELEGRAM_SEND_XLSX="${TELEGRAM_SEND_XLSX_INPUT:-true}"
+          export TELEGRAM_SEND_TEXT="${TELEGRAM_SEND_TEXT_INPUT:-true}"
           echo "当前 results 目录下的文件："
           find results -maxdepth 3 -type f | sort
           python h3/report.py results
