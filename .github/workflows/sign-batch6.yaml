@@ -5,6 +5,7 @@ on:
 
 env:
   TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
   contents: read
@@ -54,6 +55,8 @@ jobs:
       TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
       TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
+      GROUP_NAME: 账户组6
+      GROUP_NUMBER: "6"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH6 }}
     steps:
@@ -132,7 +135,7 @@ jobs:
           name: result-${{ matrix.account_index }}
           path: result.json
           if-no-files-found: ignore
-          retention-days: 1
+          retention-days: 2
 
   summary:
     needs: [prepare, run]
@@ -178,6 +181,58 @@ jobs:
         run: |
           python h3/aggregate.py results
 
+      - name: Build final group6 artifact
+        shell: bash
+        env:
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.count }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from datetime import datetime
+          from pathlib import Path
+
+          rows = []
+          for path in Path("results").rglob("*.json"):
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+              except Exception:
+                  continue
+              result_rows = payload.get("results") if isinstance(payload, dict) else None
+              if not isinstance(result_rows, list):
+                  continue
+              for row in result_rows:
+                  if not isinstance(row, dict):
+                      continue
+                  account_index = int(row.get("account_index") or 0)
+                  row["group_name"] = "账户组6"
+                  row["group_number"] = 6
+                  row["group_position"] = f"6组账号{account_index}" if account_index else "6组账号"
+                  rows.append(row)
+
+          rows.sort(key=lambda item: int(item.get("account_index") or 0))
+          output = {
+              "generated_at": datetime.now().isoformat(),
+              "batch_name": "账户组6",
+              "group_name": "账户组6",
+              "group_number": 6,
+              "total_accounts": int(os.getenv("EXPECTED_TOTAL") or len(rows)),
+              "results": rows,
+          }
+          Path("merged").mkdir(parents=True, exist_ok=True)
+          Path("merged/result.json").write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+          print(f"built batch6-result rows={len(rows)}")
+          PY
+
+      - name: Upload final group6 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch6-result
+          path: merged/result.json
+          if-no-files-found: error
+          retention-days: 2
+
       - name: Delete artifacts
         if: always()
         uses: actions/github-script@v7
@@ -192,6 +247,9 @@ jobs:
                 owner, repo, run_id, per_page: 100, page
               });
               for (const artifact of data.artifacts) {
+                if (artifact.name === "batch6-result") {
+                  continue;
+                }
                 await github.rest.actions.deleteArtifact({
                   owner, repo, artifact_id: artifact.id
                 });

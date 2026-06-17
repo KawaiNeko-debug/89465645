@@ -125,10 +125,15 @@ jobs:
           RUN_ID: ${{ steps.resolve_run.outputs.run_id }}
         run: |
           mkdir -p results
-          gh run download "$RUN_ID" --dir results
+          echo "账户组6 run artifacts:"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+            --paginate \
+            --jq '.artifacts[] | "\(.name)\texpired=\(.expired)"' || true
+          gh run download "$RUN_ID" --pattern "batch6-result" --dir results || true
+          gh run download "$RUN_ID" --pattern "result-*" --dir results || true
           json_count="$(find results -type f -name '*.json' | wc -l)"
           if [ "$json_count" -eq 0 ]; then
-            echo "::error::没有下载到 result.json。可能是账户组6 workflow 最后的 Delete artifacts 已经把结果删掉了，只能填仍有 artifact 的 run_id 或重新跑一次组6。"
+            echo "::error::没有下载到 result.json。组6旧版 workflow 会删除 result-*，如果这个 run 没有 batch6-result，只能重新跑一次组6；新版会保留 batch6-result。"
             exit 1
           fi
           echo "下载到 ${json_count} 个 JSON 结果文件。"
