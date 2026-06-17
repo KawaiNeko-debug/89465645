@@ -3,7 +3,7 @@ name: sign-batch5
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 11 * * *"
+    - cron: "30 5 * * *"
 
 env:
   TZ: Asia/Shanghai
