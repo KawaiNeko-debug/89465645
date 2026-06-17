@@ -84,7 +84,7 @@ def default_group_position(group_number: int, account_index: int) -> str:
 def load_account_lookup() -> tuple[dict[tuple[int, int], str], int]:
     lookup = {}
     total = 0
-    for group_number in range(1, 6):
+    for group_number in range(1, 7):
         raw = os.getenv(f"ACCOUNTS_BATCH{group_number}", "") or ""
         for account_index, line in enumerate(raw.splitlines(), start=1):
             line = line.strip()
