@@ -8,6 +8,7 @@ on:
 env:
   TZ: Asia/Shanghai
   RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
   contents: read

@@ -35,6 +35,7 @@ STATUS_RED_FILL = PatternFill("solid", fgColor="F8696B")
 STATUS_YELLOW_FILL = PatternFill("solid", fgColor="FFD966")
 STATUS_BLUE_FILL = PatternFill("solid", fgColor="9DC3E6")
 STATUS_GREEN_FILL = PatternFill("solid", fgColor="C6E0B4")
+PRIZE_ALERT_FILL = PatternFill("solid", fgColor="F8696B")
 FONT_GREEN = Font(color="008000")
 FONT_RED = Font(color="C00000")
 FONT_BLUE = Font(color="1F4E79")
@@ -466,6 +467,13 @@ def font_for_claim_status(value: str) -> Font:
     return FONT_DARK
 
 
+def fill_for_prize(value: str):
+    text = re.sub(r"\s+", "", str(value or ""))
+    if not text or text == "6金豆":
+        return None
+    return PRIZE_ALERT_FILL
+
+
 def activity_status_text(item: dict) -> str:
     status_text = str(item.get("status_text") or "").strip()
     if status_text:
@@ -561,6 +569,10 @@ def write_xlsx(path: str, records: list[dict]):
         if status_fill:
             sheet.cell(row_index, 5).fill = status_fill
         sheet.cell(row_index, 5).font = font_for_status(label)
+        for column_index in (9, 11, 13, 15, 17):
+            prize_fill = fill_for_prize(sheet.cell(row_index, column_index).value)
+            if prize_fill:
+                sheet.cell(row_index, column_index).fill = prize_fill
         for column_index in (10, 12, 14, 16, 18):
             sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
