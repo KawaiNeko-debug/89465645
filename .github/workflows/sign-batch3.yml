@@ -83,12 +83,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: h3/requirements.txt
 
       - name: Install deps
+        timeout-minutes: 20
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r h3/requirements.txt
-          python -m playwright install --with-deps chromium
+          python -m pip install --upgrade pip --timeout 60 --retries 3
+          python -m pip install --timeout 60 --retries 3 -r h3/requirements.txt
+          timeout 900 python -m playwright install --with-deps chromium
 
       - name: Wait for pause window
         env:
@@ -114,6 +117,7 @@ jobs:
           PY
 
       - name: Sign in
+        timeout-minutes: 30
         env:
           RESULT_JSON_PATH: result.json
         run: |
@@ -284,12 +288,15 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: h3/requirements.txt
 
       - name: Install deps
+        timeout-minutes: 20
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r h3/requirements.txt
-          python -m playwright install --with-deps chromium
+          python -m pip install --upgrade pip --timeout 60 --retries 3
+          python -m pip install --timeout 60 --retries 3 -r h3/requirements.txt
+          timeout 900 python -m playwright install --with-deps chromium
 
       - name: Select account
         shell: bash
@@ -307,6 +314,7 @@ jobs:
           PY
 
       - name: Retry sign in on fresh runner
+        timeout-minutes: 30
         env:
           RESULT_JSON_PATH: result.json
         run: |
