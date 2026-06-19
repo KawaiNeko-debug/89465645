@@ -239,7 +239,9 @@ jobs:
                   payload = json.load(f)
               rows = payload.get('results') or []
               row = rows[0] if rows else {}
-              if row and not truthy(row.get('sign_success')) and not truthy(row.get('banned_account')) and not is_risk_controlled(row):
+              banned_data_incomplete = truthy(row.get('banned_account')) and not truthy(row.get('data_fetch_completed'))
+              normal_failure = not truthy(row.get('sign_success')) and not truthy(row.get('banned_account')) and not is_risk_controlled(row)
+              if row and (banned_data_incomplete or normal_failure):
                   failed.append({'account_index': int(row.get('account_index', 0))})
           failed.sort(key=lambda item: item['account_index'])
           matrix = {'include': failed}

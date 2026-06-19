@@ -60,6 +60,8 @@ def load_single_result(path: str):
 def score(row: dict):
     return (
         1 if truthy(row.get("sign_success")) else 0,
+        1 if truthy(row.get("data_fetch_completed")) else 0,
+        int(truthy(row.get("points_fetch_success"))) + int(truthy(row.get("activity_fetch_success"))),
         safe_int(row.get("retry_count"), 0),
         1 if truthy(row.get("risk_controlled")) else 0,
     )
@@ -70,6 +72,8 @@ def pick_result(initial: dict, retry: dict | None):
         return initial
     if is_risk_control_result(initial):
         picked = initial
+    elif truthy(initial.get("banned_account")) and not truthy(retry.get("banned_account")):
+        picked = initial
     elif is_risk_control_result(retry) and not truthy(initial.get("sign_success")):
         picked = retry
     else:
@@ -79,6 +83,27 @@ def pick_result(initial: dict, retry: dict | None):
         for key in ("activity_records", "final_points", "sign_time", "sign_completed_at"):
             if not picked.get(key) and fallback.get(key):
                 picked[key] = fallback[key]
+        if truthy(picked.get("banned_account")):
+            if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
+                for key in ("initial_points", "final_points", "points_reward"):
+                    picked[key] = fallback.get(key, 0.0)
+                picked["points_fetch_success"] = True
+            if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
+                picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
+                picked["activity_fetch_success"] = True
+            picked["data_fetch_completed"] = (
+                truthy(picked.get("points_fetch_success"))
+                and truthy(picked.get("activity_fetch_success"))
+            )
+            failures = []
+            if not truthy(picked.get("points_fetch_success")):
+                failures.append("金豆数量获取失败")
+            if not truthy(picked.get("activity_fetch_success")):
+                failures.append("中奖记录获取未完成")
+            picked["sign_status"] = "账号封禁" if not failures else "封禁账号取数失败"
+            picked["detail_reason"] = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
+            if failures:
+                picked["detail_reason"] += "；" + "；".join(failures)
     return picked
 
 
@@ -151,6 +176,9 @@ def main():
                 "password_error": truthy(row.get("password_error")),
                 "risk_controlled": truthy(row.get("risk_controlled")),
                 "banned_account": truthy(row.get("banned_account")),
+                "points_fetch_success": truthy(row.get("points_fetch_success")),
+                "activity_fetch_success": truthy(row.get("activity_fetch_success")),
+                "data_fetch_completed": truthy(row.get("data_fetch_completed")),
                 "next_day_success": truthy(row.get("next_day_success")),
                 "task_start_date": row.get("task_start_date", ""),
                 "sign_completed_at": row.get("sign_completed_at", ""),

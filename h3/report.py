@@ -175,6 +175,17 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     ).strip()
     detail_reason = str(record.get("detail_reason") or "").strip()
     risk_controlled = truthy(record.get("risk_controlled")) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in detail_reason)
+    banned_account = truthy(record.get("banned_account"))
+    legacy_banned_complete = (
+        banned_account
+        and "BANNED_ACCOUNTS" in detail_reason
+        and not any(text in detail_reason for text in ("获取失败", "未完成", "Token提取失败", "执行异常"))
+    )
+    points_fetch_success = truthy(record.get("points_fetch_success")) or legacy_banned_complete
+    activity_fetch_success = truthy(record.get("activity_fetch_success")) or legacy_banned_complete
+    data_fetch_completed = truthy(record.get("data_fetch_completed")) or (
+        points_fetch_success and activity_fetch_success
+    )
     group_name = str(record.get("group_name") or payload.get("group_name") or payload.get("batch_name") or default_group_name(group_number)).strip()
     group_position = str(record.get("group_position") or default_group_position(group_number, account_index)).strip()
     task_start_date = str(record.get("task_start_date") or payload.get("task_start_date") or "").strip()
@@ -197,7 +208,10 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "has_reward": truthy(record.get("has_reward")),
         "password_error": truthy(record.get("password_error")),
         "risk_controlled": risk_controlled,
-        "banned_account": truthy(record.get("banned_account")),
+        "banned_account": banned_account,
+        "points_fetch_success": points_fetch_success,
+        "activity_fetch_success": activity_fetch_success,
+        "data_fetch_completed": data_fetch_completed,
         "next_day_success": next_day_success,
         "task_start_date": task_start_date,
         "sign_completed_at": str(record.get("sign_completed_at") or "").strip(),
@@ -251,6 +265,9 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "password_error": False,
         "risk_controlled": False,
         "banned_account": False,
+        "points_fetch_success": False,
+        "activity_fetch_success": False,
+        "data_fetch_completed": False,
         "next_day_success": False,
         "task_start_date": "",
         "sign_completed_at": "",
@@ -301,6 +318,8 @@ def merge_records_with_expected(records: list[dict], account_lookup: dict[tuple[
 def status_label(record: dict) -> str:
     raw_status = str(record.get("sign_status") or "")
     if truthy(record.get("banned_account")):
+        if not truthy(record.get("data_fetch_completed")):
+            return "签到异常"
         return "账号封禁"
     if truthy(record.get("next_day_success")):
         return "签到成功但次日"
@@ -326,7 +345,11 @@ def detail_reason(record: dict) -> str:
 
 def detail_text(record: dict) -> str:
     if truthy(record.get("banned_account")):
-        return str(record.get("detail_reason") or "账号在封禁列表中，已跳过签到").strip()
+        reason = str(record.get("detail_reason") or "").strip()
+        if reason:
+            return reason
+        status = str(record.get("sign_status") or "").strip()
+        return f"账号在封禁列表中，已跳过签到；数据获取失败：{status or '未知异常'}"
     if truthy(record.get("sign_success")):
         return str(record.get("sign_status") or "签到成功").strip()
     return detail_reason(record)

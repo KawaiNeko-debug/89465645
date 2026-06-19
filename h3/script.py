@@ -435,6 +435,13 @@ def needs_expiry_lookup(records: list[dict]) -> bool:
 def make_empty_extra_records() -> dict:
     return {"seckill": [], "lottery": []}
 
+def api_response_succeeded(data) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if data.get("success") is True:
+        return True
+    return data.get("success") is None and "data" in data
+
 # ==============================================================================
 # 移动端 UA 池（至少数千条）
 # ==============================================================================
@@ -759,6 +766,12 @@ class ApiClient:
         self.sign_completed_at = ""
         self.activity_records = make_empty_extra_records()
         self.brand_activity_config = None
+        self.brand_activity_config_success = False
+        self.points_fetch_success = False
+        self.seckill_fetch_success = False
+        self.lottery_fetch_success = False
+        self.voucher_fetch_success = False
+        self.activity_fetch_success = False
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -987,6 +1000,7 @@ class ApiClient:
 
             points = extract_integral_voucher(data)
             if points is not None:
+                self.points_fetch_success = True
                 log(f"账号{self.account_index} - 金豆数量获取成功: {points:.1f}")
                 return points
 
@@ -1002,9 +1016,11 @@ class ApiClient:
             )
             points = extract_integral_voucher(data)
             if points is not None:
+                self.points_fetch_success = True
                 log(f"账号{self.account_index} - 金豆数量刷新token后获取成功: {points:.1f}")
                 return points
 
+        self.points_fetch_success = False
         log(f"账号{self.account_index} - 未获取到金豆数量")
         return None
 
@@ -1017,6 +1033,7 @@ class ApiClient:
             dump_json_on_success_false=True,
             prefer_records=True,
         )
+        self.voucher_fetch_success = api_response_succeeded(data)
         records = [item for item in extract_data_list(data) if isinstance(item, dict)]
         log(f"账号{self.account_index} - 金豆变更记录 {len(records)} 条")
         return records
@@ -1031,6 +1048,7 @@ class ApiClient:
             dump_body_on_error=True,
             dump_json_on_success_false=True,
         )
+        self.brand_activity_config_success = api_response_succeeded(data)
         self.brand_activity_config = data if isinstance(data, dict) else {}
         return self.brand_activity_config
 
@@ -1065,6 +1083,7 @@ class ApiClient:
     def fetch_seckill_records(self, expiry_lookup: dict[str, str], category_ids=None) -> list[dict]:
         category_ids = unique_text_values(category_ids or self.get_seckill_category_ids())
         if not category_ids:
+            self.seckill_fetch_success = self.brand_activity_config_success
             return []
         payloads = [
             {"categoryAccessIds": category_ids},
@@ -1078,6 +1097,7 @@ class ApiClient:
             dump_json_on_success_false=True,
             prefer_records=True,
         )
+        self.seckill_fetch_success = api_response_succeeded(data)
         rows = []
         for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:2]:
             title = str(item.get("skuTitle") or item.get("goodsName") or "").strip()
@@ -1118,6 +1138,7 @@ class ApiClient:
             dump_json_on_success_false=True,
             prefer_records=True,
         )
+        self.lottery_fetch_success = api_response_succeeded(data)
         rows = []
         for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:3]:
             title = str(item.get("prizeTitle") or item.get("goodsName") or "").strip()
@@ -1136,6 +1157,7 @@ class ApiClient:
         return rows
 
     def fetch_activity_records(self) -> dict:
+        self.activity_fetch_success = False
         try:
             log(f"账号{self.account_index} - 开始获取秒杀/抽奖中奖记录")
             config = self.fetch_brand_activity_config()
@@ -1148,16 +1170,26 @@ class ApiClient:
                 expiry_lookup = build_expiry_lookup(change_records)
                 apply_expiry_dates(seckill_records, expiry_lookup)
                 apply_expiry_dates(lottery_records, expiry_lookup)
+                expiry_fetch_success = self.voucher_fetch_success
             else:
                 log(f"账号{self.account_index} - 未发现需要补截止时间的未领取奖品，跳过过期时间查询")
+                expiry_fetch_success = True
             self.activity_records = {
                 "seckill": seckill_records,
                 "lottery": lottery_records,
             }
+            self.activity_fetch_success = (
+                self.seckill_fetch_success
+                and self.lottery_fetch_success
+                and expiry_fetch_success
+            )
             log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+            if not self.activity_fetch_success:
+                log(f"账号{self.account_index} - 活动接口未全部成功，本次结果将允许重试")
         except Exception as e:
             log(f"账号{self.account_index} - 活动记录抓取异常: {e}")
             self.activity_records = make_empty_extra_records()
+            self.activity_fetch_success = False
         return self.activity_records
 
     def execute_banned_process(self):
@@ -1169,6 +1201,16 @@ class ApiClient:
         self.sign_status = "账号封禁"
         self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过签到" if points is not None else "账号在 BANNED_ACCOUNTS 中，已跳过签到；金豆数量获取失败"
         return True
+
+    def finalize_banned_data_status(self):
+        failures = []
+        if not self.points_fetch_success:
+            failures.append("金豆数量获取失败")
+        if not self.activity_fetch_success:
+            failures.append("中奖记录获取未完成")
+        self.detail_reason = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
+        if failures:
+            self.detail_reason += "；" + "；".join(failures)
 
     def get_sign_config(self):
         url = f"{self.base_url}{SIGN_CONFIG_PATH}"
@@ -1419,6 +1461,9 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'sign_time': '',
         'sign_ip': '',
         'banned_account': banned_account,
+        'points_fetch_success': False,
+        'activity_fetch_success': False,
+        'data_fetch_completed': False,
         'next_day_success': False,
         'task_start_date': task_start_date,
         'sign_completed_at': '',
@@ -1578,6 +1623,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                             client.points_reward = client.final_points - client.initial_points
 
                 client.fetch_activity_records()
+                if banned_account:
+                    client.finalize_banned_data_status()
                 result.update({
                     'sign_success': success,
                     'sign_status': '账号封禁' if banned_account else ('签到风控' if client.risk_controlled and not success else client.sign_status),
@@ -1588,16 +1635,28 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     'risk_controlled': client.risk_controlled,
                     'detail_reason': client.detail_reason,
                     'banned_account': banned_account,
+                    'points_fetch_success': client.points_fetch_success,
+                    'activity_fetch_success': client.activity_fetch_success,
+                    'data_fetch_completed': client.points_fetch_success and client.activity_fetch_success,
                     'sign_completed_at': client.sign_completed_at,
                     'activity_records': client.activity_records,
                 })
             else:
                 log(f"账号{account_index} - ❌ 未提取到 token")
-                result['sign_status'] = 'Token提取失败'
+                result['sign_status'] = '封禁账号取数失败' if banned_account else 'Token提取失败'
+                result['detail_reason'] = (
+                    '账号在 BANNED_ACCOUNTS 中，已跳过签到；Token提取失败，未能获取金豆和中奖记录'
+                    if banned_account else 'Token提取失败'
+                )
 
         except Exception as e:
             log(f"账号{account_index} - ❌ 执行异常: {e}")
-            result['sign_status'] = '执行异常'
+            result['sign_status'] = '封禁账号取数失败' if banned_account else '执行异常'
+            error_text = redact_sensitive(truncate_text(str(e), 500))
+            result['detail_reason'] = (
+                f'账号在 BANNED_ACCOUNTS 中，已跳过签到；数据获取执行异常: {error_text}'
+                if banned_account else f'执行异常: {error_text}'
+            )
         finally:
             if context:
                 context.close()
@@ -1612,12 +1671,15 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
 # 重试逻辑与结果合并（保持不变）
 # ==============================================================================
 def should_retry(res):
-    if res.get('banned_account'):
-        return False
     if res.get('password_error'):
         return False
     if is_risk_control_result(res):
         return False
+    if res.get('banned_account'):
+        if 'data_fetch_completed' in res:
+            return not truthy(res.get('data_fetch_completed'))
+        reason = str(res.get('detail_reason') or '')
+        return not reason or any(text in reason for text in ('获取失败', '未完成', 'Token提取失败', '执行异常'))
     return not res['sign_success']
 
 def process_single_account(username, password, account_index, total_accounts):
@@ -1641,6 +1703,9 @@ def process_single_account(username, password, account_index, total_accounts):
         'sign_time': '',
         'sign_ip': '',
         'banned_account': is_banned_account(username),
+        'points_fetch_success': False,
+        'activity_fetch_success': False,
+        'data_fetch_completed': False,
         'next_day_success': False,
         'task_start_date': normalize_task_start_date(),
         'sign_completed_at': '',
@@ -1661,7 +1726,33 @@ def process_single_account(username, password, account_index, total_accounts):
             merged['activity_records'] = res.get('activity_records') or make_empty_extra_records()
             break
 
-        if res['sign_success'] and not merged['sign_success']:
+        if merged.get('banned_account'):
+            merged['token_extracted'] = truthy(merged.get('token_extracted')) or truthy(res.get('token_extracted'))
+            merged['secretkey_extracted'] = truthy(merged.get('secretkey_extracted')) or truthy(res.get('secretkey_extracted'))
+            if truthy(res.get('points_fetch_success')):
+                for key in ('initial_points', 'final_points', 'points_reward'):
+                    merged[key] = res.get(key, 0)
+                merged['points_fetch_success'] = True
+            if truthy(res.get('activity_fetch_success')):
+                merged['activity_records'] = res.get('activity_records') or make_empty_extra_records()
+                merged['activity_fetch_success'] = True
+            for key in ('sign_time', 'sign_ip', 'task_start_date', 'sign_completed_at'):
+                if res.get(key):
+                    merged[key] = res.get(key)
+            merged['data_fetch_completed'] = (
+                truthy(merged.get('points_fetch_success'))
+                and truthy(merged.get('activity_fetch_success'))
+            )
+            merged['sign_status'] = '账号封禁' if merged['data_fetch_completed'] else '封禁账号取数失败'
+            failures = []
+            if not merged.get('points_fetch_success'):
+                failures.append('金豆数量获取失败')
+            if not merged.get('activity_fetch_success'):
+                failures.append('中奖记录获取未完成')
+            merged['detail_reason'] = '账号在 BANNED_ACCOUNTS 中，已跳过签到'
+            if failures:
+                merged['detail_reason'] += '；' + '；'.join(failures)
+        elif res['sign_success'] and not merged['sign_success']:
             for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
                 merged[k] = res[k]
         elif not merged['sign_success']:
@@ -1717,7 +1808,33 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             })
             continue
 
-        if final['sign_success'] and not orig['sign_success']:
+        if orig.get('banned_account'):
+            orig['token_extracted'] = truthy(orig.get('token_extracted')) or truthy(final.get('token_extracted'))
+            orig['secretkey_extracted'] = truthy(orig.get('secretkey_extracted')) or truthy(final.get('secretkey_extracted'))
+            if truthy(final.get('points_fetch_success')):
+                for key in ('initial_points', 'final_points', 'points_reward'):
+                    orig[key] = final.get(key, 0)
+                orig['points_fetch_success'] = True
+            if truthy(final.get('activity_fetch_success')):
+                orig['activity_records'] = final.get('activity_records') or make_empty_extra_records()
+                orig['activity_fetch_success'] = True
+            for key in ('sign_time', 'sign_ip', 'task_start_date', 'sign_completed_at'):
+                if final.get(key):
+                    orig[key] = final.get(key)
+            orig['data_fetch_completed'] = (
+                truthy(orig.get('points_fetch_success'))
+                and truthy(orig.get('activity_fetch_success'))
+            )
+            failures = []
+            if not orig.get('points_fetch_success'):
+                failures.append('金豆数量获取失败')
+            if not orig.get('activity_fetch_success'):
+                failures.append('中奖记录获取未完成')
+            orig['sign_status'] = '账号封禁' if not failures else '封禁账号取数失败'
+            orig['detail_reason'] = '账号在 BANNED_ACCOUNTS 中，已跳过签到'
+            if failures:
+                orig['detail_reason'] += '；' + '；'.join(failures)
+        elif final['sign_success'] and not orig['sign_success']:
             for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
                 orig[k] = final[k]
         elif not orig['sign_success']:
@@ -1747,6 +1864,8 @@ def summarize_results(all_results):
     for r in all_results:
         if r.get('banned_account'):
             banned_accounts.append(r)
+            if not truthy(r.get('data_fetch_completed')):
+                other_failed.append(r)
             continue
         if r.get('sign_success'):
             success_count += 1
@@ -1842,6 +1961,9 @@ def write_results_json(path, all_results, total_accounts):
                 "password_error": r.get("password_error"),
                 "risk_controlled": r.get("risk_controlled"),
                 "banned_account": r.get("banned_account"),
+                "points_fetch_success": r.get("points_fetch_success"),
+                "activity_fetch_success": r.get("activity_fetch_success"),
+                "data_fetch_completed": r.get("data_fetch_completed"),
                 "next_day_success": r.get("next_day_success"),
                 "task_start_date": r.get("task_start_date"),
                 "sign_completed_at": r.get("sign_completed_at"),
@@ -1915,7 +2037,11 @@ def main():
     if result_json_path:
         write_results_json(result_json_path, all_results, total)
 
-    failed_exists = any((not r['sign_success'] and not r.get('banned_account') and not r.get('password_error')) for r in all_results) or any(r.get('password_error') for r in all_results)
+    failed_exists = (
+        any(not r['sign_success'] and not r.get('banned_account') and not r.get('password_error') for r in all_results)
+        or any(r.get('password_error') for r in all_results)
+        or any(r.get('banned_account') and not truthy(r.get('data_fetch_completed')) for r in all_results)
+    )
     if enable_failure_exit and failed_exists:
         log("❌ 存在失败账号，退出码设为1")
         sys.exit(1)
