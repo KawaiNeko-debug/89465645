@@ -8,7 +8,7 @@ import smtplib
 import threading
 import re
 from email.message import EmailMessage
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from fake_useragent import UserAgent
@@ -27,10 +27,11 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-15-points-expiry-v9"
+SCRIPT_VERSION = "2026-06-22-lottery-claim-expiry-v10"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 UNCLAIMED_EXCHANGE_STATES = {1}
 CLAIMED_EXCHANGE_STATES = {2, 6}
+LOTTERY_CLAIMED_EXCHANGE_STATES = {2, 3, 6}
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -368,6 +369,26 @@ def exchange_claimed_state(exchange_state, customer_recipient_id=""):
         return True
     return None
 
+def lottery_exchange_claimed_state(exchange_state, customer_recipient_id=""):
+    state = safe_int(exchange_state, None)
+    if state in UNCLAIMED_EXCHANGE_STATES:
+        return False
+    if state in LOTTERY_CLAIMED_EXCHANGE_STATES:
+        return True
+    if str(customer_recipient_id or "").strip():
+        return True
+    return None
+
+def expiry_status_text(expiry_date: str, unclaimed_text="未领取") -> str:
+    expiry_date = str(expiry_date or "").strip()
+    if not expiry_date:
+        return unclaimed_text
+    expiry_dt = parse_datetime_value(expiry_date)
+    local_today = datetime.now(timezone(timedelta(hours=8))).date()
+    if expiry_dt and local_today > expiry_dt.date():
+        return f"已过期 {expiry_date}"
+    return f"{unclaimed_text} {expiry_date}"
+
 def build_expiry_lookup(change_records: list[dict]) -> dict[str, dict]:
     lookup = {}
     for item in change_records:
@@ -378,18 +399,31 @@ def build_expiry_lookup(change_records: list[dict]) -> dict[str, dict]:
         if not goods_name or not created_at:
             continue
         exchange_state = item.get("exchangeStates", item.get("exchangeState"))
-        lookup[goods_name] = {
+        exchange_goods_access_id = str(item.get("exchangeGoodsAccessId") or "").strip()
+        info = {
+            "goods_name": goods_name,
             "expiry_date": (created_at + timedelta(days=7)).strftime("%Y-%m-%d"),
             "exchange_state": safe_int(exchange_state, None),
+            "customer_recipient_id": str(item.get("customerRecipientId") or "").strip(),
+            "exchange_goods_access_id": exchange_goods_access_id,
             "claimed": exchange_claimed_state(exchange_state, item.get("customerRecipientId")),
         }
+        if exchange_goods_access_id:
+            lookup[f"id:{exchange_goods_access_id}"] = info
+        lookup[f"name:{goods_name}"] = info
     return lookup
 
-def find_exchange_info(title: str, expiry_lookup: dict) -> dict:
+def find_exchange_info(title: str, expiry_lookup: dict, exchange_goods_access_id="") -> dict:
     title = str(title or "").strip()
+    exchange_goods_access_id = str(exchange_goods_access_id or "").strip()
+    if exchange_goods_access_id:
+        info = expiry_lookup.get(f"id:{exchange_goods_access_id}")
+        if isinstance(info, dict):
+            return info
     if not title:
         return {}
-    for goods_name, info in expiry_lookup.items():
+    for lookup_key, info in expiry_lookup.items():
+        goods_name = str(info.get("goods_name") or "").strip() if isinstance(info, dict) else str(lookup_key)
         if goods_name and (goods_name == title or goods_name in title or title in goods_name):
             if isinstance(info, dict):
                 return info
@@ -402,12 +436,22 @@ def find_expiry_date(title: str, expiry_lookup: dict) -> str:
         return str(info.get("expiry_date") or "").strip()
     return ""
 
-def apply_expiry_dates(records: list[dict], expiry_lookup: dict):
+def apply_expiry_dates(records: list[dict], expiry_lookup: dict, lottery=False):
     for item in records:
-        info = find_exchange_info(item.get("title"), expiry_lookup)
+        info = find_exchange_info(
+            item.get("title"),
+            expiry_lookup,
+            item.get("biz_order_code") if lottery else "",
+        )
         if not info:
             continue
-        claimed = info.get("claimed")
+        claimed = (
+            lottery_exchange_claimed_state(
+                info.get("exchange_state"),
+                info.get("customer_recipient_id"),
+            )
+            if lottery else info.get("claimed")
+        )
         item["exchange_state"] = info.get("exchange_state")
         if claimed is True:
             item["claimed"] = True
@@ -420,8 +464,12 @@ def apply_expiry_dates(records: list[dict], expiry_lookup: dict):
         if not expiry_date:
             continue
         item["expiry_date"] = expiry_date
-        status_text = str(item.get("status_text") or "").strip() or "未领取"
-        item["status_text"] = f"{status_text} {expiry_date}" if expiry_date not in status_text else status_text
+        if lottery:
+            item["claimed"] = False
+            item["status_text"] = expiry_status_text(expiry_date)
+        else:
+            status_text = str(item.get("status_text") or "").strip() or "未领取"
+            item["status_text"] = f"{status_text} {expiry_date}" if expiry_date not in status_text else status_text
 
 def needs_expiry_lookup(records: list[dict]) -> bool:
     return any(
@@ -1152,6 +1200,8 @@ class ApiClient:
                 "claimed": is_points_prize,
                 "status_text": status_text,
                 "expiry_date": expiry_date,
+                "biz_order_code": str(item.get("bizOrderCode") or "").strip(),
+                "receive_status": safe_int(item.get("receiveStatus"), None),
             })
         log(f"账号{self.account_index} - 抽奖记录解析 {len(rows)} 条")
         return rows
@@ -1169,7 +1219,7 @@ class ApiClient:
                 change_records = self.fetch_voucher_change_records()
                 expiry_lookup = build_expiry_lookup(change_records)
                 apply_expiry_dates(seckill_records, expiry_lookup)
-                apply_expiry_dates(lottery_records, expiry_lookup)
+                apply_expiry_dates(lottery_records, expiry_lookup, lottery=True)
                 expiry_fetch_success = self.voucher_fetch_success
             else:
                 log(f"账号{self.account_index} - 未发现需要补截止时间的未领取奖品，跳过过期时间查询")

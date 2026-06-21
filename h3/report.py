@@ -485,7 +485,7 @@ def font_for_claim_status(value: str) -> Font:
     text = str(value or "")
     if "已经领取" in text:
         return FONT_GREEN
-    if "未领取" in text or "暂未领取" in text:
+    if "未领取" in text or "暂未领取" in text or "已过期" in text:
         return FONT_RED
     return FONT_DARK
 
