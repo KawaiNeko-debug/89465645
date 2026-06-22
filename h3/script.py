@@ -27,8 +27,10 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-22-lottery-claim-expiry-v10"
+SCRIPT_VERSION = "2026-06-23-seckill-id-fallback-v11"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+DEFAULT_SECKILL_CATEGORY_ACCESS_IDS = ["805341c7b7c242c6a8deb5c8789336b2"]
+DEFAULT_LOTTERY_ACTIVITY_CODE = "LAKU"
 UNCLAIMED_EXCHANGE_STATES = {1}
 CLAIMED_EXCHANGE_STATES = {2, 6}
 LOTTERY_CLAIMED_EXCHANGE_STATES = {2, 3, 6}
@@ -1101,32 +1103,25 @@ class ApiClient:
         return self.brand_activity_config
 
     def get_seckill_category_ids(self, config=None) -> list[str]:
-        configured = parse_string_list(os.getenv("SECKILL_CATEGORY_ACCESS_IDS") or os.getenv("SECKILL_CATEGORY_ACCESS_ID"))
-        if configured:
-            log(f"账号{self.account_index} - 使用环境变量中的秒杀分类ID: {', '.join(configured)}")
-            return configured
         config = config if isinstance(config, dict) else self.fetch_brand_activity_config()
         values = find_values_by_key(config, {"seckillActivityId", "categoryAccessId"})
         ids = unique_text_values(values)
         if ids:
             log(f"账号{self.account_index} - 从活动配置发现秒杀分类ID: {', '.join(ids)}")
-        else:
-            log(f"账号{self.account_index} - 未发现秒杀分类ID，跳过秒杀记录查询")
-        return ids
+            return ids
+        fallback_ids = list(DEFAULT_SECKILL_CATEGORY_ACCESS_IDS)
+        log(f"账号{self.account_index} - 品牌活动配置未提供秒杀分类ID，使用固定活动ID兜底: {', '.join(fallback_ids)}")
+        return fallback_ids
 
     def get_lottery_activity_code(self, config=None) -> str:
-        configured = (os.getenv("LOTTERY_ACTIVITY_CODE") or "").strip()
-        if configured:
-            log(f"账号{self.account_index} - 使用环境变量中的抽奖活动码: {configured}")
-            return configured
         config = config if isinstance(config, dict) else self.fetch_brand_activity_config()
         values = find_values_by_key(config, {"lotteryActivityId", "activityCode"})
         codes = unique_text_values(values)
         if codes:
             log(f"账号{self.account_index} - 从活动配置发现抽奖活动码: {codes[0]}")
             return codes[0]
-        log(f"账号{self.account_index} - 未发现抽奖活动码，抽奖记录将尝试通用查询")
-        return ""
+        log(f"账号{self.account_index} - 品牌活动配置未提供抽奖活动码，使用固定活动码兜底: {DEFAULT_LOTTERY_ACTIVITY_CODE}")
+        return DEFAULT_LOTTERY_ACTIVITY_CODE
 
     def fetch_seckill_records(self, expiry_lookup: dict[str, str], category_ids=None) -> list[dict]:
         category_ids = unique_text_values(category_ids or self.get_seckill_category_ids())
@@ -1206,6 +1201,25 @@ class ApiClient:
         log(f"账号{self.account_index} - 抽奖记录解析 {len(rows)} 条")
         return rows
 
+    def fetch_activity_component_with_retry(self, tag, fetcher, success_attr) -> list[dict]:
+        records = []
+        for attempt in range(2):
+            try:
+                records = fetcher()
+            except Exception as e:
+                setattr(self, success_attr, False)
+                records = []
+                log(f"账号{self.account_index} - {tag}抓取异常: {e}")
+            if truthy(getattr(self, success_attr, False)):
+                if attempt > 0:
+                    log(f"账号{self.account_index} - {tag}活动数据重试成功")
+                return records
+            if attempt == 0:
+                log(f"账号{self.account_index} - {tag}首次请求未完成，当前登录会话内重试一次（不会调用签到接口）")
+                time.sleep(random.uniform(0.8, 1.5))
+        log(f"账号{self.account_index} - {tag}重试后仍未获取成功")
+        return records
+
     def fetch_activity_records(self) -> dict:
         self.activity_fetch_success = False
         try:
@@ -1213,8 +1227,16 @@ class ApiClient:
             config = self.fetch_brand_activity_config()
             seckill_category_ids = self.get_seckill_category_ids(config)
             lottery_activity_code = self.get_lottery_activity_code(config)
-            seckill_records = self.fetch_seckill_records({}, seckill_category_ids)
-            lottery_records = self.fetch_lottery_wins({}, lottery_activity_code)
+            seckill_records = self.fetch_activity_component_with_retry(
+                "秒杀记录",
+                lambda: self.fetch_seckill_records({}, seckill_category_ids),
+                "seckill_fetch_success",
+            )
+            lottery_records = self.fetch_activity_component_with_retry(
+                "抽奖记录",
+                lambda: self.fetch_lottery_wins({}, lottery_activity_code),
+                "lottery_fetch_success",
+            )
             if needs_expiry_lookup(seckill_records + lottery_records):
                 change_records = self.fetch_voucher_change_records()
                 expiry_lookup = build_expiry_lookup(change_records)
@@ -1235,11 +1257,24 @@ class ApiClient:
             )
             log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
             if not self.activity_fetch_success:
-                log(f"账号{self.account_index} - 活动接口未全部成功，本次结果将允许重试")
+                failures = []
+                if not self.seckill_fetch_success:
+                    failures.append("秒杀数据获取失败")
+                if not self.lottery_fetch_success:
+                    failures.append("抽奖数据获取失败")
+                if not expiry_fetch_success:
+                    failures.append("奖品过期记录获取失败")
+                failure_reason = "；".join(failures) or "活动数据获取失败"
+                if failure_reason not in self.detail_reason:
+                    self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
+                log(f"账号{self.account_index} - 活动接口重试后仍未全部成功: {failure_reason}")
         except Exception as e:
             log(f"账号{self.account_index} - 活动记录抓取异常: {e}")
             self.activity_records = make_empty_extra_records()
             self.activity_fetch_success = False
+            failure_reason = f"活动数据抓取异常: {redact_sensitive(truncate_text(str(e), 500))}"
+            if failure_reason not in self.detail_reason:
+                self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
         return self.activity_records
 
     def execute_banned_process(self):

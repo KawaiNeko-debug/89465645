@@ -351,6 +351,11 @@ def detail_text(record: dict) -> str:
         status = str(record.get("sign_status") or "").strip()
         return f"账号在封禁列表中，已跳过签到；数据获取失败：{status or '未知异常'}"
     if truthy(record.get("sign_success")):
+        reason = str(record.get("detail_reason") or "").strip()
+        activity_failure_markers = ("秒杀数据获取失败", "抽奖数据获取失败", "奖品过期记录获取失败", "活动数据抓取异常")
+        if any(marker in reason for marker in activity_failure_markers):
+            status = str(record.get("sign_status") or "签到成功").strip()
+            return f"{status}；{reason}" if status not in reason else reason
         return str(record.get("sign_status") or "签到成功").strip()
     return detail_reason(record)
 
