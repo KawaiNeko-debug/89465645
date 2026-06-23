@@ -1,10 +1,20 @@
 import glob
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+DATA_FAILURE_MARKERS = (
+    "金豆数量获取失败",
+    "中奖记录获取未完成",
+    "秒杀数据获取失败",
+    "抽奖数据获取失败",
+    "奖品过期记录获取失败",
+    "活动数据获取失败",
+    "活动数据抓取异常",
+)
 
 
 def truthy(value) -> bool:
@@ -37,6 +47,32 @@ def safe_int(value, default=0) -> int:
         return int(str(value).strip())
     except Exception:
         return default
+
+
+def strip_resolved_data_failures(text: str) -> str:
+    parts = [part.strip() for part in re.split(r"[；;]\s*", str(text or "")) if part.strip()]
+    kept = [part for part in parts if not any(marker in part for marker in DATA_FAILURE_MARKERS)]
+    return "；".join(kept)
+
+
+def merge_data_fields(picked: dict, fallback: dict | None):
+    if not fallback:
+        return
+    if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
+        for key in ("initial_points", "final_points", "points_reward"):
+            picked[key] = fallback.get(key, 0.0)
+        picked["points_fetch_success"] = True
+    if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
+        picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
+        picked["activity_fetch_success"] = True
+    picked["data_fetch_completed"] = (
+        truthy(picked.get("points_fetch_success"))
+        and truthy(picked.get("activity_fetch_success"))
+    )
+    if truthy(picked.get("data_fetch_completed")):
+        picked["detail_reason"] = strip_resolved_data_failures(picked.get("detail_reason", ""))
+        if is_risk_control_result(picked) and not picked.get("detail_reason"):
+            picked["detail_reason"] = RISK_CONTROL_MESSAGE
 
 
 def load_single_result(path: str):
@@ -83,6 +119,7 @@ def pick_result(initial: dict, retry: dict | None):
         for key in ("activity_records", "final_points", "sign_time", "sign_completed_at"):
             if not picked.get(key) and fallback.get(key):
                 picked[key] = fallback[key]
+        merge_data_fields(picked, fallback)
         if truthy(picked.get("banned_account")):
             if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
                 for key in ("initial_points", "final_points", "points_reward"):

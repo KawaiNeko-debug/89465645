@@ -239,10 +239,27 @@ jobs:
                   payload = json.load(f)
               rows = payload.get('results') or []
               row = rows[0] if rows else {}
+              risk_controlled = is_risk_controlled(row)
               banned_data_incomplete = truthy(row.get('banned_account')) and not truthy(row.get('data_fetch_completed'))
-              normal_failure = not truthy(row.get('sign_success')) and not truthy(row.get('banned_account')) and not is_risk_controlled(row)
-              if row and (banned_data_incomplete or normal_failure):
-                  failed.append({'account_index': int(row.get('account_index', 0))})
+              terminal_data_incomplete = (
+                  not truthy(row.get('banned_account'))
+                  and not truthy(row.get('data_fetch_completed'))
+                  and (truthy(row.get('sign_success')) or risk_controlled)
+              )
+              normal_failure = (
+                  not truthy(row.get('sign_success'))
+                  and not truthy(row.get('banned_account'))
+                  and not truthy(row.get('password_error'))
+                  and not risk_controlled
+              )
+              if row and (banned_data_incomplete or terminal_data_incomplete or normal_failure):
+                  failed.append({
+                      'account_index': int(row.get('account_index', 0)),
+                      'data_only_retry': bool(terminal_data_incomplete),
+                      'previous_sign_success': truthy(row.get('sign_success')),
+                      'previous_risk_controlled': risk_controlled,
+                      'previous_final_points': row.get('final_points') or 0,
+                  })
           failed.sort(key=lambda item: item['account_index'])
           matrix = {'include': failed}
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
@@ -276,6 +293,10 @@ jobs:
       GROUP_NAME: batch2
       GROUP_NUMBER: "2"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
+      DATA_ONLY_RETRY: "${{ matrix.data_only_retry }}"
+      PREVIOUS_SIGN_SUCCESS: "${{ matrix.previous_sign_success }}"
+      PREVIOUS_RISK_CONTROLLED: "${{ matrix.previous_risk_controlled }}"
+      PREVIOUS_FINAL_POINTS: "${{ matrix.previous_final_points }}"
       EXECUTION_ORDER: ${{ matrix.account_index }}
       ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH2 }}
     steps:

@@ -27,7 +27,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-23-seckill-id-fallback-v11"
+SCRIPT_VERSION = "2026-06-23-data-only-retry-v12"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 DEFAULT_SECKILL_CATEGORY_ACCESS_IDS = ["805341c7b7c242c6a8deb5c8789336b2"]
 DEFAULT_LOTTERY_ACTIVITY_CODE = "LAKU"
@@ -223,6 +223,18 @@ def is_risk_control_result(res: dict) -> bool:
         res.get("detail_reason"),
         res.get("sign_status"),
     )
+
+def is_data_only_retry_mode() -> bool:
+    return truthy(os.getenv("DATA_ONLY_RETRY"))
+
+def retry_previous_sign_success() -> bool:
+    return truthy(os.getenv("PREVIOUS_SIGN_SUCCESS"))
+
+def retry_previous_risk_controlled() -> bool:
+    return truthy(os.getenv("PREVIOUS_RISK_CONTROLLED"))
+
+def retry_previous_final_points() -> float:
+    return safe_float(os.getenv("PREVIOUS_FINAL_POINTS"), 0.0)
 
 def parse_banned_accounts(raw=None) -> set[str]:
     raw = os.getenv("BANNED_ACCOUNTS", "") if raw is None else raw
@@ -1523,17 +1535,23 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     log(f"开始处理账号 {account_index}/{total_accounts}{label}")
     task_start_date = normalize_task_start_date()
     banned_account = is_banned_account(username)
+    data_only_retry = is_data_only_retry_mode()
+    previous_sign_success = retry_previous_sign_success()
+    previous_risk_controlled = retry_previous_risk_controlled()
+    previous_final_points = retry_previous_final_points()
     if banned_account:
         log(f"账号{account_index} - 命中 BANNED_ACCOUNTS，登录后只获取金豆与活动记录，跳过签到")
+    elif data_only_retry:
+        log(f"账号{account_index} - 补数据重试模式：登录后只获取金豆与秒杀/抽奖记录，跳过签到接口")
 
     result = {
         'account_index': account_index,
         'username': username,
         'masked_username': mask_account(username),
-        'sign_status': '未知',
-        'sign_success': False,
-        'initial_points': 0,
-        'final_points': 0,
+        'sign_status': '签到风控' if previous_risk_controlled else ('补数据重试' if data_only_retry else '未知'),
+        'sign_success': previous_sign_success if data_only_retry else False,
+        'initial_points': previous_final_points if data_only_retry else 0,
+        'final_points': previous_final_points if data_only_retry else 0,
         'points_reward': 0,
         'has_reward': False,
         'token_extracted': False,
@@ -1541,8 +1559,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'retry_count': retry_count,
         'is_final_retry': is_final_retry,
         'password_error': False,
-        'risk_controlled': False,
-        'detail_reason': '',
+        'risk_controlled': previous_risk_controlled if data_only_retry else False,
+        'detail_reason': RISK_CONTROL_MESSAGE if previous_risk_controlled else ('补数据重试，跳过签到接口' if data_only_retry else ''),
         'sign_time': '',
         'sign_ip': '',
         'banned_account': banned_account,
@@ -1698,6 +1716,19 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     log(f"账号{account_index} - 封禁账号已登录，开始获取金豆数量")
                     client.execute_banned_process()
                     success = False
+                elif data_only_retry:
+                    client.risk_controlled = previous_risk_controlled
+                    client.sign_status = '签到风控' if previous_risk_controlled else '补数据重试'
+                    client.detail_reason = RISK_CONTROL_MESSAGE if previous_risk_controlled else '补数据重试，跳过签到接口'
+                    success = previous_sign_success
+                    latest_points = client.get_points()
+                    if latest_points is not None:
+                        client.initial_points = previous_final_points or latest_points
+                        client.final_points = latest_points
+                        client.points_reward = 0.0 if not previous_final_points else latest_points - previous_final_points
+                    else:
+                        client.initial_points = previous_final_points
+                        client.final_points = previous_final_points
                 else:
                     log(f"账号{account_index} - 使用 token 进行签到（只GET；未领取先领；非第7天领完再签一次）")
                     success = client.execute_full_process()
@@ -1838,10 +1869,10 @@ def process_single_account(username, password, account_index, total_accounts):
             if failures:
                 merged['detail_reason'] += '；' + '；'.join(failures)
         elif res['sign_success'] and not merged['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
                 merged[k] = res[k]
         elif not merged['sign_success']:
-            for k in ['sign_status', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
                 merged[k] = res.get(k)
 
         merged['retry_count'] = res['retry_count']
@@ -1920,10 +1951,10 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             if failures:
                 orig['detail_reason'] += '；' + '；'.join(failures)
         elif final['sign_success'] and not orig['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
                 orig[k] = final[k]
         elif not orig['sign_success']:
-            for k in ['sign_status', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
                 orig[k] = final.get(k)
 
         orig.update({
@@ -2043,6 +2074,8 @@ def write_results_json(path, all_results, total_accounts):
                 "final_points": r.get("final_points"),
                 "points_reward": r.get("points_reward"),
                 "has_reward": r.get("has_reward"),
+                "token_extracted": r.get("token_extracted"),
+                "secretkey_extracted": r.get("secretkey_extracted"),
                 "password_error": r.get("password_error"),
                 "risk_controlled": r.get("risk_controlled"),
                 "banned_account": r.get("banned_account"),
