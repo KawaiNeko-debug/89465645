@@ -8,6 +8,8 @@ on:
 env:
   TZ: Asia/Shanghai
   RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+  VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
+  VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
@@ -252,10 +254,11 @@ jobs:
                   and not truthy(row.get('password_error'))
                   and not risk_controlled
               )
-              if row and (banned_data_incomplete or terminal_data_incomplete or normal_failure):
+              vote_incomplete = truthy(row.get('vote_required')) and not truthy(row.get('vote_success'))
+              if row and (banned_data_incomplete or terminal_data_incomplete or normal_failure or vote_incomplete):
                   failed.append({
                       'account_index': int(row.get('account_index', 0)),
-                      'data_only_retry': bool(terminal_data_incomplete),
+                      'data_only_retry': bool(terminal_data_incomplete or (vote_incomplete and (truthy(row.get('sign_success')) or risk_controlled))),
                       'previous_sign_success': truthy(row.get('sign_success')),
                       'previous_risk_controlled': risk_controlled,
                       'previous_final_points': row.get('final_points') or 0,

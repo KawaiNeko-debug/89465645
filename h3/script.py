@@ -13,6 +13,46 @@ from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from fake_useragent import UserAgent
 
+try:
+    from campaign_vote import (
+        CAMPAIGN_URL,
+        VOTE_ACTIVITY_ACCESS_ID,
+        VOTE_API_BASE,
+        VOTE_CONFIG_PATH,
+        VOTE_END_DATE,
+        VOTE_PRODUCT_NAME,
+        VOTE_PRODUCT_SKU,
+        VOTE_START_DATE,
+        VOTE_SUBMIT_PATH,
+        VOTE_USER_INFO_PATH,
+        campaign_session_ready,
+        inspect_vote_config,
+        is_vote_date,
+        vote_environment_error,
+    )
+except ImportError:
+    from h3.campaign_vote import (
+        CAMPAIGN_URL,
+        VOTE_ACTIVITY_ACCESS_ID,
+        VOTE_API_BASE,
+        VOTE_CONFIG_PATH,
+        VOTE_END_DATE,
+        VOTE_PRODUCT_NAME,
+        VOTE_PRODUCT_SKU,
+        VOTE_START_DATE,
+        VOTE_SUBMIT_PATH,
+        VOTE_USER_INFO_PATH,
+        campaign_session_ready,
+        inspect_vote_config,
+        is_vote_date,
+        vote_environment_error,
+    )
+
+try:
+    from feature_flags import SECKILL_ENABLED
+except ImportError:
+    from h3.feature_flags import SECKILL_ENABLED
+
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
 try:
@@ -27,13 +67,23 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-06-23-data-only-retry-v12"
+SCRIPT_VERSION = "2026-07-29-campaign-vote-v13"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 DEFAULT_SECKILL_CATEGORY_ACCESS_IDS = ["805341c7b7c242c6a8deb5c8789336b2"]
 DEFAULT_LOTTERY_ACTIVITY_CODE = "LAKU"
 UNCLAIMED_EXCHANGE_STATES = {1}
 CLAIMED_EXCHANGE_STATES = {2, 6}
 LOTTERY_CLAIMED_EXCHANGE_STATES = {2, 3, 6}
+VOTE_RESULT_FIELDS = (
+    'vote_required',
+    'vote_success',
+    'vote_attempted',
+    'vote_status',
+    'vote_time',
+    'vote_product_sku',
+    'vote_product_name',
+    'vote_detail',
+)
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
     k.strip().lower()
@@ -834,6 +884,19 @@ class ApiClient:
         self.lottery_fetch_success = False
         self.voucher_fetch_success = False
         self.activity_fetch_success = False
+        self.vote_required = is_vote_date(current_date_text())
+        self.vote_success = False
+        self.vote_attempted = False
+        self.vote_status = (
+            "待执行"
+            if self.vote_required
+            else f"非投票日期（仅 {VOTE_START_DATE} 至 {VOTE_END_DATE}）"
+        )
+        self.vote_time = ""
+        self.vote_product_sku = VOTE_PRODUCT_SKU
+        self.vote_product_name = VOTE_PRODUCT_NAME
+        self.vote_detail = ""
+        self._campaign_sso_wait_logged = False
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -921,7 +984,16 @@ class ApiClient:
             dump_json_on_success_false=dump_json_on_success_false,
         )
 
-    def _browser_fetch_json_once(self, method, url, tag="API", payload=None, dump_body_on_error=False, dump_json_on_success_false=True):
+    def _browser_fetch_json_once(
+        self,
+        method,
+        url,
+        tag="API",
+        payload=None,
+        dump_body_on_error=False,
+        dump_json_on_success_false=True,
+        log_http_error=True,
+    ):
         if not self.page:
             return None
         method = str(method or "GET").upper()
@@ -966,13 +1038,14 @@ class ApiClient:
             status = safe_int(result.get("status"), 0) if isinstance(result, dict) else 0
             data = result.get("data") if isinstance(result, dict) else None
             if status != 200:
-                allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
-                msg = f"账号{self.account_index} - {tag}浏览器请求失败 {status} ({method} {url})"
-                if allow:
-                    msg += f" Allow={allow}"
-                log(msg)
-                if dump_body_on_error and isinstance(result, dict):
-                    log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
+                if log_http_error:
+                    allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
+                    msg = f"账号{self.account_index} - {tag}浏览器请求失败 {status} ({method} {url})"
+                    if allow:
+                        msg += f" Allow={allow}"
+                    log(msg)
+                    if dump_body_on_error and isinstance(result, dict):
+                        log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
                 return None
             if data is None:
                 log(f"账号{self.account_index} - {tag}浏览器响应JSON解析失败 (200 {method} {url})")
@@ -1235,15 +1308,20 @@ class ApiClient:
     def fetch_activity_records(self) -> dict:
         self.activity_fetch_success = False
         try:
-            log(f"账号{self.account_index} - 开始获取秒杀/抽奖中奖记录")
+            activity_label = "秒杀/抽奖" if SECKILL_ENABLED else "抽奖"
+            log(f"账号{self.account_index} - 开始获取{activity_label}中奖记录")
             config = self.fetch_brand_activity_config()
-            seckill_category_ids = self.get_seckill_category_ids(config)
             lottery_activity_code = self.get_lottery_activity_code(config)
-            seckill_records = self.fetch_activity_component_with_retry(
-                "秒杀记录",
-                lambda: self.fetch_seckill_records({}, seckill_category_ids),
-                "seckill_fetch_success",
-            )
+            seckill_records = []
+            if SECKILL_ENABLED:
+                seckill_category_ids = self.get_seckill_category_ids(config)
+                seckill_records = self.fetch_activity_component_with_retry(
+                    "秒杀记录",
+                    lambda: self.fetch_seckill_records({}, seckill_category_ids),
+                    "seckill_fetch_success",
+                )
+            else:
+                self.seckill_fetch_success = True
             lottery_records = self.fetch_activity_component_with_retry(
                 "抽奖记录",
                 lambda: self.fetch_lottery_wins({}, lottery_activity_code),
@@ -1252,7 +1330,8 @@ class ApiClient:
             if needs_expiry_lookup(seckill_records + lottery_records):
                 change_records = self.fetch_voucher_change_records()
                 expiry_lookup = build_expiry_lookup(change_records)
-                apply_expiry_dates(seckill_records, expiry_lookup)
+                if SECKILL_ENABLED:
+                    apply_expiry_dates(seckill_records, expiry_lookup)
                 apply_expiry_dates(lottery_records, expiry_lookup, lottery=True)
                 expiry_fetch_success = self.voucher_fetch_success
             else:
@@ -1263,14 +1342,17 @@ class ApiClient:
                 "lottery": lottery_records,
             }
             self.activity_fetch_success = (
-                self.seckill_fetch_success
+                (not SECKILL_ENABLED or self.seckill_fetch_success)
                 and self.lottery_fetch_success
                 and expiry_fetch_success
             )
-            log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+            if SECKILL_ENABLED:
+                log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+            else:
+                log(f"账号{self.account_index} - 抽奖记录获取完成：{len(lottery_records)} 条")
             if not self.activity_fetch_success:
                 failures = []
-                if not self.seckill_fetch_success:
+                if SECKILL_ENABLED and not self.seckill_fetch_success:
                     failures.append("秒杀数据获取失败")
                 if not self.lottery_fetch_success:
                     failures.append("抽奖数据获取失败")
@@ -1288,6 +1370,218 @@ class ApiClient:
             if failure_reason not in self.detail_reason:
                 self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
         return self.activity_records
+
+    def _fetch_vote_config(self):
+        return self._browser_fetch_json_once(
+            "POST",
+            f"{VOTE_API_BASE}{VOTE_CONFIG_PATH}",
+            payload={"activityAccessId": VOTE_ACTIVITY_ACCESS_ID},
+            tag="投票状态",
+            dump_body_on_error=True,
+            dump_json_on_success_false=True,
+        )
+
+    def _campaign_session_ready(self, quiet=False) -> bool:
+        response = self._browser_fetch_json_once(
+            "GET",
+            f"{VOTE_API_BASE}{VOTE_USER_INFO_PATH}",
+            tag="投票 SSO 会话",
+            dump_body_on_error=not quiet,
+            dump_json_on_success_false=False,
+            log_http_error=not quiet,
+        )
+        return campaign_session_ready(response)
+
+    def _trigger_campaign_sso(self) -> bool:
+        """调用门户自己的登录入口，让统一账号会话完成活动页 SSO。"""
+        try:
+            sdk_result = self.page.evaluate(
+                """() => {
+                    const state = {
+                        entryReady: typeof window.openLoginWindow === "function",
+                        triggered: false,
+                        iframeCount: document.querySelectorAll(
+                            'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
+                        ).length,
+                    };
+                    if (!state.entryReady) {
+                        return state;
+                    }
+                    try {
+                        window.openLoginWindow();
+                        state.triggered = true;
+                    } catch (error) {
+                        state.triggerError = true;
+                    }
+                    state.iframeCount = document.querySelectorAll(
+                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
+                    ).length;
+                    return state;
+                }"""
+            )
+            if isinstance(sdk_result, dict) and truthy(sdk_result.get("triggered")):
+                iframe_count = safe_int(sdk_result.get("iframeCount"), 0)
+                log(
+                    f"账号{self.account_index} - 已调用活动页登录组件触发 SSO"
+                    f"（CAS iframe: {iframe_count}）"
+                )
+                return True
+        except Exception as e:
+            if not self._campaign_sso_wait_logged:
+                log(
+                    f"账号{self.account_index} - 活动页登录组件尚未就绪: "
+                    f"{redact_sensitive(truncate_text(str(e), 300))}"
+                )
+
+        # 兼容页面尚未暴露 SDK 入口、但已经渲染登录控件的版本。
+        locator_factories = (
+            lambda: self.page.get_by_role("button", name="登录", exact=True),
+            lambda: self.page.get_by_role("link", name="登录", exact=True),
+            lambda: self.page.get_by_text("登录", exact=True),
+        )
+        for locator_factory in locator_factories:
+            try:
+                login_entry = locator_factory()
+                if login_entry.count() != 1 or not login_entry.is_visible():
+                    continue
+                login_entry.click(timeout=5000)
+                log(f"账号{self.account_index} - 已点击活动页登录入口，等待 SSO 会话建立")
+                return True
+            except Exception:
+                continue
+
+        if not self._campaign_sso_wait_logged:
+            log(f"账号{self.account_index} - 等待活动页登录组件初始化")
+            self._campaign_sso_wait_logged = True
+        return False
+
+    def _campaign_sso_diagnostics(self) -> dict:
+        """只采集不含凭据的页面状态，供 SSO 失败日志定位。"""
+        try:
+            result = self.page.evaluate(
+                """() => ({
+                    entryReady: typeof window.openLoginWindow === "function",
+                    iframeCount: document.querySelectorAll(
+                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
+                    ).length,
+                    path: location.pathname || "",
+                })"""
+            )
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
+
+    def _wait_for_campaign_session(self, attempts=15) -> bool:
+        """给活动页异步初始化留出时间，并在需要时主动触发一次 SSO。"""
+        sso_triggered = False
+        attempts = max(1, safe_int(attempts, 15))
+        for attempt in range(attempts):
+            if self._campaign_session_ready(quiet=attempt < attempts - 1):
+                if attempt > 0:
+                    log(f"账号{self.account_index} - 活动页 SSO 会话已建立")
+                return True
+
+            if not sso_triggered:
+                sso_triggered = self._trigger_campaign_sso()
+
+            if attempt < attempts - 1:
+                time.sleep(random.uniform(1.2, 1.8))
+        diagnostics = self._campaign_sso_diagnostics()
+        log(
+            f"账号{self.account_index} - 活动页 SSO 诊断："
+            f"登录组件={'已就绪' if truthy(diagnostics.get('entryReady')) else '未就绪'}，"
+            f"CAS iframe={safe_int(diagnostics.get('iframeCount'), 0)}，"
+            f"页面路径={str(diagnostics.get('path') or '未知')}"
+        )
+        return False
+
+    def execute_campaign_vote(self) -> bool:
+        if not self.vote_required:
+            log(f"账号{self.account_index} - {self.vote_status}")
+            return True
+
+        environment_error = vote_environment_error()
+        if environment_error:
+            self.vote_detail = environment_error
+            self.vote_status = f"投票失败：{environment_error}"
+            log(f"账号{self.account_index} - ❌ {self.vote_status}")
+            return False
+
+        self.vote_status = "投票失败"
+        try:
+            log(f"账号{self.account_index} - 签到全部操作完成，打开品牌活动页触发 SSO")
+            self.page.goto(CAMPAIGN_URL, wait_until="domcontentloaded", timeout=60000)
+            decision = {"state": "error", "message": "活动页 SSO 会话未建立"}
+            if self._wait_for_campaign_session():
+                for attempt in range(2):
+                    config_response = self._fetch_vote_config()
+                    decision = inspect_vote_config(config_response)
+                    if decision.get("state") != "error":
+                        break
+                    if attempt == 0:
+                        log(f"账号{self.account_index} - 投票状态首次未就绪，在当前 SSO 会话内重试一次")
+                        time.sleep(random.uniform(0.8, 1.4))
+
+            state = decision.get("state")
+            self.vote_detail = str(decision.get("message") or "")
+            if state == "already":
+                self.vote_success = True
+                self.vote_status = self.vote_detail
+                self.vote_time = current_time_text()
+                log(f"账号{self.account_index} - ✅ {self.vote_status}")
+                return True
+            if state != "ready":
+                self.vote_status = f"投票失败：{self.vote_detail or '目标商品状态不可用'}"
+                log(f"账号{self.account_index} - ❌ {self.vote_status}")
+                return False
+
+            self.vote_attempted = True
+            payload = {
+                "activityAccessId": VOTE_ACTIVITY_ACCESS_ID,
+                "productSku": VOTE_PRODUCT_SKU,
+            }
+            submit_response = self._browser_fetch_json_once(
+                "POST",
+                f"{VOTE_API_BASE}{VOTE_SUBMIT_PATH}",
+                payload=payload,
+                tag="露营车投票",
+                dump_body_on_error=True,
+                dump_json_on_success_false=True,
+            )
+            submit_ok = isinstance(submit_response, dict) and submit_response.get("success") is True
+            verify = {"state": "error", "message": "投票结果尚未复核"}
+            verified = False
+            for verify_attempt in range(3):
+                time.sleep(random.uniform(0.5, 0.9) if verify_attempt == 0 else random.uniform(1.0, 1.6))
+                verify_response = self._fetch_vote_config()
+                verify = inspect_vote_config(verify_response)
+                verified = verify.get("state") == "already" and verify.get("my_sku") == VOTE_PRODUCT_SKU
+                if verified:
+                    break
+
+            if verified:
+                self.vote_success = True
+                self.vote_status = f"投票成功：{VOTE_PRODUCT_NAME}"
+                self.vote_time = current_time_text()
+                self.vote_detail = "投票接口成功并复核完成" if submit_ok else "投票结果复核完成"
+                log(f"账号{self.account_index} - ✅ {self.vote_status}")
+                return True
+
+            submit_message = (
+                "投票接口返回成功但复核未确认"
+                if submit_ok
+                else build_detail_reason(submit_response, "投票接口未成功")
+            )
+            verify_message = str(verify.get("message") or "投后复核失败")
+            self.vote_detail = f"{submit_message}；{verify_message}".strip("；")
+            self.vote_status = f"投票失败：{self.vote_detail}"
+            log(f"账号{self.account_index} - ❌ {self.vote_status}")
+            return False
+        except Exception as e:
+            self.vote_detail = redact_sensitive(truncate_text(str(e), 500))
+            self.vote_status = f"投票异常：{self.vote_detail}"
+            log(f"账号{self.account_index} - ❌ {self.vote_status}")
+            return False
 
     def execute_banned_process(self):
         self.banned_account = True
@@ -1542,7 +1836,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     if banned_account:
         log(f"账号{account_index} - 命中 BANNED_ACCOUNTS，登录后只获取金豆与活动记录，跳过签到")
     elif data_only_retry:
-        log(f"账号{account_index} - 补数据重试模式：登录后只获取金豆与秒杀/抽奖记录，跳过签到接口")
+        activity_label = "秒杀/抽奖" if SECKILL_ENABLED else "抽奖"
+        log(f"账号{account_index} - 补数据重试模式：登录后只获取金豆与{activity_label}记录，跳过签到接口")
 
     result = {
         'account_index': account_index,
@@ -1571,6 +1866,14 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'task_start_date': task_start_date,
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
+        'vote_required': is_vote_date(task_start_date),
+        'vote_success': False,
+        'vote_attempted': False,
+        'vote_status': '待执行' if is_vote_date(task_start_date) else f'非投票日期（仅 {VOTE_START_DATE} 至 {VOTE_END_DATE}）',
+        'vote_time': '',
+        'vote_product_sku': VOTE_PRODUCT_SKU,
+        'vote_product_name': VOTE_PRODUCT_NAME,
+        'vote_detail': '',
     }
 
     ua_string = get_random_mobile_ua()
@@ -1739,6 +2042,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                             client.points_reward = client.final_points - client.initial_points
 
                 client.fetch_activity_records()
+                client.execute_campaign_vote()
                 if banned_account:
                     client.finalize_banned_data_status()
                 result.update({
@@ -1756,6 +2060,14 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     'data_fetch_completed': client.points_fetch_success and client.activity_fetch_success,
                     'sign_completed_at': client.sign_completed_at,
                     'activity_records': client.activity_records,
+                    'vote_required': client.vote_required,
+                    'vote_success': client.vote_success,
+                    'vote_attempted': client.vote_attempted,
+                    'vote_status': client.vote_status,
+                    'vote_time': client.vote_time,
+                    'vote_product_sku': client.vote_product_sku,
+                    'vote_product_name': client.vote_product_name,
+                    'vote_detail': client.vote_detail,
                 })
             else:
                 log(f"账号{account_index} - ❌ 未提取到 token")
@@ -1796,6 +2108,8 @@ def should_retry(res):
             return not truthy(res.get('data_fetch_completed'))
         reason = str(res.get('detail_reason') or '')
         return not reason or any(text in reason for text in ('获取失败', '未完成', 'Token提取失败', '执行异常'))
+    # 投票已经在当前浏览器会话内完成等待和重试；失败时保留结果用于报表，
+    # 但不能因此重新执行登录、签到、奖励领取等整套流程。
     return not res['sign_success']
 
 def process_single_account(username, password, account_index, total_accounts):
@@ -1826,6 +2140,14 @@ def process_single_account(username, password, account_index, total_accounts):
         'task_start_date': normalize_task_start_date(),
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
+        'vote_required': is_vote_date(normalize_task_start_date()),
+        'vote_success': False,
+        'vote_attempted': False,
+        'vote_status': '未执行',
+        'vote_time': '',
+        'vote_product_sku': VOTE_PRODUCT_SKU,
+        'vote_product_name': VOTE_PRODUCT_NAME,
+        'vote_detail': '',
     }
     max_retries = 3
     for attempt in range(max_retries + 1):
@@ -1869,11 +2191,16 @@ def process_single_account(username, password, account_index, total_accounts):
             if failures:
                 merged['detail_reason'] += '；' + '；'.join(failures)
         elif res['sign_success'] and not merged['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 merged[k] = res[k]
         elif not merged['sign_success']:
-            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 merged[k] = res.get(k)
+
+        if truthy(res.get('vote_success')) or not truthy(merged.get('vote_success')):
+            for key in VOTE_RESULT_FIELDS:
+                if key in res:
+                    merged[key] = res.get(key)
 
         merged['retry_count'] = res['retry_count']
 
@@ -1951,11 +2278,16 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             if failures:
                 orig['detail_reason'] += '；' + '；'.join(failures)
         elif final['sign_success'] and not orig['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 orig[k] = final[k]
         elif not orig['sign_success']:
-            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 orig[k] = final.get(k)
+
+        if truthy(final.get('vote_success')) or not truthy(orig.get('vote_success')):
+            for key in VOTE_RESULT_FIELDS:
+                if key in final:
+                    orig[key] = final.get(key)
 
         orig.update({
             'is_final_retry': True,
@@ -2091,6 +2423,14 @@ def write_results_json(path, all_results, total_accounts):
                 "sign_time": r.get("sign_time"),
                 "sign_ip": r.get("sign_ip"),
                 "activity_records": r.get("activity_records") or make_empty_extra_records(),
+                "vote_required": r.get("vote_required"),
+                "vote_success": r.get("vote_success"),
+                "vote_attempted": r.get("vote_attempted"),
+                "vote_status": r.get("vote_status"),
+                "vote_time": r.get("vote_time"),
+                "vote_product_sku": r.get("vote_product_sku"),
+                "vote_product_name": r.get("vote_product_name"),
+                "vote_detail": r.get("vote_detail"),
             })
 
         payload = {

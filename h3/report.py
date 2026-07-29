@@ -13,6 +13,17 @@ from email.mime.text import MIMEText
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+try:
+    from campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
+except ImportError:
+    from h3.campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
+
+try:
+    from feature_flags import SECKILL_ENABLED
+except ImportError:
+    from h3.feature_flags import SECKILL_ENABLED
 
 for stream_name in ("stdout", "stderr"):
     stream = getattr(sys, stream_name, None)
@@ -146,7 +157,8 @@ def normalize_activity_records(value) -> dict:
         return {"seckill": [], "lottery": []}
 
     normalized = {"seckill": [], "lottery": []}
-    for key, limit in (("seckill", 2), ("lottery", 3)):
+    activity_types = (("seckill", 2), ("lottery", 3)) if SECKILL_ENABLED else (("lottery", 3),)
+    for key, limit in activity_types:
         rows = value.get(key)
         if not isinstance(rows, list):
             continue
@@ -193,6 +205,11 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     next_day_success = truthy(record.get("next_day_success")) or (
         truthy(record.get("sign_success")) and date_part(task_start_date) and date_part(sign_time) and date_part(sign_time) > date_part(task_start_date)
     )
+    vote_required = truthy(record.get("vote_required")) or is_vote_date(task_start_date)
+    vote_success = truthy(record.get("vote_success"))
+    vote_status = str(record.get("vote_status") or "").strip()
+    if vote_required and not vote_status:
+        vote_status = "未生成投票结果"
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
@@ -221,6 +238,14 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "sign_time": sign_time,
         "sign_ip": str(record.get("sign_ip") or "").strip(),
         "activity_records": normalize_activity_records(record.get("activity_records")),
+        "vote_required": vote_required,
+        "vote_success": vote_success,
+        "vote_attempted": truthy(record.get("vote_attempted")),
+        "vote_status": vote_status,
+        "vote_time": str(record.get("vote_time") or "").strip(),
+        "vote_product_sku": str(record.get("vote_product_sku") or VOTE_PRODUCT_SKU).strip(),
+        "vote_product_name": str(record.get("vote_product_name") or VOTE_PRODUCT_NAME).strip(),
+        "vote_detail": str(record.get("vote_detail") or "").strip(),
     }
 
 
@@ -248,7 +273,8 @@ def load_results(results_dir: str, account_lookup: dict[tuple[int, int], str]) -
     return list(records_by_key.values()) + extras
 
 
-def build_missing_record(group_number: int, account_index: int, username: str) -> dict:
+def build_missing_record(group_number: int, account_index: int, username: str, task_date: str = "") -> dict:
+    vote_required = is_vote_date(task_date)
     return {
         "account_index": account_index,
         "execution_order": account_index,
@@ -269,7 +295,7 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "activity_fetch_success": False,
         "data_fetch_completed": False,
         "next_day_success": False,
-        "task_start_date": "",
+        "task_start_date": task_date,
         "sign_completed_at": "",
         "retry_count": 0,
         "is_final_retry": False,
@@ -277,10 +303,22 @@ def build_missing_record(group_number: int, account_index: int, username: str) -
         "sign_time": "",
         "sign_ip": "",
         "activity_records": {"seckill": [], "lottery": []},
+        "vote_required": vote_required,
+        "vote_success": False,
+        "vote_attempted": False,
+        "vote_status": "缺少投票结果",
+        "vote_time": "",
+        "vote_product_sku": VOTE_PRODUCT_SKU,
+        "vote_product_name": VOTE_PRODUCT_NAME,
+        "vote_detail": "",
     }
 
 
-def merge_records_with_expected(records: list[dict], account_lookup: dict[tuple[int, int], str]) -> list[dict]:
+def merge_records_with_expected(
+    records: list[dict],
+    account_lookup: dict[tuple[int, int], str],
+    target_date: str = "",
+) -> list[dict]:
     indexed = {}
     extras = []
     for record in records:
@@ -297,7 +335,7 @@ def merge_records_with_expected(records: list[dict], account_lookup: dict[tuple[
     for key in sorted(account_lookup):
         record = indexed.pop(key, None)
         if record is None:
-            merged.append(build_missing_record(key[0], key[1], account_lookup[key]))
+            merged.append(build_missing_record(key[0], key[1], account_lookup[key], target_date))
             continue
         if not record.get("username"):
             record["username"] = account_lookup[key]
@@ -361,7 +399,18 @@ def detail_text(record: dict) -> str:
 
 
 def is_problem_record(record: dict) -> bool:
-    return status_sort_bucket(record) == 0
+    return status_sort_bucket(record) == 0 or (
+        truthy(record.get("vote_required")) and not truthy(record.get("vote_success"))
+    )
+
+
+def problem_reason(record: dict) -> str:
+    reasons = []
+    if status_sort_bucket(record) == 0:
+        reasons.append(detail_reason(record))
+    if truthy(record.get("vote_required")) and not truthy(record.get("vote_success")):
+        reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
+    return "；".join(dict.fromkeys(reason for reason in reasons if reason)) or "未知异常"
 
 
 def status_sort_bucket(record: dict) -> int:
@@ -400,6 +449,10 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
     abnormal = sum(1 for item in records if status_label(item) == "签到异常")
     reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
     success_rate = (success / total * 100) if total > 0 else 0.0
+    vote_required = sum(1 for item in records if truthy(item.get("vote_required")))
+    vote_success = sum(
+        1 for item in records if truthy(item.get("vote_required")) and truthy(item.get("vote_success"))
+    )
     return {
         "total": total,
         "success": success,
@@ -408,9 +461,11 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "risk": risk,
         "failed": failed,
         "abnormal": abnormal,
-        "problem_count": risk + failed + abnormal,
+        "problem_count": sum(1 for item in records if is_problem_record(item)),
         "reward": reward,
         "success_rate": success_rate,
+        "vote_required": vote_required,
+        "vote_success": vote_success,
     }
 
 
@@ -421,6 +476,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 签到成功: {summary['success']}/{summary['total']}",
         f"  ├── 次日成功: {summary['next_day']}",
         f"  ├── 账号封禁: {summary['banned']}",
+        f"  ├── 当天投票完成: {summary['vote_success']}/{summary['vote_required']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
@@ -434,7 +490,7 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     if problem_records:
         lines = ["NO❗今天出现问题了捏"]
         for record in problem_records:
-            lines.append(f"{record['username']}：{detail_reason(record)}❌")
+            lines.append(f"{record['username']}：{problem_reason(record)}❌")
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
@@ -486,6 +542,14 @@ def fill_for_status(label: str):
     return None
 
 
+def font_for_vote_status(record: dict) -> Font:
+    if truthy(record.get("vote_success")):
+        return FONT_GREEN
+    if truthy(record.get("vote_required")):
+        return FONT_RED
+    return FONT_DARK
+
+
 def font_for_claim_status(value: str) -> Font:
     text = str(value or "")
     if "已经领取" in text:
@@ -515,7 +579,8 @@ def activity_status_text(item: dict) -> str:
 def activity_columns(record: dict) -> list[str]:
     activity = normalize_activity_records(record.get("activity_records"))
     values = []
-    for key, limit in (("seckill", 2), ("lottery", 3)):
+    activity_types = (("seckill", 2), ("lottery", 3)) if SECKILL_ENABLED else (("lottery", 3),)
+    for key, limit in activity_types:
         rows = activity.get(key) or []
         for index in range(limit):
             item = rows[index] if index < len(rows) else {}
@@ -539,17 +604,24 @@ def write_xlsx(path: str, records: list[dict]):
         "详细原因",
         "签到时间",
         "签到IP",
-        "秒杀一",
-        "领取情况",
-        "秒杀二",
-        "领取情况",
+        "当天投票情况",
+        "投票时间",
+    ]
+    if SECKILL_ENABLED:
+        headers.extend([
+            "秒杀一",
+            "领取情况",
+            "秒杀二",
+            "领取情况",
+        ])
+    headers.extend([
         "抽奖一",
         "领取情况",
         "抽奖二",
         "领取情况",
         "抽奖三",
         "领取情况",
-    ]
+    ])
     sheet.append(headers)
 
     header_fill = PatternFill("solid", fgColor="D9E2F3")
@@ -574,6 +646,8 @@ def write_xlsx(path: str, records: list[dict]):
             detail_text(record),
             str(record.get("sign_time") or ""),
             str(record.get("sign_ip") or ""),
+            str(record.get("vote_status") or ""),
+            str(record.get("vote_time") or ""),
         ] + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
@@ -587,7 +661,7 @@ def write_xlsx(path: str, records: list[dict]):
         sheet.cell(row_index, 7).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 8).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 6).alignment = Alignment(vertical="center", wrap_text=True)
-        for column_index in range(9, 19):
+        for column_index in range(9, len(headers) + 1):
             sheet.cell(row_index, column_index).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 2).number_format = "0.0"
         fill = color_for_points(safe_float(record.get("final_points"), 0.0))
@@ -597,11 +671,12 @@ def write_xlsx(path: str, records: list[dict]):
         if status_fill:
             sheet.cell(row_index, 5).fill = status_fill
         sheet.cell(row_index, 5).font = font_for_status(label)
-        for column_index in (9, 11, 13, 15, 17):
+        sheet.cell(row_index, 9).font = font_for_vote_status(record)
+        for column_index in range(11, len(headers) + 1, 2):
             prize_fill = fill_for_prize(sheet.cell(row_index, column_index).value)
             if prize_fill:
                 sheet.cell(row_index, column_index).fill = prize_fill
-        for column_index in (10, 12, 14, 16, 18):
+        for column_index in range(12, len(headers) + 1, 2):
             sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
     sheet.freeze_panes = "A2"
@@ -614,17 +689,11 @@ def write_xlsx(path: str, records: list[dict]):
         "F": 36,
         "G": 20,
         "H": 18,
-        "I": 28,
-        "J": 18,
-        "K": 28,
-        "L": 18,
-        "M": 28,
-        "N": 18,
-        "O": 28,
-        "P": 18,
-        "Q": 28,
-        "R": 18,
+        "I": 36,
+        "J": 20,
     }
+    for column_index in range(11, len(headers) + 1):
+        widths[get_column_letter(column_index)] = 28 if column_index % 2 else 18
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 
@@ -733,7 +802,7 @@ def main():
     manifest = load_manifest(results_dir)
     output_xlsx = resolve_output_xlsx_path(results_dir, manifest)
     raw_records = load_results(results_dir, account_lookup)
-    records = merge_records_with_expected(raw_records, account_lookup)
+    records = merge_records_with_expected(raw_records, account_lookup, target_date_text(manifest))
     message, summary = build_message(records, manifest, expected_total)
 
     channels = parse_channels()

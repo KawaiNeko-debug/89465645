@@ -15,6 +15,16 @@ DATA_FAILURE_MARKERS = (
     "活动数据获取失败",
     "活动数据抓取异常",
 )
+VOTE_FIELDS = (
+    "vote_required",
+    "vote_success",
+    "vote_attempted",
+    "vote_status",
+    "vote_time",
+    "vote_product_sku",
+    "vote_product_name",
+    "vote_detail",
+)
 
 
 def truthy(value) -> bool:
@@ -96,6 +106,7 @@ def load_single_result(path: str):
 def score(row: dict):
     return (
         1 if truthy(row.get("sign_success")) else 0,
+        1 if truthy(row.get("vote_success")) else 0,
         1 if truthy(row.get("data_fetch_completed")) else 0,
         int(truthy(row.get("points_fetch_success"))) + int(truthy(row.get("activity_fetch_success"))),
         safe_int(row.get("retry_count"), 0),
@@ -120,6 +131,9 @@ def pick_result(initial: dict, retry: dict | None):
             if not picked.get(key) and fallback.get(key):
                 picked[key] = fallback[key]
         merge_data_fields(picked, fallback)
+        if truthy(fallback.get("vote_success")) and not truthy(picked.get("vote_success")):
+            for key in VOTE_FIELDS:
+                picked[key] = fallback.get(key)
         if truthy(picked.get("banned_account")):
             if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
                 for key in ("initial_points", "final_points", "points_reward"):
@@ -225,6 +239,14 @@ def main():
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
                 "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "vote_required": truthy(row.get("vote_required")),
+                "vote_success": truthy(row.get("vote_success")),
+                "vote_attempted": truthy(row.get("vote_attempted")),
+                "vote_status": row.get("vote_status", ""),
+                "vote_time": row.get("vote_time", ""),
+                "vote_product_sku": row.get("vote_product_sku", ""),
+                "vote_product_name": row.get("vote_product_name", ""),
+                "vote_detail": row.get("vote_detail", ""),
             }
         )
 

@@ -8,6 +8,11 @@ import tempfile
 import time
 from datetime import datetime
 
+try:
+    from campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
+except ImportError:
+    from h3.campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
+
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 RISK_PAUSE_SECONDS = max(0, int(os.getenv("RISK_PAUSE_SECONDS", "600") or 600))
@@ -84,6 +89,7 @@ def shuffle_accounts(accounts: list[dict]) -> list[dict]:
 
 
 def build_placeholder_result(account: dict, status="签到异常", reason="工作流未生成 result.json") -> dict:
+    task_date = os.getenv("SIGN_TASK_START_DATE", "")
     return {
         "account_index": account["account_index"],
         "execution_order": account.get("execution_order", 0),
@@ -105,9 +111,17 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "activity_fetch_success": False,
         "data_fetch_completed": False,
         "next_day_success": False,
-        "task_start_date": os.getenv("SIGN_TASK_START_DATE", ""),
+        "task_start_date": task_date,
         "sign_completed_at": "",
         "activity_records": {"seckill": [], "lottery": []},
+        "vote_required": is_vote_date(task_date),
+        "vote_success": False,
+        "vote_attempted": False,
+        "vote_status": "未执行",
+        "vote_time": "",
+        "vote_product_sku": VOTE_PRODUCT_SKU,
+        "vote_product_name": VOTE_PRODUCT_NAME,
+        "vote_detail": "",
         "retry_count": 0,
         "is_final_retry": False,
         "detail_reason": reason,
@@ -152,6 +166,14 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "task_start_date": str(raw.get("task_start_date") or "").strip(),
             "sign_completed_at": str(raw.get("sign_completed_at") or "").strip(),
             "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": []},
+            "vote_required": truthy(raw.get("vote_required")),
+            "vote_success": truthy(raw.get("vote_success")),
+            "vote_attempted": truthy(raw.get("vote_attempted")),
+            "vote_status": str(raw.get("vote_status") or "").strip(),
+            "vote_time": str(raw.get("vote_time") or "").strip(),
+            "vote_product_sku": str(raw.get("vote_product_sku") or VOTE_PRODUCT_SKU).strip(),
+            "vote_product_name": str(raw.get("vote_product_name") or VOTE_PRODUCT_NAME).strip(),
+            "vote_detail": str(raw.get("vote_detail") or "").strip(),
             "retry_count": safe_int(raw.get("retry_count"), 0),
             "is_final_retry": truthy(raw.get("is_final_retry")),
             "detail_reason": str(raw.get("detail_reason") or "").strip(),
@@ -253,6 +275,14 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "sign_time": item.get("sign_time", ""),
                 "sign_ip": item.get("sign_ip", ""),
                 "activity_records": item.get("activity_records") or {"seckill": [], "lottery": []},
+                "vote_required": item.get("vote_required", False),
+                "vote_success": item.get("vote_success", False),
+                "vote_attempted": item.get("vote_attempted", False),
+                "vote_status": item.get("vote_status", ""),
+                "vote_time": item.get("vote_time", ""),
+                "vote_product_sku": item.get("vote_product_sku", VOTE_PRODUCT_SKU),
+                "vote_product_name": item.get("vote_product_name", VOTE_PRODUCT_NAME),
+                "vote_detail": item.get("vote_detail", ""),
                 "pause_applied": item["pause_applied"],
             }
         )
