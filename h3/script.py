@@ -978,7 +978,16 @@ class ApiClient:
             dump_json_on_success_false=dump_json_on_success_false,
         )
 
-    def _browser_fetch_json_once(self, method, url, tag="API", payload=None, dump_body_on_error=False, dump_json_on_success_false=True):
+    def _browser_fetch_json_once(
+        self,
+        method,
+        url,
+        tag="API",
+        payload=None,
+        dump_body_on_error=False,
+        dump_json_on_success_false=True,
+        log_http_error=True,
+    ):
         if not self.page:
             return None
         method = str(method or "GET").upper()
@@ -1023,13 +1032,14 @@ class ApiClient:
             status = safe_int(result.get("status"), 0) if isinstance(result, dict) else 0
             data = result.get("data") if isinstance(result, dict) else None
             if status != 200:
-                allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
-                msg = f"账号{self.account_index} - {tag}浏览器请求失败 {status} ({method} {url})"
-                if allow:
-                    msg += f" Allow={allow}"
-                log(msg)
-                if dump_body_on_error and isinstance(result, dict):
-                    log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
+                if log_http_error:
+                    allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
+                    msg = f"账号{self.account_index} - {tag}浏览器请求失败 {status} ({method} {url})"
+                    if allow:
+                        msg += f" Allow={allow}"
+                    log(msg)
+                    if dump_body_on_error and isinstance(result, dict):
+                        log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
                 return None
             if data is None:
                 log(f"账号{self.account_index} - {tag}浏览器响应JSON解析失败 (200 {method} {url})")
@@ -1356,15 +1366,46 @@ class ApiClient:
             dump_json_on_success_false=True,
         )
 
-    def _campaign_session_ready(self) -> bool:
+    def _campaign_session_ready(self, quiet=False) -> bool:
         response = self._browser_fetch_json_once(
             "GET",
             f"{VOTE_API_BASE}{VOTE_USER_INFO_PATH}",
             tag="投票 SSO 会话",
-            dump_body_on_error=True,
+            dump_body_on_error=not quiet,
             dump_json_on_success_false=False,
+            log_http_error=not quiet,
         )
         return campaign_session_ready(response)
+
+    def _trigger_campaign_sso(self) -> bool:
+        """点击活动页登录入口，让已登录的统一账号会话主动完成 SSO。"""
+        try:
+            login_button = self.page.get_by_role("button", name="登录", exact=True)
+            if login_button.count() != 1 or not login_button.is_visible():
+                return False
+            login_button.click(timeout=5000)
+            log(f"账号{self.account_index} - 已点击活动页登录入口，等待 SSO 会话建立")
+            return True
+        except Exception as e:
+            log(f"账号{self.account_index} - 活动页登录入口触发失败: {redact_sensitive(truncate_text(str(e), 300))}")
+            return False
+
+    def _wait_for_campaign_session(self, attempts=15) -> bool:
+        """给活动页异步初始化留出时间，并在需要时主动触发一次 SSO。"""
+        sso_triggered = False
+        attempts = max(1, safe_int(attempts, 15))
+        for attempt in range(attempts):
+            if self._campaign_session_ready(quiet=attempt < attempts - 1):
+                if attempt > 0:
+                    log(f"账号{self.account_index} - 活动页 SSO 会话已建立")
+                return True
+
+            if not sso_triggered:
+                sso_triggered = self._trigger_campaign_sso()
+
+            if attempt < attempts - 1:
+                time.sleep(random.uniform(1.2, 1.8))
+        return False
 
     def execute_campaign_vote(self) -> bool:
         if not self.vote_required:
@@ -1381,20 +1422,17 @@ class ApiClient:
         self.vote_status = "投票失败"
         try:
             log(f"账号{self.account_index} - 签到全部操作完成，打开品牌活动页触发 SSO")
-            config_response = None
-            decision = {"state": "error", "message": "投票状态未获取"}
-            for attempt in range(2):
-                self.page.goto(CAMPAIGN_URL, wait_until="domcontentloaded", timeout=60000)
-                if self._campaign_session_ready():
+            self.page.goto(CAMPAIGN_URL, wait_until="domcontentloaded", timeout=60000)
+            decision = {"state": "error", "message": "活动页 SSO 会话未建立"}
+            if self._wait_for_campaign_session():
+                for attempt in range(2):
                     config_response = self._fetch_vote_config()
                     decision = inspect_vote_config(config_response)
-                else:
-                    decision = {"state": "error", "message": "活动页 SSO 会话未建立"}
-                if decision.get("state") != "error":
-                    break
-                if attempt == 0:
-                    log(f"账号{self.account_index} - 投票 SSO/状态首次未就绪，刷新活动页后重试一次")
-                    time.sleep(random.uniform(0.8, 1.4))
+                    if decision.get("state") != "error":
+                        break
+                    if attempt == 0:
+                        log(f"账号{self.account_index} - 投票状态首次未就绪，在当前 SSO 会话内重试一次")
+                        time.sleep(random.uniform(0.8, 1.4))
 
             state = decision.get("state")
             self.vote_detail = str(decision.get("message") or "")
@@ -1978,16 +2016,12 @@ def should_retry(res):
         return False
     if res.get('banned_account'):
         if 'data_fetch_completed' in res:
-            return (
-                not truthy(res.get('data_fetch_completed'))
-                or (truthy(res.get('vote_required')) and not truthy(res.get('vote_success')))
-            )
+            return not truthy(res.get('data_fetch_completed'))
         reason = str(res.get('detail_reason') or '')
         return not reason or any(text in reason for text in ('获取失败', '未完成', 'Token提取失败', '执行异常'))
-    return (
-        not res['sign_success']
-        or (truthy(res.get('vote_required')) and not truthy(res.get('vote_success')))
-    )
+    # 投票已经在当前浏览器会话内完成等待和重试；失败时保留结果用于报表，
+    # 但不能因此重新执行登录、签到、奖励领取等整套流程。
+    return not res['sign_success']
 
 def process_single_account(username, password, account_index, total_accounts):
     merged = {
