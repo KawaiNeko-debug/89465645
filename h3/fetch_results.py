@@ -205,6 +205,14 @@ def merge_individual_results(results_dir: str, output_path: str) -> int:
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
                 "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "vote_required": truthy(row.get("vote_required")),
+                "vote_success": truthy(row.get("vote_success")),
+                "vote_attempted": truthy(row.get("vote_attempted")),
+                "vote_status": row.get("vote_status", ""),
+                "vote_time": row.get("vote_time", ""),
+                "vote_product_sku": row.get("vote_product_sku", ""),
+                "vote_product_name": row.get("vote_product_name", ""),
+                "vote_detail": row.get("vote_detail", ""),
             }
         )
 
