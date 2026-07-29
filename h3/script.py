@@ -48,6 +48,11 @@ except ImportError:
         vote_environment_error,
     )
 
+try:
+    from feature_flags import SECKILL_ENABLED
+except ImportError:
+    from h3.feature_flags import SECKILL_ENABLED
+
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
 try:
@@ -1302,15 +1307,20 @@ class ApiClient:
     def fetch_activity_records(self) -> dict:
         self.activity_fetch_success = False
         try:
-            log(f"账号{self.account_index} - 开始获取秒杀/抽奖中奖记录")
+            activity_label = "秒杀/抽奖" if SECKILL_ENABLED else "抽奖"
+            log(f"账号{self.account_index} - 开始获取{activity_label}中奖记录")
             config = self.fetch_brand_activity_config()
-            seckill_category_ids = self.get_seckill_category_ids(config)
             lottery_activity_code = self.get_lottery_activity_code(config)
-            seckill_records = self.fetch_activity_component_with_retry(
-                "秒杀记录",
-                lambda: self.fetch_seckill_records({}, seckill_category_ids),
-                "seckill_fetch_success",
-            )
+            seckill_records = []
+            if SECKILL_ENABLED:
+                seckill_category_ids = self.get_seckill_category_ids(config)
+                seckill_records = self.fetch_activity_component_with_retry(
+                    "秒杀记录",
+                    lambda: self.fetch_seckill_records({}, seckill_category_ids),
+                    "seckill_fetch_success",
+                )
+            else:
+                self.seckill_fetch_success = True
             lottery_records = self.fetch_activity_component_with_retry(
                 "抽奖记录",
                 lambda: self.fetch_lottery_wins({}, lottery_activity_code),
@@ -1319,7 +1329,8 @@ class ApiClient:
             if needs_expiry_lookup(seckill_records + lottery_records):
                 change_records = self.fetch_voucher_change_records()
                 expiry_lookup = build_expiry_lookup(change_records)
-                apply_expiry_dates(seckill_records, expiry_lookup)
+                if SECKILL_ENABLED:
+                    apply_expiry_dates(seckill_records, expiry_lookup)
                 apply_expiry_dates(lottery_records, expiry_lookup, lottery=True)
                 expiry_fetch_success = self.voucher_fetch_success
             else:
@@ -1330,14 +1341,17 @@ class ApiClient:
                 "lottery": lottery_records,
             }
             self.activity_fetch_success = (
-                self.seckill_fetch_success
+                (not SECKILL_ENABLED or self.seckill_fetch_success)
                 and self.lottery_fetch_success
                 and expiry_fetch_success
             )
-            log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+            if SECKILL_ENABLED:
+                log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+            else:
+                log(f"账号{self.account_index} - 抽奖记录获取完成：{len(lottery_records)} 条")
             if not self.activity_fetch_success:
                 failures = []
-                if not self.seckill_fetch_success:
+                if SECKILL_ENABLED and not self.seckill_fetch_success:
                     failures.append("秒杀数据获取失败")
                 if not self.lottery_fetch_success:
                     failures.append("抽奖数据获取失败")
@@ -1748,7 +1762,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     if banned_account:
         log(f"账号{account_index} - 命中 BANNED_ACCOUNTS，登录后只获取金豆与活动记录，跳过签到")
     elif data_only_retry:
-        log(f"账号{account_index} - 补数据重试模式：登录后只获取金豆与秒杀/抽奖记录，跳过签到接口")
+        activity_label = "秒杀/抽奖" if SECKILL_ENABLED else "抽奖"
+        log(f"账号{account_index} - 补数据重试模式：登录后只获取金豆与{activity_label}记录，跳过签到接口")
 
     result = {
         'account_index': account_index,

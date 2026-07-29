@@ -47,6 +47,7 @@ from h3.campaign_vote import (
     is_vote_date,
     vote_environment_error,
 )
+from h3.feature_flags import SECKILL_ENABLED
 from h3.merge_results import pick_result
 from h3.report import build_summary, merge_records_with_expected, write_xlsx
 from h3.script import ApiClient, should_retry
@@ -71,6 +72,28 @@ def vote_config(*, can_vote=True, my_sku="", product_name=VOTE_PRODUCT_NAME):
 
 
 class CampaignVoteTests(unittest.TestCase):
+    def test_seckill_feature_is_disabled_and_runtime_skips_requests(self):
+        self.assertFalse(SECKILL_ENABLED)
+
+        client = ApiClient("token", "secret", 1, object(), user_agent="test-agent")
+        events = []
+        client.fetch_brand_activity_config = lambda: events.append("config") or {}
+        client.get_lottery_activity_code = lambda config: events.append("lottery_code") or "LOTTERY"
+        client.get_seckill_category_ids = lambda config: self.fail("关闭时不应解析秒杀分类")
+        client.fetch_seckill_records = lambda *args, **kwargs: self.fail("关闭时不应请求秒杀记录")
+
+        def fetch_component(tag, fetcher, success_attr):
+            events.append(tag)
+            setattr(client, success_attr, True)
+            return []
+
+        client.fetch_activity_component_with_retry = fetch_component
+        result = client.fetch_activity_records()
+
+        self.assertEqual(events, ["config", "lottery_code", "抽奖记录"])
+        self.assertEqual(result, {"seckill": [], "lottery": []})
+        self.assertTrue(client.activity_fetch_success)
+
     def test_vote_endpoints_must_come_from_valid_environment_values(self):
         error = vote_environment_error("", "")
         self.assertIn("VOTE_CAMPAIGN_URL", error)
@@ -261,7 +284,10 @@ class CampaignVoteTests(unittest.TestCase):
             "vote_success": True,
             "vote_status": f"投票成功：{VOTE_PRODUCT_NAME}",
             "vote_time": "2026-07-29 08:30:00",
-            "activity_records": {"seckill": [], "lottery": []},
+            "activity_records": {
+                "seckill": [{"title": "旧秒杀奖品", "claimed": True}],
+                "lottery": [{"title": "抽奖奖品", "claimed": True}],
+            },
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "report.xlsx")
@@ -272,6 +298,13 @@ class CampaignVoteTests(unittest.TestCase):
             self.assertEqual(sheet["J1"].value, "投票时间")
             self.assertIn(VOTE_PRODUCT_NAME, sheet["I2"].value)
             self.assertEqual(sheet["J2"].value, "2026-07-29 08:30:00")
+            headers = [cell.value for cell in sheet[1]]
+            values = [cell.value for row in sheet.iter_rows() for cell in row]
+            self.assertNotIn("秒杀一", headers)
+            self.assertNotIn("秒杀二", headers)
+            self.assertNotIn("旧秒杀奖品", values)
+            self.assertEqual(sheet["K1"].value, "抽奖一")
+            self.assertEqual(sheet["K2"].value, "抽奖奖品")
             workbook.close()
 
     def test_missing_account_is_counted_as_required_vote_on_campaign_date(self):
