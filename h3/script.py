@@ -69,7 +69,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-07-30-campaign-vote-v14"
+SCRIPT_VERSION = "2026-07-30-campaign-vote-v15"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1481,34 +1481,146 @@ class ApiClient:
         try:
             sdk_result = self.page.evaluate(
                 """() => {
+                    const iframeSelector =
+                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]';
                     const state = {
                         entryReady: typeof window.openLoginWindow === "function",
+                        sdkReady: false,
                         triggered: false,
-                        iframeCount: document.querySelectorAll(
-                            'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
-                        ).length,
+                        triggerMethod: "",
+                        autoState: window.__campaignAutoSsoState?.status || "",
+                        iframeCount: document.querySelectorAll(iframeSelector).length,
                     };
-                    if (!state.entryReady) {
+
+                    const findSdk = (exportsValue) => {
+                        if (!exportsValue) return null;
+                        const candidates = [exportsValue];
+                        if (typeof exportsValue === "object" || typeof exportsValue === "function") {
+                            try {
+                                candidates.push(...Object.values(exportsValue));
+                            } catch (error) {}
+                        }
+                        return candidates.find((candidate) =>
+                            candidate &&
+                            typeof candidate.crossCheckLogin === "function" &&
+                            typeof candidate.iframeAutoLogin === "function" &&
+                            typeof candidate.getAuthCode === "function"
+                        ) || null;
+                    };
+
+                    let runtime = null;
+                    try {
+                        if (Array.isArray(window.webpackJsonp)) {
+                            const marker = `campaign-auth-capture-${Date.now()}`;
+                            window.webpackJsonp.push([
+                                [marker],
+                                {
+                                    [marker]: (module, exports, require) => {
+                                        runtime = require;
+                                    },
+                                },
+                                [[marker]],
+                            ]);
+                        }
+                    } catch (error) {}
+
+                    let sdk = null;
+                    if (runtime && runtime.c) {
+                        for (const cachedModule of Object.values(runtime.c)) {
+                            sdk = findSdk(cachedModule?.exports);
+                            if (sdk) break;
+                        }
+                    }
+                    if (!sdk && runtime) {
+                        try {
+                            sdk = findSdk(runtime(54));
+                        } catch (error) {}
+                    }
+
+                    if (sdk) {
+                        state.entryReady = true;
+                        state.sdkReady = true;
+                        let autoState = window.__campaignAutoSsoState;
+                        if (!autoState || autoState.status === "failed") {
+                            autoState = {
+                                status: "starting",
+                                httpStatus: 0,
+                                apiCode: null,
+                                checkStatus: 0,
+                            };
+                            window.__campaignAutoSsoState = autoState;
+                            Promise.resolve()
+                                .then(() => sdk.crossCheckLogin())
+                                .catch(() => {
+                                    autoState.status = "iframe";
+                                    return sdk.iframeAutoLogin();
+                                })
+                                .then(async (code) => {
+                                    autoState.status = "exchange";
+                                    const body = new URLSearchParams();
+                                    body.set("code", String(code || ""));
+                                    const response = await fetch("/login/login-by-code", {
+                                        method: "POST",
+                                        credentials: "include",
+                                        headers: {
+                                            "Content-Type": "application/x-www-form-urlencoded",
+                                        },
+                                        body: body.toString(),
+                                    });
+                                    autoState.httpStatus = response.status;
+                                    const data = await response.json().catch(() => null);
+                                    autoState.apiCode = data?.code ?? null;
+                                    if (!response.ok || String(autoState.apiCode) !== "200") {
+                                        throw new Error("code exchange failed");
+                                    }
+                                    autoState.status = "check";
+                                    const checkResponse = await fetch(
+                                        "/api/portal/login/checkLoginState",
+                                        {credentials: "include"}
+                                    );
+                                    autoState.checkStatus = checkResponse.status;
+                                    if (!checkResponse.ok) {
+                                        throw new Error("login state check failed");
+                                    }
+                                    autoState.status = "complete";
+                                })
+                                .catch(() => {
+                                    autoState.status = "failed";
+                                });
+                        }
+                        state.triggered = true;
+                        state.triggerMethod = "sdk-auto";
+                        state.autoState = autoState.status;
+                        state.iframeCount = document.querySelectorAll(iframeSelector).length;
                         return state;
                     }
-                    try {
-                        window.openLoginWindow();
-                        state.triggered = true;
-                    } catch (error) {
-                        state.triggerError = true;
+
+                    if (state.entryReady) {
+                        try {
+                            window.openLoginWindow();
+                            state.triggered = true;
+                            state.triggerMethod = "login-window";
+                        } catch (error) {
+                            state.triggerError = true;
+                        }
                     }
-                    state.iframeCount = document.querySelectorAll(
-                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
-                    ).length;
+                    state.iframeCount = document.querySelectorAll(iframeSelector).length;
                     return state;
                 }"""
             )
             if isinstance(sdk_result, dict) and truthy(sdk_result.get("triggered")):
                 iframe_count = safe_int(sdk_result.get("iframeCount"), 0)
-                log(
-                    f"账号{self.account_index} - 已调用活动页登录组件触发 SSO"
-                    f"（CAS iframe: {iframe_count}）"
-                )
+                if sdk_result.get("triggerMethod") == "sdk-auto":
+                    log(
+                        f"账号{self.account_index} - 已调用活动页自动 SSO 通道"
+                        f"（状态: {sdk_result.get('autoState') or 'starting'}，"
+                        f"CAS iframe: {iframe_count}）"
+                    )
+                else:
+                    log(
+                        f"账号{self.account_index} - 已调用活动页登录组件触发 SSO"
+                        f"（CAS iframe: {iframe_count}）"
+                    )
                 return True
         except Exception as e:
             if not self._campaign_sso_wait_logged:
@@ -1545,6 +1657,12 @@ class ApiClient:
             result = self.page.evaluate(
                 """() => ({
                     entryReady: typeof window.openLoginWindow === "function",
+                    autoState: window.__campaignAutoSsoState ? {
+                        status: window.__campaignAutoSsoState.status || "",
+                        httpStatus: window.__campaignAutoSsoState.httpStatus || 0,
+                        apiCode: window.__campaignAutoSsoState.apiCode ?? null,
+                        checkStatus: window.__campaignAutoSsoState.checkStatus || 0,
+                    } : null,
                     iframeCount: document.querySelectorAll(
                         'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
                     ).length,
@@ -1571,10 +1689,20 @@ class ApiClient:
             if attempt < attempts - 1:
                 time.sleep(random.uniform(1.2, 1.8))
         diagnostics = self._campaign_sso_diagnostics()
+        auto_state = diagnostics.get("autoState") if isinstance(diagnostics, dict) else None
+        auto_summary = "未启动"
+        if isinstance(auto_state, dict):
+            auto_summary = (
+                f"{auto_state.get('status') or '未知'}"
+                f"/HTTP {safe_int(auto_state.get('httpStatus'), 0)}"
+                f"/API {str(auto_state.get('apiCode') or '-')}"
+                f"/CHECK {safe_int(auto_state.get('checkStatus'), 0)}"
+            )
         log(
             f"账号{self.account_index} - 活动页 SSO 诊断："
             f"登录组件={'已就绪' if truthy(diagnostics.get('entryReady')) else '未就绪'}，"
             f"CAS iframe={safe_int(diagnostics.get('iframeCount'), 0)}，"
+            f"自动通道={auto_summary}，"
             f"页面路径={str(diagnostics.get('path') or '未知')}"
         )
         return False

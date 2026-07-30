@@ -230,6 +230,37 @@ class CampaignVoteTests(unittest.TestCase):
         self.assertTrue(client._trigger_campaign_sso())
         self.assertEqual(events, [("evaluate", True)])
 
+    def test_sso_script_uses_automatic_code_exchange_before_dom_fallback(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script):
+                captured["script"] = script
+                return {
+                    "entryReady": True,
+                    "sdkReady": True,
+                    "triggered": True,
+                    "triggerMethod": "sdk-auto",
+                    "autoState": "starting",
+                    "iframeCount": 0,
+                }
+
+            def get_by_role(self, *args, **kwargs):
+                self.fail("自动 SSO 已启动时不应点击登录控件")
+
+            def get_by_text(self, *args, **kwargs):
+                self.fail("自动 SSO 已启动时不应点击登录文字")
+
+        page = FakePage()
+        page.fail = self.fail
+        client = ApiClient("token", "secret", 1, page, user_agent="test-agent")
+
+        self.assertTrue(client._trigger_campaign_sso())
+        self.assertIn("crossCheckLogin", captured["script"])
+        self.assertIn("iframeAutoLogin", captured["script"])
+        self.assertIn("/login/login-by-code", captured["script"])
+        self.assertIn("application/x-www-form-urlencoded", captured["script"])
+
     def test_campaign_navigation_switches_mobile_context_to_desktop(self):
         events = []
 
