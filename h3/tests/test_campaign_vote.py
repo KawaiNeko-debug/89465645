@@ -261,6 +261,64 @@ class CampaignVoteTests(unittest.TestCase):
         self.assertIn("/login/login-by-code", captured["script"])
         self.assertIn("application/x-www-form-urlencoded", captured["script"])
 
+    def test_campaign_requests_prefer_the_portal_official_session_client(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script, argument):
+                captured["script"] = script
+                captured["argument"] = argument
+                return {
+                    "status": 200,
+                    "ok": True,
+                    "data": {"code": 200, "body": {"customerCode": "test"}},
+                    "channel": "official",
+                }
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        response = client._browser_fetch_json_once(
+            "GET",
+            f"{os.environ['VOTE_API_BASE']}/api/integral/user/getUserInfo",
+            tag="test",
+        )
+
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(captured["argument"]["method"], "GET")
+        self.assertIn("/api/portal/v1/secret/update", captured["script"])
+        self.assertIn("__campaignOfficialRequest", captured["script"])
+        self.assertIn('typeof candidate.use === "function"', captured["script"])
+        self.assertIn('channel: "official"', captured["script"])
+
+    def test_sso_prefers_the_portal_official_try_login_flow(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script):
+                captured["script"] = script
+                return {
+                    "entryReady": True,
+                    "sdkReady": True,
+                    "triggered": True,
+                    "triggerMethod": "portal-auth",
+                    "autoState": "starting",
+                    "iframeCount": 0,
+                }
+
+            def get_by_role(self, *args, **kwargs):
+                self.fail("官方 SSO 已启动时不应查找登录按钮")
+
+            def get_by_text(self, *args, **kwargs):
+                self.fail("官方 SSO 已启动时不应查找登录文字")
+
+        page = FakePage()
+        page.fail = self.fail
+        client = ApiClient("token", "secret", 1, page, user_agent="test-agent")
+
+        self.assertTrue(client._trigger_campaign_sso())
+        self.assertIn("portalAuth.tryLogin(false)", captured["script"])
+        self.assertIn("triggerLoginOnFail", captured["script"])
+        self.assertIn('state.triggerMethod = "portal-auth"', captured["script"])
+
     def test_campaign_navigation_switches_mobile_context_to_desktop(self):
         events = []
 
