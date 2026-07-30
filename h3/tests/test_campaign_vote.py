@@ -99,6 +99,10 @@ class CampaignVoteTests(unittest.TestCase):
         self.assertIn("VOTE_CAMPAIGN_URL", error)
         self.assertIn("VOTE_API_BASE", error)
         self.assertIn("VOTE_API_BASE", vote_environment_error(CAMPAIGN_URL, "invalid"))
+        self.assertIn(
+            "VOTE_CAMPAIGN_URL",
+            vote_environment_error("https://campaign.example.test/", os.environ["VOTE_API_BASE"]),
+        )
         self.assertEqual(vote_environment_error(CAMPAIGN_URL, os.environ["VOTE_API_BASE"]), "")
 
     def test_vote_window_includes_all_three_requested_days(self):
@@ -128,6 +132,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         configs = iter(
             [
                 vote_config(can_vote=True),
@@ -172,6 +178,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         readiness = iter([False, True])
         configs = iter(
             [
@@ -222,6 +230,43 @@ class CampaignVoteTests(unittest.TestCase):
         self.assertTrue(client._trigger_campaign_sso())
         self.assertEqual(events, [("evaluate", True)])
 
+    def test_campaign_navigation_switches_mobile_context_to_desktop(self):
+        events = []
+
+        class FakeSession:
+            def send(self, method, payload):
+                events.append((method, payload))
+
+        class FakeContext:
+            def new_cdp_session(self, page):
+                events.append(("new_cdp_session", page))
+                return FakeSession()
+
+        class FakePage:
+            context = FakeContext()
+
+        page = FakePage()
+        client = ApiClient("token", "secret", 1, page, user_agent="mobile-test-agent")
+
+        self.assertTrue(client._prepare_campaign_navigation())
+        user_agent_payload = next(
+            payload for method, payload in events if method == "Emulation.setUserAgentOverride"
+        )
+        metrics_payload = next(
+            payload for method, payload in events if method == "Emulation.setDeviceMetricsOverride"
+        )
+        self.assertNotIn("Mobile", user_agent_payload["userAgent"])
+        self.assertFalse(user_agent_payload["userAgentMetadata"]["mobile"])
+        self.assertFalse(metrics_payload["mobile"])
+
+    def test_campaign_navigation_rejects_redirected_root_path(self):
+        class FakePage:
+            def evaluate(self, script):
+                return "/"
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        self.assertFalse(client._campaign_page_ready())
+
     def test_sso_retries_until_portal_sdk_finishes_initializing(self):
         events = []
 
@@ -265,6 +310,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         client._campaign_session_ready = lambda quiet=False: events.append(("session", quiet)) or False
         client._trigger_campaign_sso = lambda: events.append(("trigger_sso",)) or True
         client._fetch_vote_config = lambda: self.fail("SSO 失败时不应查询投票配置")
@@ -301,6 +348,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         client._campaign_session_ready = lambda quiet=False: True
         client._fetch_vote_config = lambda: vote_config(can_vote=True)
         client._browser_fetch_json_once = lambda *args, **kwargs: {"success": True, "code": 200}

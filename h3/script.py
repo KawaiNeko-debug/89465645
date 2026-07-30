@@ -18,6 +18,7 @@ try:
         CAMPAIGN_URL,
         VOTE_ACTIVITY_ACCESS_ID,
         VOTE_API_BASE,
+        VOTE_CAMPAIGN_PATH,
         VOTE_CONFIG_PATH,
         VOTE_END_DATE,
         VOTE_PRODUCT_NAME,
@@ -35,6 +36,7 @@ except ImportError:
         CAMPAIGN_URL,
         VOTE_ACTIVITY_ACCESS_ID,
         VOTE_API_BASE,
+        VOTE_CAMPAIGN_PATH,
         VOTE_CONFIG_PATH,
         VOTE_END_DATE,
         VOTE_PRODUCT_NAME,
@@ -67,8 +69,13 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-07-29-campaign-vote-v13"
+SCRIPT_VERSION = "2026-07-30-campaign-vote-v14"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+CAMPAIGN_DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/138.0.0.0 Safari/537.36"
+)
 DEFAULT_SECKILL_CATEGORY_ACCESS_IDS = ["805341c7b7c242c6a8deb5c8789336b2"]
 DEFAULT_LOTTERY_ACTIVITY_CODE = "LAKU"
 UNCLAIMED_EXCHANGE_STATES = {1}
@@ -897,6 +904,7 @@ class ApiClient:
         self.vote_product_name = VOTE_PRODUCT_NAME
         self.vote_detail = ""
         self._campaign_sso_wait_logged = False
+        self._campaign_cdp_session = None
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -1392,6 +1400,82 @@ class ApiClient:
         )
         return campaign_session_ready(response)
 
+    def _prepare_campaign_navigation(self) -> bool:
+        """保留当前会话 Cookie，只把活动页导航切换为桌面浏览器模式。"""
+        try:
+            session = self.page.context.new_cdp_session(self.page)
+            session.send(
+                "Emulation.setUserAgentOverride",
+                {
+                    "userAgent": CAMPAIGN_DESKTOP_USER_AGENT,
+                    "acceptLanguage": "zh-CN,zh;q=0.9",
+                    "platform": "Win32",
+                    "userAgentMetadata": {
+                        "brands": [
+                            {"brand": "Chromium", "version": "138"},
+                            {"brand": "Not=A?Brand", "version": "24"},
+                        ],
+                        "fullVersionList": [
+                            {"brand": "Chromium", "version": "138.0.0.0"},
+                            {"brand": "Not=A?Brand", "version": "24.0.0.0"},
+                        ],
+                        "fullVersion": "138.0.0.0",
+                        "platform": "Windows",
+                        "platformVersion": "10.0.0",
+                        "architecture": "x86",
+                        "model": "",
+                        "mobile": False,
+                        "bitness": "64",
+                        "wow64": False,
+                    },
+                },
+            )
+            session.send(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1365,
+                    "height": 900,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                    "screenWidth": 1365,
+                    "screenHeight": 900,
+                },
+            )
+            session.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+            self._campaign_cdp_session = session
+            log(f"账号{self.account_index} - 已切换活动页桌面浏览器模式")
+            return True
+        except Exception as cdp_error:
+            try:
+                self.page.set_extra_http_headers({"User-Agent": CAMPAIGN_DESKTOP_USER_AGENT})
+                log(f"账号{self.account_index} - 已通过请求头切换活动页桌面模式")
+                return True
+            except Exception as header_error:
+                detail = redact_sensitive(
+                    truncate_text(f"{cdp_error}; {header_error}", 400)
+                )
+                log(f"账号{self.account_index} - 活动页桌面模式切换失败: {detail}")
+                return False
+
+    def _campaign_page_ready(self) -> bool:
+        try:
+            current_path = str(
+                self.page.evaluate("() => location.pathname || '/'") or "/"
+            ).rstrip("/") or "/"
+        except Exception as e:
+            log(
+                f"账号{self.account_index} - 无法确认活动页路径: "
+                f"{redact_sensitive(truncate_text(str(e), 300))}"
+            )
+            return False
+        if current_path == VOTE_CAMPAIGN_PATH:
+            return True
+        log(
+            f"账号{self.account_index} - 活动页被重定向："
+            f"期望路径={VOTE_CAMPAIGN_PATH}，实际路径={current_path}"
+        )
+        return False
+
     def _trigger_campaign_sso(self) -> bool:
         """调用门户自己的登录入口，让统一账号会话完成活动页 SSO。"""
         try:
@@ -1510,7 +1594,17 @@ class ApiClient:
         self.vote_status = "投票失败"
         try:
             log(f"账号{self.account_index} - 签到全部操作完成，打开品牌活动页触发 SSO")
+            if not self._prepare_campaign_navigation():
+                self.vote_detail = "无法切换活动页桌面浏览器模式"
+                self.vote_status = f"投票失败：{self.vote_detail}"
+                log(f"账号{self.account_index} - ❌ {self.vote_status}")
+                return False
             self.page.goto(CAMPAIGN_URL, wait_until="domcontentloaded", timeout=60000)
+            if not self._campaign_page_ready():
+                self.vote_detail = "活动页导航被重定向"
+                self.vote_status = f"投票失败：{self.vote_detail}"
+                log(f"账号{self.account_index} - ❌ {self.vote_status}")
+                return False
             decision = {"state": "error", "message": "活动页 SSO 会话未建立"}
             if self._wait_for_campaign_session():
                 for attempt in range(2):
