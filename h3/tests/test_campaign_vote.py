@@ -326,11 +326,37 @@ class CampaignVoteTests(unittest.TestCase):
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         readiness = iter([False, False, True])
         client._campaign_session_ready = lambda quiet=False: next(readiness)
+        client._campaign_sso_diagnostics = lambda: {}
 
         with patch("h3.script.time.sleep", return_value=None):
             self.assertTrue(client._wait_for_campaign_session(attempts=3))
 
         self.assertEqual(events, ["evaluate", "evaluate"])
+
+    def test_sso_reloads_after_automatic_code_exchange_completes(self):
+        events = []
+
+        class FakePage:
+            def reload(self, **kwargs):
+                events.append(("reload", kwargs))
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        readiness = iter([False, False, True])
+        diagnostics = iter(
+            [
+                {"autoState": {"status": "starting"}},
+                {"autoState": {"status": "complete"}},
+            ]
+        )
+        client._campaign_session_ready = lambda quiet=False: next(readiness)
+        client._trigger_campaign_sso = lambda: events.append(("trigger",)) or True
+        client._campaign_sso_diagnostics = lambda: next(diagnostics)
+
+        with patch("h3.script.time.sleep", return_value=None):
+            self.assertTrue(client._wait_for_campaign_session(attempts=3))
+
+        self.assertEqual([event[0] for event in events], ["trigger", "reload"])
+        self.assertEqual(events[1][1]["wait_until"], "domcontentloaded")
 
     def test_sso_failure_never_calls_vote_apis(self):
         events = []

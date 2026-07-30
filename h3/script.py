@@ -69,7 +69,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-07-30-campaign-vote-v15"
+SCRIPT_VERSION = "2026-07-30-campaign-vote-v16"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1676,6 +1676,7 @@ class ApiClient:
     def _wait_for_campaign_session(self, attempts=15) -> bool:
         """给活动页异步初始化留出时间，并在需要时主动触发一次 SSO。"""
         sso_triggered = False
+        sso_reloaded = False
         attempts = max(1, safe_int(attempts, 15))
         for attempt in range(attempts):
             if self._campaign_session_ready(quiet=attempt < attempts - 1):
@@ -1685,6 +1686,21 @@ class ApiClient:
 
             if not sso_triggered:
                 sso_triggered = self._trigger_campaign_sso()
+
+            if sso_triggered and not sso_reloaded:
+                diagnostics = self._campaign_sso_diagnostics()
+                auto_state = diagnostics.get("autoState") if isinstance(diagnostics, dict) else None
+                if isinstance(auto_state, dict) and auto_state.get("status") == "complete":
+                    try:
+                        self.page.reload(wait_until="domcontentloaded", timeout=60000)
+                        sso_reloaded = True
+                        log(f"账号{self.account_index} - 自动 SSO 交换完成，已重新加载活动页")
+                        continue
+                    except Exception as e:
+                        log(
+                            f"账号{self.account_index} - 自动 SSO 后活动页重载失败: "
+                            f"{redact_sensitive(truncate_text(str(e), 300))}"
+                        )
 
             if attempt < attempts - 1:
                 time.sleep(random.uniform(1.2, 1.8))
