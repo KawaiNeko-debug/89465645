@@ -99,6 +99,10 @@ class CampaignVoteTests(unittest.TestCase):
         self.assertIn("VOTE_CAMPAIGN_URL", error)
         self.assertIn("VOTE_API_BASE", error)
         self.assertIn("VOTE_API_BASE", vote_environment_error(CAMPAIGN_URL, "invalid"))
+        self.assertIn(
+            "VOTE_CAMPAIGN_URL",
+            vote_environment_error("https://campaign.example.test/", os.environ["VOTE_API_BASE"]),
+        )
         self.assertEqual(vote_environment_error(CAMPAIGN_URL, os.environ["VOTE_API_BASE"]), "")
 
     def test_vote_window_includes_all_three_requested_days(self):
@@ -128,6 +132,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         configs = iter(
             [
                 vote_config(can_vote=True),
@@ -172,6 +178,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         readiness = iter([False, True])
         configs = iter(
             [
@@ -201,6 +209,213 @@ class CampaignVoteTests(unittest.TestCase):
         )
         self.assertEqual(sum(1 for event in events if event[0] == "goto"), 1)
 
+    def test_sso_uses_portal_sdk_when_login_button_is_absent(self):
+        events = []
+
+        class FakePage:
+            def evaluate(self, script):
+                events.append(("evaluate", "openLoginWindow" in script))
+                return {"entryReady": True, "triggered": True, "iframeCount": 1}
+
+            def get_by_role(self, *args, **kwargs):
+                self.fail("SDK 入口成功时不应查找 DOM 登录按钮")
+
+            def get_by_text(self, *args, **kwargs):
+                self.fail("SDK 入口成功时不应查找 DOM 登录文字")
+
+        page = FakePage()
+        page.fail = self.fail
+        client = ApiClient("token", "secret", 1, page, user_agent="test-agent")
+
+        self.assertTrue(client._trigger_campaign_sso())
+        self.assertEqual(events, [("evaluate", True)])
+
+    def test_sso_script_uses_automatic_code_exchange_before_dom_fallback(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script):
+                captured["script"] = script
+                return {
+                    "entryReady": True,
+                    "sdkReady": True,
+                    "triggered": True,
+                    "triggerMethod": "sdk-auto",
+                    "autoState": "starting",
+                    "iframeCount": 0,
+                }
+
+            def get_by_role(self, *args, **kwargs):
+                self.fail("自动 SSO 已启动时不应点击登录控件")
+
+            def get_by_text(self, *args, **kwargs):
+                self.fail("自动 SSO 已启动时不应点击登录文字")
+
+        page = FakePage()
+        page.fail = self.fail
+        client = ApiClient("token", "secret", 1, page, user_agent="test-agent")
+
+        self.assertTrue(client._trigger_campaign_sso())
+        self.assertIn("crossCheckLogin", captured["script"])
+        self.assertIn("iframeAutoLogin", captured["script"])
+        self.assertIn("/login/login-by-code", captured["script"])
+        self.assertIn("application/x-www-form-urlencoded", captured["script"])
+
+    def test_campaign_requests_prefer_the_portal_official_session_client(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script, argument):
+                captured["script"] = script
+                captured["argument"] = argument
+                return {
+                    "status": 200,
+                    "ok": True,
+                    "data": {"code": 200, "body": {"customerCode": "test"}},
+                    "channel": "official",
+                }
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        response = client._browser_fetch_json_once(
+            "GET",
+            f"{os.environ['VOTE_API_BASE']}/api/integral/user/getUserInfo",
+            tag="test",
+        )
+
+        self.assertEqual(response["code"], 200)
+        self.assertEqual(captured["argument"]["method"], "GET")
+        self.assertIn("/api/portal/v1/secret/update", captured["script"])
+        self.assertIn("__campaignOfficialRequest", captured["script"])
+        self.assertIn('typeof candidate.use === "function"', captured["script"])
+        self.assertIn('channel: "official"', captured["script"])
+
+    def test_sso_prefers_the_portal_official_try_login_flow(self):
+        captured = {}
+
+        class FakePage:
+            def evaluate(self, script):
+                captured["script"] = script
+                return {
+                    "entryReady": True,
+                    "sdkReady": True,
+                    "triggered": True,
+                    "triggerMethod": "portal-auth",
+                    "autoState": "starting",
+                    "iframeCount": 0,
+                }
+
+            def get_by_role(self, *args, **kwargs):
+                self.fail("官方 SSO 已启动时不应查找登录按钮")
+
+            def get_by_text(self, *args, **kwargs):
+                self.fail("官方 SSO 已启动时不应查找登录文字")
+
+        page = FakePage()
+        page.fail = self.fail
+        client = ApiClient("token", "secret", 1, page, user_agent="test-agent")
+
+        self.assertTrue(client._trigger_campaign_sso())
+        self.assertIn("portalAuth.tryLogin(false)", captured["script"])
+        self.assertIn("triggerLoginOnFail", captured["script"])
+        self.assertIn('state.triggerMethod = "portal-auth"', captured["script"])
+
+    def test_campaign_navigation_switches_mobile_context_to_desktop(self):
+        events = []
+
+        class FakeSession:
+            def send(self, method, payload):
+                events.append((method, payload))
+
+        class FakeContext:
+            def new_cdp_session(self, page):
+                events.append(("new_cdp_session", page))
+                return FakeSession()
+
+        class FakePage:
+            context = FakeContext()
+
+        page = FakePage()
+        client = ApiClient("token", "secret", 1, page, user_agent="mobile-test-agent")
+
+        self.assertTrue(client._prepare_campaign_navigation())
+        user_agent_payload = next(
+            payload for method, payload in events if method == "Emulation.setUserAgentOverride"
+        )
+        metrics_payload = next(
+            payload for method, payload in events if method == "Emulation.setDeviceMetricsOverride"
+        )
+        self.assertNotIn("Mobile", user_agent_payload["userAgent"])
+        self.assertFalse(user_agent_payload["userAgentMetadata"]["mobile"])
+        self.assertFalse(metrics_payload["mobile"])
+
+    def test_campaign_navigation_rejects_redirected_root_path(self):
+        class FakePage:
+            def evaluate(self, script):
+                return "/"
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        self.assertFalse(client._campaign_page_ready())
+
+    def test_sso_retries_until_portal_sdk_finishes_initializing(self):
+        events = []
+
+        class EmptyLocator:
+            def count(self):
+                return 0
+
+        class FakePage:
+            evaluate_results = iter(
+                [
+                    {"entryReady": False, "triggered": False, "iframeCount": 0},
+                    {"entryReady": True, "triggered": True, "iframeCount": 1},
+                ]
+            )
+
+            def evaluate(self, script):
+                events.append("evaluate")
+                return next(self.evaluate_results)
+
+            def get_by_role(self, *args, **kwargs):
+                return EmptyLocator()
+
+            def get_by_text(self, *args, **kwargs):
+                return EmptyLocator()
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        readiness = iter([False, False, True])
+        client._campaign_session_ready = lambda quiet=False: next(readiness)
+        client._campaign_sso_diagnostics = lambda: {}
+
+        with patch("h3.script.time.sleep", return_value=None):
+            self.assertTrue(client._wait_for_campaign_session(attempts=3))
+
+        self.assertEqual(events, ["evaluate", "evaluate"])
+
+    def test_sso_reloads_after_automatic_code_exchange_completes(self):
+        events = []
+
+        class FakePage:
+            def reload(self, **kwargs):
+                events.append(("reload", kwargs))
+
+        client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
+        readiness = iter([False, False, True])
+        diagnostics = iter(
+            [
+                {"autoState": {"status": "starting"}},
+                {"autoState": {"status": "complete"}},
+            ]
+        )
+        client._campaign_session_ready = lambda quiet=False: next(readiness)
+        client._trigger_campaign_sso = lambda: events.append(("trigger",)) or True
+        client._campaign_sso_diagnostics = lambda: next(diagnostics)
+
+        with patch("h3.script.time.sleep", return_value=None):
+            self.assertTrue(client._wait_for_campaign_session(attempts=3))
+
+        self.assertEqual([event[0] for event in events], ["trigger", "reload"])
+        self.assertEqual(events[1][1]["wait_until"], "domcontentloaded")
+
     def test_sso_failure_never_calls_vote_apis(self):
         events = []
 
@@ -210,6 +425,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         client._campaign_session_ready = lambda quiet=False: events.append(("session", quiet)) or False
         client._trigger_campaign_sso = lambda: events.append(("trigger_sso",)) or True
         client._fetch_vote_config = lambda: self.fail("SSO 失败时不应查询投票配置")
@@ -246,6 +463,8 @@ class CampaignVoteTests(unittest.TestCase):
 
         client = ApiClient("token", "secret", 1, FakePage(), user_agent="test-agent")
         client.vote_required = True
+        client._prepare_campaign_navigation = lambda: True
+        client._campaign_page_ready = lambda: True
         client._campaign_session_ready = lambda quiet=False: True
         client._fetch_vote_config = lambda: vote_config(can_vote=True)
         client._browser_fetch_json_once = lambda *args, **kwargs: {"success": True, "code": 200}

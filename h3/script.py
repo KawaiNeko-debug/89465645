@@ -18,6 +18,7 @@ try:
         CAMPAIGN_URL,
         VOTE_ACTIVITY_ACCESS_ID,
         VOTE_API_BASE,
+        VOTE_CAMPAIGN_PATH,
         VOTE_CONFIG_PATH,
         VOTE_END_DATE,
         VOTE_PRODUCT_NAME,
@@ -35,6 +36,7 @@ except ImportError:
         CAMPAIGN_URL,
         VOTE_ACTIVITY_ACCESS_ID,
         VOTE_API_BASE,
+        VOTE_CAMPAIGN_PATH,
         VOTE_CONFIG_PATH,
         VOTE_END_DATE,
         VOTE_PRODUCT_NAME,
@@ -67,8 +69,13 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-07-29-campaign-vote-v13"
+SCRIPT_VERSION = "2026-07-30-campaign-vote-v17"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
+CAMPAIGN_DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/138.0.0.0 Safari/537.36"
+)
 DEFAULT_SECKILL_CATEGORY_ACCESS_IDS = ["805341c7b7c242c6a8deb5c8789336b2"]
 DEFAULT_LOTTERY_ACTIVITY_CODE = "LAKU"
 UNCLAIMED_EXCHANGE_STATES = {1}
@@ -896,6 +903,9 @@ class ApiClient:
         self.vote_product_sku = VOTE_PRODUCT_SKU
         self.vote_product_name = VOTE_PRODUCT_NAME
         self.vote_detail = ""
+        self._campaign_sso_wait_logged = False
+        self._campaign_request_channel_logged = False
+        self._campaign_cdp_session = None
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -1008,6 +1018,112 @@ class ApiClient:
         try:
             result = self.page.evaluate(
                 """async ({url, method, payload, headers}) => {
+                    const captureRuntime = () => {
+                        let runtime = null;
+                        try {
+                            if (Array.isArray(window.webpackJsonp)) {
+                                const marker = `campaign-request-capture-${Date.now()}`;
+                                window.webpackJsonp.push([
+                                    [marker],
+                                    {
+                                        [marker]: (module, exports, require) => {
+                                            runtime = require;
+                                        },
+                                    },
+                                    [[marker]],
+                                ]);
+                            }
+                        } catch (error) {}
+                        return runtime;
+                    };
+
+                    const findOfficialRequest = () => {
+                        if (window.__campaignOfficialRequest) {
+                            return window.__campaignOfficialRequest;
+                        }
+                        const runtime = captureRuntime();
+                        if (!runtime || !runtime.m) return null;
+                        for (const [moduleId, factory] of Object.entries(runtime.m)) {
+                            let source = "";
+                            try {
+                                source = String(factory);
+                            } catch (error) {
+                                continue;
+                            }
+                            if (
+                                !source.includes("/api/portal/v1/secret/update") ||
+                                !source.includes("secretkey")
+                            ) {
+                                continue;
+                            }
+                            try {
+                                const exportsValue = runtime(moduleId);
+                                const candidates = [
+                                    exportsValue,
+                                    ...Object.values(exportsValue || {}),
+                                ];
+                                const request = candidates.find((candidate) =>
+                                    typeof candidate === "function" &&
+                                    typeof candidate.use === "function"
+                                );
+                                if (request) {
+                                    window.__campaignOfficialRequest = request;
+                                    return request;
+                                }
+                            } catch (error) {}
+                        }
+                        return null;
+                    };
+
+                    const officialRequest = findOfficialRequest();
+                    if (officialRequest) {
+                        try {
+                            const target = new URL(url, location.origin);
+                            if (target.origin !== location.origin) {
+                                throw new Error("campaign request origin mismatch");
+                            }
+                            const requestPath = `${target.pathname}${target.search}`;
+                            const config = {
+                                url: requestPath,
+                                method: method.toLowerCase(),
+                                flat: true,
+                                errToReject: true,
+                                errorTip: false,
+                            };
+                            if (method === "POST") {
+                                config.data = payload || {};
+                            } else {
+                                config.params = payload || {};
+                            }
+                            const data = await officialRequest(config);
+                            return {
+                                status: 200,
+                                ok: true,
+                                allow: "",
+                                data,
+                                text: "",
+                                channel: "official",
+                            };
+                        } catch (error) {
+                            const response = error?.response || null;
+                            const data = response?.data || null;
+                            let text = "";
+                            try {
+                                text = JSON.stringify(data || {message: error?.message || "request failed"});
+                            } catch (jsonError) {
+                                text = String(error?.message || "request failed");
+                            }
+                            return {
+                                status: Number(response?.status || 0),
+                                ok: false,
+                                allow: "",
+                                data,
+                                text: text.slice(0, 2000),
+                                channel: "official",
+                            };
+                        }
+                    }
+
                     const options = {
                         method,
                         credentials: "include",
@@ -1030,12 +1146,17 @@ class ApiClient:
                         allow: response.headers.get("allow") || "",
                         data,
                         text: text.slice(0, 2000),
+                        channel: "fetch-fallback",
                     };
                 }""",
                 {"url": url, "method": method, "payload": payload or {}, "headers": headers},
             )
             status = safe_int(result.get("status"), 0) if isinstance(result, dict) else 0
             data = result.get("data") if isinstance(result, dict) else None
+            channel = str(result.get("channel") or "") if isinstance(result, dict) else ""
+            if channel == "official" and not self._campaign_request_channel_logged:
+                log(f"账号{self.account_index} - 活动页请求已接入官方会话通道")
+                self._campaign_request_channel_logged = True
             if status != 200:
                 if log_http_error:
                     allow = str(result.get("allow") or "") if isinstance(result, dict) else ""
@@ -1391,22 +1512,366 @@ class ApiClient:
         )
         return campaign_session_ready(response)
 
-    def _trigger_campaign_sso(self) -> bool:
-        """点击活动页登录入口，让已登录的统一账号会话主动完成 SSO。"""
+    def _prepare_campaign_navigation(self) -> bool:
+        """保留当前会话 Cookie，只把活动页导航切换为桌面浏览器模式。"""
         try:
-            login_button = self.page.get_by_role("button", name="登录", exact=True)
-            if login_button.count() != 1 or not login_button.is_visible():
-                return False
-            login_button.click(timeout=5000)
-            log(f"账号{self.account_index} - 已点击活动页登录入口，等待 SSO 会话建立")
+            session = self.page.context.new_cdp_session(self.page)
+            session.send(
+                "Emulation.setUserAgentOverride",
+                {
+                    "userAgent": CAMPAIGN_DESKTOP_USER_AGENT,
+                    "acceptLanguage": "zh-CN,zh;q=0.9",
+                    "platform": "Win32",
+                    "userAgentMetadata": {
+                        "brands": [
+                            {"brand": "Chromium", "version": "138"},
+                            {"brand": "Not=A?Brand", "version": "24"},
+                        ],
+                        "fullVersionList": [
+                            {"brand": "Chromium", "version": "138.0.0.0"},
+                            {"brand": "Not=A?Brand", "version": "24.0.0.0"},
+                        ],
+                        "fullVersion": "138.0.0.0",
+                        "platform": "Windows",
+                        "platformVersion": "10.0.0",
+                        "architecture": "x86",
+                        "model": "",
+                        "mobile": False,
+                        "bitness": "64",
+                        "wow64": False,
+                    },
+                },
+            )
+            session.send(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": 1365,
+                    "height": 900,
+                    "deviceScaleFactor": 1,
+                    "mobile": False,
+                    "screenWidth": 1365,
+                    "screenHeight": 900,
+                },
+            )
+            session.send("Emulation.setTouchEmulationEnabled", {"enabled": False})
+            self._campaign_cdp_session = session
+            log(f"账号{self.account_index} - 已切换活动页桌面浏览器模式")
             return True
+        except Exception as cdp_error:
+            try:
+                self.page.set_extra_http_headers({"User-Agent": CAMPAIGN_DESKTOP_USER_AGENT})
+                log(f"账号{self.account_index} - 已通过请求头切换活动页桌面模式")
+                return True
+            except Exception as header_error:
+                detail = redact_sensitive(
+                    truncate_text(f"{cdp_error}; {header_error}", 400)
+                )
+                log(f"账号{self.account_index} - 活动页桌面模式切换失败: {detail}")
+                return False
+
+    def _campaign_page_ready(self) -> bool:
+        try:
+            current_path = str(
+                self.page.evaluate("() => location.pathname || '/'") or "/"
+            ).rstrip("/") or "/"
         except Exception as e:
-            log(f"账号{self.account_index} - 活动页登录入口触发失败: {redact_sensitive(truncate_text(str(e), 300))}")
+            log(
+                f"账号{self.account_index} - 无法确认活动页路径: "
+                f"{redact_sensitive(truncate_text(str(e), 300))}"
+            )
             return False
+        if current_path == VOTE_CAMPAIGN_PATH:
+            return True
+        log(
+            f"账号{self.account_index} - 活动页被重定向："
+            f"期望路径={VOTE_CAMPAIGN_PATH}，实际路径={current_path}"
+        )
+        return False
+
+    def _trigger_campaign_sso(self) -> bool:
+        """调用门户自己的登录入口，让统一账号会话完成活动页 SSO。"""
+        try:
+            sdk_result = self.page.evaluate(
+                """() => {
+                    const iframeSelector =
+                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]';
+                    const state = {
+                        entryReady: typeof window.openLoginWindow === "function",
+                        sdkReady: false,
+                        triggered: false,
+                        triggerMethod: "",
+                        autoState: window.__campaignAutoSsoState?.status || "",
+                        iframeCount: document.querySelectorAll(iframeSelector).length,
+                    };
+
+                    const findSdk = (exportsValue) => {
+                        if (!exportsValue) return null;
+                        const candidates = [exportsValue];
+                        if (typeof exportsValue === "object" || typeof exportsValue === "function") {
+                            try {
+                                candidates.push(...Object.values(exportsValue));
+                            } catch (error) {}
+                        }
+                        return candidates.find((candidate) =>
+                            candidate &&
+                            typeof candidate.crossCheckLogin === "function" &&
+                            typeof candidate.iframeAutoLogin === "function" &&
+                            typeof candidate.getAuthCode === "function"
+                        ) || null;
+                    };
+
+                    let runtime = null;
+                    try {
+                        if (Array.isArray(window.webpackJsonp)) {
+                            const marker = `campaign-auth-capture-${Date.now()}`;
+                            window.webpackJsonp.push([
+                                [marker],
+                                {
+                                    [marker]: (module, exports, require) => {
+                                        runtime = require;
+                                    },
+                                },
+                                [[marker]],
+                            ]);
+                        }
+                    } catch (error) {}
+
+                    let sdk = null;
+                    if (runtime && runtime.c) {
+                        for (const cachedModule of Object.values(runtime.c)) {
+                            sdk = findSdk(cachedModule?.exports);
+                            if (sdk) break;
+                        }
+                    }
+
+                    let portalAuth = null;
+                    if (runtime && runtime.c) {
+                        for (const cachedModule of Object.values(runtime.c)) {
+                            const exportsValue = cachedModule?.exports;
+                            if (exportsValue && typeof exportsValue.tryLogin === "function") {
+                                portalAuth = exportsValue;
+                                break;
+                            }
+                        }
+                    }
+                    if (!portalAuth && runtime && runtime.m) {
+                        for (const [moduleId, factory] of Object.entries(runtime.m)) {
+                            let source = "";
+                            try {
+                                source = String(factory);
+                            } catch (error) {
+                                continue;
+                            }
+                            if (
+                                !source.includes("/login/login-by-code") ||
+                                !source.includes("triggerLoginOnFail")
+                            ) {
+                                continue;
+                            }
+                            try {
+                                const exportsValue = runtime(moduleId);
+                                if (exportsValue && typeof exportsValue.tryLogin === "function") {
+                                    portalAuth = exportsValue;
+                                    break;
+                                }
+                            } catch (error) {}
+                        }
+                    }
+
+                    if (portalAuth) {
+                        state.entryReady = true;
+                        state.sdkReady = true;
+                        let autoState = window.__campaignAutoSsoState;
+                        if (!autoState || autoState.status === "failed") {
+                            autoState = {
+                                status: "starting",
+                                httpStatus: 0,
+                                apiCode: null,
+                                checkStatus: 0,
+                            };
+                            window.__campaignAutoSsoState = autoState;
+                            Promise.resolve(portalAuth.tryLogin(false))
+                                .then(async (data) => {
+                                    autoState.status = "exchange";
+                                    autoState.httpStatus = 200;
+                                    autoState.apiCode = data?.code ?? null;
+                                    if (String(autoState.apiCode) !== "200") {
+                                        throw new Error("official login exchange failed");
+                                    }
+                                    autoState.status = "check";
+                                    const checkResponse = await fetch(
+                                        "/api/portal/login/checkLoginState",
+                                        {credentials: "include"}
+                                    );
+                                    autoState.checkStatus = checkResponse.status;
+                                    if (!checkResponse.ok) {
+                                        throw new Error("login state check failed");
+                                    }
+                                    autoState.status = "complete";
+                                })
+                                .catch(() => {
+                                    autoState.status = "failed";
+                                });
+                        }
+                        state.triggered = true;
+                        state.triggerMethod = "portal-auth";
+                        state.autoState = autoState.status;
+                        state.iframeCount = document.querySelectorAll(iframeSelector).length;
+                        return state;
+                    }
+
+                    if (!sdk && runtime) {
+                        try {
+                            sdk = findSdk(runtime(54));
+                        } catch (error) {}
+                    }
+
+                    if (sdk) {
+                        state.entryReady = true;
+                        state.sdkReady = true;
+                        let autoState = window.__campaignAutoSsoState;
+                        if (!autoState || autoState.status === "failed") {
+                            autoState = {
+                                status: "starting",
+                                httpStatus: 0,
+                                apiCode: null,
+                                checkStatus: 0,
+                            };
+                            window.__campaignAutoSsoState = autoState;
+                            Promise.resolve()
+                                .then(() => sdk.crossCheckLogin())
+                                .catch(() => {
+                                    autoState.status = "iframe";
+                                    return sdk.iframeAutoLogin();
+                                })
+                                .then(async (code) => {
+                                    autoState.status = "exchange";
+                                    const body = new URLSearchParams();
+                                    body.set("code", String(code || ""));
+                                    const response = await fetch("/login/login-by-code", {
+                                        method: "POST",
+                                        credentials: "include",
+                                        headers: {
+                                            "Content-Type": "application/x-www-form-urlencoded",
+                                        },
+                                        body: body.toString(),
+                                    });
+                                    autoState.httpStatus = response.status;
+                                    const data = await response.json().catch(() => null);
+                                    autoState.apiCode = data?.code ?? null;
+                                    if (!response.ok || String(autoState.apiCode) !== "200") {
+                                        throw new Error("code exchange failed");
+                                    }
+                                    autoState.status = "check";
+                                    const checkResponse = await fetch(
+                                        "/api/portal/login/checkLoginState",
+                                        {credentials: "include"}
+                                    );
+                                    autoState.checkStatus = checkResponse.status;
+                                    if (!checkResponse.ok) {
+                                        throw new Error("login state check failed");
+                                    }
+                                    autoState.status = "complete";
+                                })
+                                .catch(() => {
+                                    autoState.status = "failed";
+                                });
+                        }
+                        state.triggered = true;
+                        state.triggerMethod = "sdk-auto";
+                        state.autoState = autoState.status;
+                        state.iframeCount = document.querySelectorAll(iframeSelector).length;
+                        return state;
+                    }
+
+                    if (state.entryReady) {
+                        try {
+                            window.openLoginWindow();
+                            state.triggered = true;
+                            state.triggerMethod = "login-window";
+                        } catch (error) {
+                            state.triggerError = true;
+                        }
+                    }
+                    state.iframeCount = document.querySelectorAll(iframeSelector).length;
+                    return state;
+                }"""
+            )
+            if isinstance(sdk_result, dict) and truthy(sdk_result.get("triggered")):
+                iframe_count = safe_int(sdk_result.get("iframeCount"), 0)
+                if sdk_result.get("triggerMethod") == "portal-auth":
+                    log(
+                        f"账号{self.account_index} - 已调用活动页官方 SSO 通道"
+                        f"（状态: {sdk_result.get('autoState') or 'starting'}，"
+                        f"CAS iframe: {iframe_count}）"
+                    )
+                elif sdk_result.get("triggerMethod") == "sdk-auto":
+                    log(
+                        f"账号{self.account_index} - 已调用活动页自动 SSO 通道"
+                        f"（状态: {sdk_result.get('autoState') or 'starting'}，"
+                        f"CAS iframe: {iframe_count}）"
+                    )
+                else:
+                    log(
+                        f"账号{self.account_index} - 已调用活动页登录组件触发 SSO"
+                        f"（CAS iframe: {iframe_count}）"
+                    )
+                return True
+        except Exception as e:
+            if not self._campaign_sso_wait_logged:
+                log(
+                    f"账号{self.account_index} - 活动页登录组件尚未就绪: "
+                    f"{redact_sensitive(truncate_text(str(e), 300))}"
+                )
+
+        # 兼容页面尚未暴露 SDK 入口、但已经渲染登录控件的版本。
+        locator_factories = (
+            lambda: self.page.get_by_role("button", name="登录", exact=True),
+            lambda: self.page.get_by_role("link", name="登录", exact=True),
+            lambda: self.page.get_by_text("登录", exact=True),
+        )
+        for locator_factory in locator_factories:
+            try:
+                login_entry = locator_factory()
+                if login_entry.count() != 1 or not login_entry.is_visible():
+                    continue
+                login_entry.click(timeout=5000)
+                log(f"账号{self.account_index} - 已点击活动页登录入口，等待 SSO 会话建立")
+                return True
+            except Exception:
+                continue
+
+        if not self._campaign_sso_wait_logged:
+            log(f"账号{self.account_index} - 等待活动页登录组件初始化")
+            self._campaign_sso_wait_logged = True
+        return False
+
+    def _campaign_sso_diagnostics(self) -> dict:
+        """只采集不含凭据的页面状态，供 SSO 失败日志定位。"""
+        try:
+            result = self.page.evaluate(
+                """() => ({
+                    entryReady: typeof window.openLoginWindow === "function",
+                    autoState: window.__campaignAutoSsoState ? {
+                        status: window.__campaignAutoSsoState.status || "",
+                        httpStatus: window.__campaignAutoSsoState.httpStatus || 0,
+                        apiCode: window.__campaignAutoSsoState.apiCode ?? null,
+                        checkStatus: window.__campaignAutoSsoState.checkStatus || 0,
+                    } : null,
+                    iframeCount: document.querySelectorAll(
+                        'iframe[id*="cas" i], iframe[name*="cas" i], iframe[src*="/by-pit"]'
+                    ).length,
+                    path: location.pathname || "",
+                })"""
+            )
+            return result if isinstance(result, dict) else {}
+        except Exception:
+            return {}
 
     def _wait_for_campaign_session(self, attempts=15) -> bool:
         """给活动页异步初始化留出时间，并在需要时主动触发一次 SSO。"""
         sso_triggered = False
+        sso_reloaded = False
         attempts = max(1, safe_int(attempts, 15))
         for attempt in range(attempts):
             if self._campaign_session_ready(quiet=attempt < attempts - 1):
@@ -1417,8 +1882,40 @@ class ApiClient:
             if not sso_triggered:
                 sso_triggered = self._trigger_campaign_sso()
 
+            if sso_triggered and not sso_reloaded:
+                diagnostics = self._campaign_sso_diagnostics()
+                auto_state = diagnostics.get("autoState") if isinstance(diagnostics, dict) else None
+                if isinstance(auto_state, dict) and auto_state.get("status") == "complete":
+                    try:
+                        self.page.reload(wait_until="domcontentloaded", timeout=60000)
+                        sso_reloaded = True
+                        log(f"账号{self.account_index} - 自动 SSO 交换完成，已重新加载活动页")
+                        continue
+                    except Exception as e:
+                        log(
+                            f"账号{self.account_index} - 自动 SSO 后活动页重载失败: "
+                            f"{redact_sensitive(truncate_text(str(e), 300))}"
+                        )
+
             if attempt < attempts - 1:
                 time.sleep(random.uniform(1.2, 1.8))
+        diagnostics = self._campaign_sso_diagnostics()
+        auto_state = diagnostics.get("autoState") if isinstance(diagnostics, dict) else None
+        auto_summary = "未启动"
+        if isinstance(auto_state, dict):
+            auto_summary = (
+                f"{auto_state.get('status') or '未知'}"
+                f"/HTTP {safe_int(auto_state.get('httpStatus'), 0)}"
+                f"/API {str(auto_state.get('apiCode') or '-')}"
+                f"/CHECK {safe_int(auto_state.get('checkStatus'), 0)}"
+            )
+        log(
+            f"账号{self.account_index} - 活动页 SSO 诊断："
+            f"登录组件={'已就绪' if truthy(diagnostics.get('entryReady')) else '未就绪'}，"
+            f"CAS iframe={safe_int(diagnostics.get('iframeCount'), 0)}，"
+            f"自动通道={auto_summary}，"
+            f"页面路径={str(diagnostics.get('path') or '未知')}"
+        )
         return False
 
     def execute_campaign_vote(self) -> bool:
@@ -1436,7 +1933,17 @@ class ApiClient:
         self.vote_status = "投票失败"
         try:
             log(f"账号{self.account_index} - 签到全部操作完成，打开品牌活动页触发 SSO")
+            if not self._prepare_campaign_navigation():
+                self.vote_detail = "无法切换活动页桌面浏览器模式"
+                self.vote_status = f"投票失败：{self.vote_detail}"
+                log(f"账号{self.account_index} - ❌ {self.vote_status}")
+                return False
             self.page.goto(CAMPAIGN_URL, wait_until="domcontentloaded", timeout=60000)
+            if not self._campaign_page_ready():
+                self.vote_detail = "活动页导航被重定向"
+                self.vote_status = f"投票失败：{self.vote_detail}"
+                log(f"账号{self.account_index} - ❌ {self.vote_status}")
+                return False
             decision = {"state": "error", "message": "活动页 SSO 会话未建立"}
             if self._wait_for_campaign_session():
                 for attempt in range(2):

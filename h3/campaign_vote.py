@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 CAMPAIGN_URL = (os.getenv("VOTE_CAMPAIGN_URL") or "").strip()
 VOTE_API_BASE = (os.getenv("VOTE_API_BASE") or "").strip().rstrip("/")
+VOTE_CAMPAIGN_PATH = "/portal/brand-campaign"
 VOTE_USER_INFO_PATH = "/api/integral/user/getUserInfo"
 VOTE_CONFIG_PATH = "/api/integral/member/day/activity/ns/selectVoteConfig"
 VOTE_SUBMIT_PATH = "/api/integral/member/day/activity/vote"
@@ -32,6 +33,9 @@ def vote_environment_error(campaign_url=CAMPAIGN_URL, api_base=VOTE_API_BASE) ->
         parsed = urlparse(str(value).strip())
         if parsed.scheme != "https" or not parsed.netloc:
             return f"投票环境变量格式无效：{name} 必须是 HTTPS 地址"
+    campaign_path = urlparse(str(campaign_url).strip()).path.rstrip("/") or "/"
+    if campaign_path != VOTE_CAMPAIGN_PATH:
+        return f"投票环境变量格式无效：VOTE_CAMPAIGN_URL 路径必须是 {VOTE_CAMPAIGN_PATH}"
     return ""
 
 
