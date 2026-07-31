@@ -1,0 +1,105 @@
+name: sign-batches5-8
+run-name: sign-batches5-8 (${{ github.run_id }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_text:
+        description: "Send the text summary after batch 8"
+        required: false
+        default: true
+        type: boolean
+      telegram_xlsx:
+        description: "Send the XLSX summary after batch 8"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: sign-batches5-8
+  cancel-in-progress: false
+
+env:
+  TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install orchestration and report dependencies
+        timeout-minutes: 8
+        run: |
+          python -m pip install --upgrade pip --timeout 60 --retries 3
+          python -m pip install --timeout 60 --retries 3 requests openpyxl
+
+      - name: Run batches 5 through 8 in order
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ORCHESTRATION_POLL_SECONDS: "15"
+          ORCHESTRATION_BATCH_TIMEOUT_SECONDS: "4500"
+        run: |
+          python h3/orchestrate_batches.py run \
+            --groups 5,6,7,8 \
+            --ref "${GITHUB_REF_NAME}" \
+            --orchestration-id "${GITHUB_RUN_ID}" \
+            --output orchestration.json
+
+      - name: Download exact batch results
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python h3/orchestrate_batches.py download \
+            --manifest orchestration.json \
+            --output-dir results
+
+      - name: Build and send batches 5 through 8 report
+        if: always()
+        env:
+          OUTPUT_XLSX_PATH: results/sign-summary-batches5-8.xlsx
+          NOTIFY_CHANNELS: telegram
+          TELEGRAM_SEND_TEXT: ${{ inputs.telegram_text }}
+          TELEGRAM_SEND_XLSX: ${{ inputs.telegram_xlsx }}
+          GENERATE_XLSX: "true"
+          ACCOUNTS_BATCH5: ${{ secrets.ACCOUNTS_BATCH5 }}
+          ACCOUNTS_BATCH6: ${{ secrets.ACCOUNTS_BATCH6 }}
+          ACCOUNTS_BATCH7: ${{ secrets.ACCOUNTS_BATCH7 }}
+          ACCOUNTS_BATCH8: ${{ secrets.ACCOUNTS_BATCH8 }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+        run: |
+          python h3/report.py results
+
+      - name: Upload combined XLSX and manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batches5-8-summary-${{ github.run_id }}
+          path: |
+            results/*.xlsx
+            results/manifest.json
+            orchestration.json
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Verify all batch workflows succeeded
+        if: always()
+        run: |
+          python h3/orchestrate_batches.py check \
+            --groups 5,6,7,8 \
+            --manifest orchestration.json

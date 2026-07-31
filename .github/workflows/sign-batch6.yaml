@@ -1,9 +1,13 @@
 name: sign-batch6
+run-name: sign-batch6 (${{ inputs.orchestration_id || github.run_id }})
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 6 * * *"
+    inputs:
+      orchestration_id:
+        description: "Optional parent orchestration run ID"
+        required: false
+        type: string
 
 env:
   TZ: Asia/Shanghai
@@ -53,7 +57,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      max-parallel: 15
+      max-parallel: 20
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       BASE_URL: ${{ secrets.BASE_URL }}
@@ -276,7 +280,7 @@ jobs:
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 20
       matrix: ${{ fromJSON(needs.prepare_retry.outputs.matrix) }}
     env:
       BASE_URL: ${{ secrets.BASE_URL }}

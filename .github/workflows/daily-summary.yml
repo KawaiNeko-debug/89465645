@@ -2,9 +2,6 @@
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["sign-batch5"]
-    types: [completed]
 
 env:
   TZ: Asia/Shanghai
@@ -17,7 +14,6 @@ permissions:
 
 jobs:
   summary:
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout

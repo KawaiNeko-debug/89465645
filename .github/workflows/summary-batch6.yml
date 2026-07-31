@@ -17,9 +17,6 @@ on:
         required: false
         default: true
         type: boolean
-  workflow_run:
-    workflows: ["sign-batch6"]
-    types: [completed]
 
 env:
   TZ: Asia/Shanghai
@@ -49,7 +46,6 @@ jobs:
 
   summary:
     needs: [prepare]
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'cancelled' }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout

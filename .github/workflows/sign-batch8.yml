@@ -1,5 +1,5 @@
-name: sign-batch5
-run-name: sign-batch5 (${{ inputs.orchestration_id || github.run_id }})
+name: sign-batch8
+run-name: sign-batch8 (${{ inputs.orchestration_id || github.run_id }})
 
 on:
   workflow_dispatch:
@@ -31,7 +31,7 @@ jobs:
       - id: matrix
         shell: bash
         env:
-          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
+          ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH8 }}
         run: |
           python - <<'PY'
           import json, os, random
@@ -74,11 +74,11 @@ jobs:
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
-      GROUP_NAME: batch5
-      GROUP_NUMBER: "5"
+      GROUP_NAME: batch8
+      GROUP_NUMBER: "8"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       EXECUTION_ORDER: ${{ matrix.execution_order }}
-      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH8 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -297,15 +297,15 @@ jobs:
       API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
       BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
       SIGN_TASK_START_DATE: ${{ needs.prepare.outputs.task_start_date }}
-      GROUP_NAME: batch5
-      GROUP_NUMBER: "5"
+      GROUP_NAME: batch8
+      GROUP_NUMBER: "8"
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       DATA_ONLY_RETRY: "${{ matrix.data_only_retry }}"
       PREVIOUS_SIGN_SUCCESS: "${{ matrix.previous_sign_success }}"
       PREVIOUS_RISK_CONTROLLED: "${{ matrix.previous_risk_controlled }}"
       PREVIOUS_FINAL_POINTS: "${{ matrix.previous_final_points }}"
       EXECUTION_ORDER: ${{ matrix.account_index }}
-      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH5 }}
+      ACCOUNTS: ${{ secrets.ACCOUNTS_BATCH8 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -434,7 +434,7 @@ jobs:
       - name: Upload final batch artifact
         uses: actions/upload-artifact@v4
         with:
-          name: batch5-result
+          name: batch8-result
           path: merged/result.json
           if-no-files-found: error
           retention-days: 2
