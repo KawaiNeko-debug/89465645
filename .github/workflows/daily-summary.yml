@@ -38,7 +38,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TARGET_DATE_HINT: ${{ github.event.workflow_run.created_at }}
-          SUMMARY_GROUPS: "1,2,3,4"
+          SUMMARY_GROUPS: "1,2,3,4,5"
         run: |
           python h3/fetch_results.py results
 
@@ -52,6 +52,7 @@ jobs:
           ACCOUNTS_BATCH2: ${{ secrets.ACCOUNTS_BATCH2 }}
           ACCOUNTS_BATCH3: ${{ secrets.ACCOUNTS_BATCH3 }}
           ACCOUNTS_BATCH4: ${{ secrets.ACCOUNTS_BATCH4 }}
+          ACCOUNTS_BATCH5: ${{ secrets.ACCOUNTS_BATCH5 }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
