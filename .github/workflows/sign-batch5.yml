@@ -8,6 +8,8 @@ on:
         description: "Optional parent orchestration run ID"
         required: false
         type: string
+  schedule:
+    - cron: "30 5 * * *"
 
 env:
   TZ: Asia/Shanghai

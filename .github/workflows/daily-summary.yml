@@ -3,7 +3,7 @@
 on:
   workflow_dispatch:
   workflow_run:
-    workflows: ["sign-batch4"]
+    workflows: ["sign-batch5"]
     types: [completed]
 
 env:
