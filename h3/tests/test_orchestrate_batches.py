@@ -14,10 +14,24 @@ from h3.orchestrate_batches import (
     parse_groups,
     select_dispatched_run,
 )
+from h3.fetch_results import selected_workflows
 from h3.report import load_account_lookup
 
 
 class BatchOrchestrationTests(unittest.TestCase):
+    def test_daily_summary_runs_after_batch4_and_selects_groups_1_to_4(self):
+        root = Path(__file__).resolve().parents[2]
+        text = (root / ".github" / "workflows" / "daily-summary.yml").read_text(encoding="utf-8")
+        self.assertIn('workflows: ["sign-batch4"]', text)
+        self.assertIn("types: [completed]", text)
+        self.assertIn('SUMMARY_GROUPS: "1,2,3,4"', text)
+        self.assertNotIn("ACCOUNTS_BATCH5", text)
+        self.assertIn("results/*.xlsx", text)
+        self.assertEqual(
+            [item["group_number"] for item in selected_workflows("1,2,3,4")],
+            [1, 2, 3, 4],
+        )
+
     def test_group_parser_keeps_requested_order_and_removes_duplicates(self):
         self.assertEqual(parse_groups("5,6,6,7,8"), [5, 6, 7, 8])
         with self.assertRaises(ValueError):

@@ -4,8 +4,8 @@ import os
 import shutil
 import sys
 import zipfile
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 try:
@@ -22,7 +22,24 @@ WORKFLOWS = [
     {"workflow_file": "sign-batch5.yml", "artifact_name": "batch5-result", "group_number": 5, "group_name": "5组"},
 ]
 
-LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+try:
+    LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+except ZoneInfoNotFoundError:
+    LOCAL_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def selected_workflows(raw_groups: str | None = None) -> list[dict]:
+    raw = (raw_groups if raw_groups is not None else os.getenv("SUMMARY_GROUPS", "")).strip()
+    if not raw:
+        return list(WORKFLOWS)
+    try:
+        groups = {int(item.strip()) for item in raw.split(",") if item.strip()}
+    except ValueError as exc:
+        raise ValueError("SUMMARY_GROUPS 必须是逗号分隔的组号") from exc
+    selected = [item for item in WORKFLOWS if item["group_number"] in groups]
+    if not selected or {item["group_number"] for item in selected} != groups:
+        raise ValueError("SUMMARY_GROUPS 包含不支持的组号")
+    return selected
 
 
 def api_request(url: str, token: str, params=None):
@@ -240,7 +257,7 @@ def main():
     }
 
     found_any = False
-    for item in WORKFLOWS:
+    for item in selected_workflows():
         batch = dict(item)
         batch["found"] = False
         batch["reason"] = ""
