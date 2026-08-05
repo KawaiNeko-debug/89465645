@@ -14,6 +14,8 @@ DATA_FAILURE_MARKERS = (
     "奖品过期记录获取失败",
     "活动数据获取失败",
     "活动数据抓取异常",
+    "会员资料获取未完成",
+    "会员资料接口未完整返回",
 )
 VOTE_FIELDS = (
     "vote_required",
@@ -24,6 +26,14 @@ VOTE_FIELDS = (
     "vote_product_sku",
     "vote_product_name",
     "vote_detail",
+)
+LISTING_GIFT_FIELDS = (
+    "listing_gift_required",
+    "listing_gift_success",
+    "listing_gift_attempted",
+    "listing_gift_status",
+    "listing_gift_time",
+    "listing_gift_detail",
 )
 
 
@@ -75,9 +85,27 @@ def merge_data_fields(picked: dict, fallback: dict | None):
     if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
         picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
         picked["activity_fetch_success"] = True
+    picked_activity = picked.get("activity_records") or {}
+    fallback_activity = fallback.get("activity_records") or {}
+    picked_lottery = picked_activity.get("lottery") if isinstance(picked_activity, dict) else []
+    fallback_lottery = fallback_activity.get("lottery") if isinstance(fallback_activity, dict) else []
+    if not isinstance(picked_lottery, list):
+        picked_lottery = []
+    if isinstance(fallback_lottery, list) and len(fallback_lottery) > len(picked_lottery):
+        picked["activity_records"] = fallback_activity
+    if truthy(fallback.get("account_data_fetch_success")) and not truthy(picked.get("account_data_fetch_success")):
+        picked["account_data"] = fallback.get("account_data") or {}
+        picked["account_data_fetch_success"] = True
+    picked["account_data_required"] = truthy(picked.get("account_data_required")) or truthy(
+        fallback.get("account_data_required")
+    )
     picked["data_fetch_completed"] = (
         truthy(picked.get("points_fetch_success"))
         and truthy(picked.get("activity_fetch_success"))
+        and (
+            not truthy(picked.get("account_data_required"))
+            or truthy(picked.get("account_data_fetch_success"))
+        )
     )
     if truthy(picked.get("data_fetch_completed")):
         picked["detail_reason"] = strip_resolved_data_failures(picked.get("detail_reason", ""))
@@ -106,6 +134,7 @@ def load_single_result(path: str):
 def score(row: dict):
     return (
         1 if truthy(row.get("sign_success")) else 0,
+        1 if truthy(row.get("listing_gift_success")) else 0,
         1 if truthy(row.get("vote_success")) else 0,
         1 if truthy(row.get("data_fetch_completed")) else 0,
         int(truthy(row.get("points_fetch_success"))) + int(truthy(row.get("activity_fetch_success"))),
@@ -134,6 +163,9 @@ def pick_result(initial: dict, retry: dict | None):
         if truthy(fallback.get("vote_success")) and not truthy(picked.get("vote_success")):
             for key in VOTE_FIELDS:
                 picked[key] = fallback.get(key)
+        if truthy(fallback.get("listing_gift_success")) and not truthy(picked.get("listing_gift_success")):
+            for key in LISTING_GIFT_FIELDS:
+                picked[key] = fallback.get(key)
         if truthy(picked.get("banned_account")):
             if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
                 for key in ("initial_points", "final_points", "points_reward"):
@@ -142,9 +174,16 @@ def pick_result(initial: dict, retry: dict | None):
             if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
                 picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
                 picked["activity_fetch_success"] = True
+            if truthy(fallback.get("account_data_fetch_success")) and not truthy(picked.get("account_data_fetch_success")):
+                picked["account_data"] = fallback.get("account_data") or {}
+                picked["account_data_fetch_success"] = True
             picked["data_fetch_completed"] = (
                 truthy(picked.get("points_fetch_success"))
                 and truthy(picked.get("activity_fetch_success"))
+                and (
+                    not truthy(picked.get("account_data_required"))
+                    or truthy(picked.get("account_data_fetch_success"))
+                )
             )
             failures = []
             if not truthy(picked.get("points_fetch_success")):
@@ -239,6 +278,15 @@ def main():
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
                 "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "account_data_required": truthy(row.get("account_data_required")),
+                "account_data_fetch_success": truthy(row.get("account_data_fetch_success")),
+                "account_data": row.get("account_data") or {},
+                "listing_gift_required": truthy(row.get("listing_gift_required")),
+                "listing_gift_success": truthy(row.get("listing_gift_success")),
+                "listing_gift_attempted": truthy(row.get("listing_gift_attempted")),
+                "listing_gift_status": row.get("listing_gift_status", ""),
+                "listing_gift_time": row.get("listing_gift_time", ""),
+                "listing_gift_detail": row.get("listing_gift_detail", ""),
                 "vote_required": truthy(row.get("vote_required")),
                 "vote_success": truthy(row.get("vote_success")),
                 "vote_attempted": truthy(row.get("vote_attempted")),

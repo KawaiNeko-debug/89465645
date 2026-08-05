@@ -13,6 +13,13 @@ try:
 except ImportError:
     from h3.campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
 
+try:
+    from account_data import empty_account_data
+    from listing_gift import is_listing_gift_date
+except ImportError:
+    from h3.account_data import empty_account_data
+    from h3.listing_gift import is_listing_gift_date
+
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 RISK_PAUSE_SECONDS = max(0, int(os.getenv("RISK_PAUSE_SECONDS", "600") or 600))
@@ -110,11 +117,20 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "points_fetch_success": False,
         "activity_fetch_success": False,
         "data_fetch_completed": False,
+        "account_data_required": os.getenv("ACCOUNT_DATA_ENABLED", "false").strip().lower() in {"1", "true", "yes", "y", "on"},
+        "account_data_fetch_success": False,
+        "account_data": empty_account_data(),
         "next_day_success": False,
         "task_start_date": task_date,
         "sign_completed_at": "",
         "activity_records": {"seckill": [], "lottery": []},
-        "vote_required": is_vote_date(task_date),
+        "listing_gift_required": is_listing_gift_date(task_date),
+        "listing_gift_success": False,
+        "listing_gift_attempted": False,
+        "listing_gift_status": "待领取" if is_listing_gift_date(task_date) else "非领取日期",
+        "listing_gift_time": "",
+        "listing_gift_detail": "",
+        "vote_required": False,
         "vote_success": False,
         "vote_attempted": False,
         "vote_status": "未执行",
@@ -166,6 +182,15 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "task_start_date": str(raw.get("task_start_date") or "").strip(),
             "sign_completed_at": str(raw.get("sign_completed_at") or "").strip(),
             "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": []},
+            "account_data_required": truthy(raw.get("account_data_required")),
+            "account_data_fetch_success": truthy(raw.get("account_data_fetch_success")),
+            "account_data": raw.get("account_data") if isinstance(raw.get("account_data"), dict) else empty_account_data(),
+            "listing_gift_required": truthy(raw.get("listing_gift_required")),
+            "listing_gift_success": truthy(raw.get("listing_gift_success")),
+            "listing_gift_attempted": truthy(raw.get("listing_gift_attempted")),
+            "listing_gift_status": str(raw.get("listing_gift_status") or "").strip(),
+            "listing_gift_time": str(raw.get("listing_gift_time") or "").strip(),
+            "listing_gift_detail": str(raw.get("listing_gift_detail") or "").strip(),
             "vote_required": truthy(raw.get("vote_required")),
             "vote_success": truthy(raw.get("vote_success")),
             "vote_attempted": truthy(raw.get("vote_attempted")),
@@ -275,6 +300,15 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "sign_time": item.get("sign_time", ""),
                 "sign_ip": item.get("sign_ip", ""),
                 "activity_records": item.get("activity_records") or {"seckill": [], "lottery": []},
+                "account_data_required": item.get("account_data_required", False),
+                "account_data_fetch_success": item.get("account_data_fetch_success", False),
+                "account_data": item.get("account_data") or empty_account_data(),
+                "listing_gift_required": item.get("listing_gift_required", False),
+                "listing_gift_success": item.get("listing_gift_success", False),
+                "listing_gift_attempted": item.get("listing_gift_attempted", False),
+                "listing_gift_status": item.get("listing_gift_status", ""),
+                "listing_gift_time": item.get("listing_gift_time", ""),
+                "listing_gift_detail": item.get("listing_gift_detail", ""),
                 "vote_required": item.get("vote_required", False),
                 "vote_success": item.get("vote_success", False),
                 "vote_attempted": item.get("vote_attempted", False),

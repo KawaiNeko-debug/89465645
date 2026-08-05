@@ -8,8 +8,8 @@ on:
 env:
   TZ: Asia/Shanghai
   RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
-  VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
-  VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
+  MEMBER_API_BASE: ${{ secrets.MEMBER_API_BASE }}
+  ACCOUNT_DATA_ENABLED: "true"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 permissions:
@@ -163,7 +163,16 @@ jobs:
                   'retry_count': 0,
                   'is_final_retry': False,
                   'detail_reason': 'result.json missing',
+                  'account_data_required': True,
+                  'account_data_fetch_success': False,
+                  'account_data': {},
                   'activity_records': {'seckill': [], 'lottery': []},
+                  'listing_gift_required': os.getenv('SIGN_TASK_START_DATE', '') in {'2026-08-05', '2026-08-06'},
+                  'listing_gift_success': False,
+                  'listing_gift_attempted': False,
+                  'listing_gift_status': 'result.json missing',
+                  'listing_gift_time': '',
+                  'listing_gift_detail': '',
               }],
           }
           with open(path, 'w', encoding='utf-8') as f:
@@ -255,10 +264,11 @@ jobs:
                   and not risk_controlled
               )
               vote_incomplete = truthy(row.get('vote_required')) and not truthy(row.get('vote_success'))
-              if row and (banned_data_incomplete or terminal_data_incomplete or normal_failure or vote_incomplete):
+              gift_incomplete = truthy(row.get('listing_gift_required')) and not truthy(row.get('listing_gift_success'))
+              if row and (banned_data_incomplete or terminal_data_incomplete or normal_failure or vote_incomplete or gift_incomplete):
                   failed.append({
                       'account_index': int(row.get('account_index', 0)),
-                      'data_only_retry': bool(terminal_data_incomplete or (vote_incomplete and (truthy(row.get('sign_success')) or risk_controlled))),
+                      'data_only_retry': bool(terminal_data_incomplete or ((vote_incomplete or gift_incomplete) and (truthy(row.get('sign_success')) or risk_controlled))),
                       'previous_sign_success': truthy(row.get('sign_success')),
                       'previous_risk_controlled': risk_controlled,
                       'previous_final_points': row.get('final_points') or 0,
@@ -381,7 +391,16 @@ jobs:
                   'retry_count': 0,
                   'is_final_retry': True,
                   'detail_reason': 'retry result.json missing',
+                  'account_data_required': True,
+                  'account_data_fetch_success': False,
+                  'account_data': {},
                   'activity_records': {'seckill': [], 'lottery': []},
+                  'listing_gift_required': os.getenv('SIGN_TASK_START_DATE', '') in {'2026-08-05', '2026-08-06'},
+                  'listing_gift_success': False,
+                  'listing_gift_attempted': False,
+                  'listing_gift_status': 'retry result.json missing',
+                  'listing_gift_time': '',
+                  'listing_gift_detail': '',
               }],
           }
           with open(path, 'w', encoding='utf-8') as f:

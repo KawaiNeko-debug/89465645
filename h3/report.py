@@ -16,14 +16,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 try:
-    from campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
-except ImportError:
-    from h3.campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
-
-try:
     from feature_flags import SECKILL_ENABLED
 except ImportError:
     from h3.feature_flags import SECKILL_ENABLED
+
+try:
+    from account_data import empty_account_data
+    from listing_gift import is_listing_gift_date
+except ImportError:
+    from h3.account_data import empty_account_data
+    from h3.listing_gift import is_listing_gift_date
 
 for stream_name in ("stdout", "stderr"):
     stream = getattr(sys, stream_name, None)
@@ -157,12 +159,13 @@ def normalize_activity_records(value) -> dict:
         return {"seckill": [], "lottery": []}
 
     normalized = {"seckill": [], "lottery": []}
-    activity_types = (("seckill", 2), ("lottery", 3)) if SECKILL_ENABLED else (("lottery", 3),)
+    activity_types = (("seckill", 2), ("lottery", None)) if SECKILL_ENABLED else (("lottery", None),)
     for key, limit in activity_types:
         rows = value.get(key)
         if not isinstance(rows, list):
             continue
-        for item in rows[:limit]:
+        selected_rows = rows if limit is None else rows[:limit]
+        for item in selected_rows:
             if not isinstance(item, dict):
                 continue
             normalized[key].append(
@@ -195,9 +198,12 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     )
     points_fetch_success = truthy(record.get("points_fetch_success")) or legacy_banned_complete
     activity_fetch_success = truthy(record.get("activity_fetch_success")) or legacy_banned_complete
-    data_fetch_completed = truthy(record.get("data_fetch_completed")) or (
-        points_fetch_success and activity_fetch_success
-    )
+    account_data_required = truthy(record.get("account_data_required"))
+    account_data_fetch_success = truthy(record.get("account_data_fetch_success"))
+    data_fetch_completed = (
+        truthy(record.get("data_fetch_completed"))
+        or (points_fetch_success and activity_fetch_success)
+    ) and (not account_data_required or account_data_fetch_success)
     group_name = str(record.get("group_name") or payload.get("group_name") or payload.get("batch_name") or default_group_name(group_number)).strip()
     group_position = str(record.get("group_position") or default_group_position(group_number, account_index)).strip()
     task_start_date = str(record.get("task_start_date") or payload.get("task_start_date") or "").strip()
@@ -205,11 +211,17 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     next_day_success = truthy(record.get("next_day_success")) or (
         truthy(record.get("sign_success")) and date_part(task_start_date) and date_part(sign_time) and date_part(sign_time) > date_part(task_start_date)
     )
-    vote_required = truthy(record.get("vote_required")) or is_vote_date(task_start_date)
-    vote_success = truthy(record.get("vote_success"))
-    vote_status = str(record.get("vote_status") or "").strip()
-    if vote_required and not vote_status:
-        vote_status = "未生成投票结果"
+    vote_required = False
+    vote_success = False
+    vote_status = "投票功能已关闭"
+    listing_gift_required = (
+        truthy(record.get("listing_gift_required"))
+        if "listing_gift_required" in record
+        else is_listing_gift_date(task_start_date)
+    )
+    listing_gift_status = str(record.get("listing_gift_status") or "").strip()
+    if listing_gift_required and not listing_gift_status:
+        listing_gift_status = "缺少礼包领取结果"
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
@@ -238,13 +250,22 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "sign_time": sign_time,
         "sign_ip": str(record.get("sign_ip") or "").strip(),
         "activity_records": normalize_activity_records(record.get("activity_records")),
+        "account_data_required": account_data_required,
+        "account_data_fetch_success": account_data_fetch_success,
+        "account_data": record.get("account_data") if isinstance(record.get("account_data"), dict) else empty_account_data(),
+        "listing_gift_required": listing_gift_required,
+        "listing_gift_success": truthy(record.get("listing_gift_success")),
+        "listing_gift_attempted": truthy(record.get("listing_gift_attempted")),
+        "listing_gift_status": listing_gift_status,
+        "listing_gift_time": str(record.get("listing_gift_time") or "").strip(),
+        "listing_gift_detail": str(record.get("listing_gift_detail") or "").strip(),
         "vote_required": vote_required,
         "vote_success": vote_success,
         "vote_attempted": truthy(record.get("vote_attempted")),
         "vote_status": vote_status,
         "vote_time": str(record.get("vote_time") or "").strip(),
-        "vote_product_sku": str(record.get("vote_product_sku") or VOTE_PRODUCT_SKU).strip(),
-        "vote_product_name": str(record.get("vote_product_name") or VOTE_PRODUCT_NAME).strip(),
+        "vote_product_sku": str(record.get("vote_product_sku") or "").strip(),
+        "vote_product_name": str(record.get("vote_product_name") or "").strip(),
         "vote_detail": str(record.get("vote_detail") or "").strip(),
     }
 
@@ -274,7 +295,7 @@ def load_results(results_dir: str, account_lookup: dict[tuple[int, int], str]) -
 
 
 def build_missing_record(group_number: int, account_index: int, username: str, task_date: str = "") -> dict:
-    vote_required = is_vote_date(task_date)
+    vote_required = False
     return {
         "account_index": account_index,
         "execution_order": account_index,
@@ -303,13 +324,22 @@ def build_missing_record(group_number: int, account_index: int, username: str, t
         "sign_time": "",
         "sign_ip": "",
         "activity_records": {"seckill": [], "lottery": []},
+        "account_data_required": truthy(os.getenv("ACCOUNT_DATA_ENABLED", "false")),
+        "account_data_fetch_success": False,
+        "account_data": empty_account_data(),
+        "listing_gift_required": is_listing_gift_date(task_date),
+        "listing_gift_success": False,
+        "listing_gift_attempted": False,
+        "listing_gift_status": "缺少礼包领取结果" if is_listing_gift_date(task_date) else "非领取日期",
+        "listing_gift_time": "",
+        "listing_gift_detail": "",
         "vote_required": vote_required,
         "vote_success": False,
         "vote_attempted": False,
-        "vote_status": "缺少投票结果",
+        "vote_status": "投票功能已关闭",
         "vote_time": "",
-        "vote_product_sku": VOTE_PRODUCT_SKU,
-        "vote_product_name": VOTE_PRODUCT_NAME,
+        "vote_product_sku": "",
+        "vote_product_name": "",
         "vote_detail": "",
     }
 
@@ -390,7 +420,14 @@ def detail_text(record: dict) -> str:
         return f"账号在封禁列表中，已跳过签到；数据获取失败：{status or '未知异常'}"
     if truthy(record.get("sign_success")):
         reason = str(record.get("detail_reason") or "").strip()
-        activity_failure_markers = ("秒杀数据获取失败", "抽奖数据获取失败", "奖品过期记录获取失败", "活动数据抓取异常")
+        activity_failure_markers = (
+            "秒杀数据获取失败",
+            "抽奖数据获取失败",
+            "奖品过期记录获取失败",
+            "活动数据抓取异常",
+            "会员资料接口未完整返回",
+            "会员中心 SSO 未建立",
+        )
         if any(marker in reason for marker in activity_failure_markers):
             status = str(record.get("sign_status") or "签到成功").strip()
             return f"{status}；{reason}" if status not in reason else reason
@@ -400,7 +437,8 @@ def detail_text(record: dict) -> str:
 
 def is_problem_record(record: dict) -> bool:
     return status_sort_bucket(record) == 0 or (
-        truthy(record.get("vote_required")) and not truthy(record.get("vote_success"))
+        truthy(record.get("listing_gift_required"))
+        and not truthy(record.get("listing_gift_success"))
     )
 
 
@@ -408,8 +446,8 @@ def problem_reason(record: dict) -> str:
     reasons = []
     if status_sort_bucket(record) == 0:
         reasons.append(detail_reason(record))
-    if truthy(record.get("vote_required")) and not truthy(record.get("vote_success")):
-        reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
+    if truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")):
+        reasons.append(str(record.get("listing_gift_status") or record.get("listing_gift_detail") or "礼包领取未完成").strip())
     return "；".join(dict.fromkeys(reason for reason in reasons if reason)) or "未知异常"
 
 
@@ -449,9 +487,10 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
     abnormal = sum(1 for item in records if status_label(item) == "签到异常")
     reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
     success_rate = (success / total * 100) if total > 0 else 0.0
-    vote_required = sum(1 for item in records if truthy(item.get("vote_required")))
-    vote_success = sum(
-        1 for item in records if truthy(item.get("vote_required")) and truthy(item.get("vote_success"))
+    listing_gift_required = sum(1 for item in records if truthy(item.get("listing_gift_required")))
+    listing_gift_success = sum(
+        1 for item in records
+        if truthy(item.get("listing_gift_required")) and truthy(item.get("listing_gift_success"))
     )
     return {
         "total": total,
@@ -464,8 +503,8 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "problem_count": sum(1 for item in records if is_problem_record(item)),
         "reward": reward,
         "success_rate": success_rate,
-        "vote_required": vote_required,
-        "vote_success": vote_success,
+        "listing_gift_required": listing_gift_required,
+        "listing_gift_success": listing_gift_success,
     }
 
 
@@ -476,7 +515,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 签到成功: {summary['success']}/{summary['total']}",
         f"  ├── 次日成功: {summary['next_day']}",
         f"  ├── 账号封禁: {summary['banned']}",
-        f"  ├── 当天投票完成: {summary['vote_success']}/{summary['vote_required']}",
+        f"  ├── 上市礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
@@ -579,10 +618,11 @@ def activity_status_text(item: dict) -> str:
 def activity_columns(record: dict) -> list[str]:
     activity = normalize_activity_records(record.get("activity_records"))
     values = []
-    activity_types = (("seckill", 2), ("lottery", 3)) if SECKILL_ENABLED else (("lottery", 3),)
+    activity_types = (("seckill", 2), ("lottery", None)) if SECKILL_ENABLED else (("lottery", None),)
     for key, limit in activity_types:
         rows = activity.get(key) or []
-        for index in range(limit):
+        count = limit if limit is not None else len(rows)
+        for index in range(count):
             item = rows[index] if index < len(rows) else {}
             if item:
                 values.extend([str(item.get("title") or "").strip(), activity_status_text(item)])
@@ -591,10 +631,85 @@ def activity_columns(record: dict) -> list[str]:
     return values
 
 
+def max_lottery_count(records: list[dict]) -> int:
+    return max(
+        (len((normalize_activity_records(record.get("activity_records")).get("lottery") or [])) for record in records),
+        default=0,
+    )
+
+
+def coupon_summary_text(coupons: list[dict]) -> str:
+    values = []
+    for coupon in coupons or []:
+        detail = str(coupon.get("name") or "未命名优惠券").strip()
+        business = str(coupon.get("business_type") or "").strip()
+        expiry = str(coupon.get("expires_at") or "").strip()
+        rule = str(coupon.get("rule_text") or "").strip()
+        if business:
+            detail += f"（{business}）"
+        if expiry:
+            detail += f"，过期：{expiry}"
+        if rule:
+            detail += f"，规则：{rule}"
+        values.append(detail)
+    return "\n".join(values)
+
+
+def invoice_amount_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    number = safe_float(value, None)
+    return str(value) if number is None else f"{number:g}"
+
+
+def safe_sheet_title(raw: str, used: set[str]) -> str:
+    title = re.sub(r"[\\/*?:\[\]]", "_", str(raw or "未命名优惠券")).strip() or "未命名优惠券"
+    title = title[:31]
+    candidate = title
+    serial = 2
+    while candidate.lower() in {item.lower() for item in used}:
+        suffix = f"_{serial}"
+        candidate = f"{title[:31-len(suffix)]}{suffix}"
+        serial += 1
+    used.add(candidate)
+    return candidate
+
+
+def write_coupon_sheets(workbook, records: list[dict]):
+    by_name = {}
+    for record in sort_records(records):
+        account = str(record.get("username") or "").strip()
+        for coupon in (record.get("account_data") or {}).get("coupons", {}).get("unused", []) or []:
+            name = str(coupon.get("name") or "未命名优惠券").strip()
+            by_name.setdefault(name, []).append(
+                (account, str(coupon.get("expires_at") or "").strip())
+            )
+    used = {workbook.active.title}
+    for name, rows in sorted(by_name.items(), key=lambda item: item[0]):
+        sheet = workbook.create_sheet(safe_sheet_title(name, used))
+        sheet.append(["序号", "账户", "优惠券过期时间"])
+        for cell in sheet[1]:
+            cell.fill = PatternFill("solid", fgColor="E2F0D9")
+            cell.font = Font(bold=True)
+        for index, (account, expiry) in enumerate(rows, start=1):
+            sheet.append([index, account, expiry])
+        sheet.freeze_panes = "A2"
+        sheet.column_dimensions["A"].width = 8
+        sheet.column_dimensions["B"].width = 24
+        sheet.column_dimensions["C"].width = 24
+
+
 def write_xlsx(path: str, records: list[dict]):
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "签到汇总"
+    lottery_count = max_lottery_count(records)
+    thresholds = {
+        safe_int((record.get("account_data") or {}).get("invoice_month_threshold"), 12) or 12
+        for record in records
+        if (record.get("account_data") or {}).get("invoice_month_threshold")
+    }
+    threshold_text = str(next(iter(thresholds))) if len(thresholds) == 1 else "接口阈值"
     headers = [
         "序号",
         "金豆数量",
@@ -604,8 +719,15 @@ def write_xlsx(path: str, records: list[dict]):
         "详细原因",
         "签到时间",
         "签到IP",
-        "当天投票情况",
-        "投票时间",
+        "开票资料",
+        f"不超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "不超过接口月份阈值可开金额",
+        f"超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "超过接口月份阈值可开金额",
+        "未使用优惠券",
+        "已使用优惠券",
+        "已过期优惠券",
+        "PCB+SMT优惠券预测",
+        "预测依据",
+        "上市礼包领取情况",
     ]
     if SECKILL_ENABLED:
         headers.extend([
@@ -614,14 +736,8 @@ def write_xlsx(path: str, records: list[dict]):
             "秒杀二",
             "领取情况",
         ])
-    headers.extend([
-        "抽奖一",
-        "领取情况",
-        "抽奖二",
-        "领取情况",
-        "抽奖三",
-        "领取情况",
-    ])
+    for index in range(1, lottery_count + 1):
+        headers.extend([f"抽奖{index}", f"领取情况{index}"])
     sheet.append(headers)
 
     header_fill = PatternFill("solid", fgColor="D9E2F3")
@@ -646,8 +762,22 @@ def write_xlsx(path: str, records: list[dict]):
             detail_text(record),
             str(record.get("sign_time") or ""),
             str(record.get("sign_ip") or ""),
-            str(record.get("vote_status") or ""),
-            str(record.get("vote_time") or ""),
+            str((record.get("account_data") or {}).get("invoice_profile_status") or "数据不足"),
+            invoice_amount_text((record.get("account_data") or {}).get("invoice_within_months_amount")),
+            invoice_amount_text((record.get("account_data") or {}).get("invoice_over_months_amount")),
+            coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("unused")),
+            coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("used")),
+            coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("expired")),
+            str((record.get("account_data") or {}).get("coupon_prediction") or "数据不足"),
+            str((record.get("account_data") or {}).get("prediction_reason") or ""),
+            "\n".join(
+                value
+                for value in (
+                    str(record.get("listing_gift_status") or "").strip(),
+                    str(record.get("listing_gift_time") or "").strip(),
+                )
+                if value
+            ),
         ] + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
@@ -671,12 +801,17 @@ def write_xlsx(path: str, records: list[dict]):
         if status_fill:
             sheet.cell(row_index, 5).fill = status_fill
         sheet.cell(row_index, 5).font = font_for_status(label)
-        sheet.cell(row_index, 9).font = font_for_vote_status(record)
-        for column_index in range(11, len(headers) + 1, 2):
+        invoice_cell = sheet.cell(row_index, 9)
+        invoice_cell.font = FONT_GREEN if invoice_cell.value == "有" else (FONT_RED if invoice_cell.value == "无" else FONT_BLUE)
+        prediction_cell = sheet.cell(row_index, 15)
+        prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
+        gift_cell = sheet.cell(row_index, 17)
+        gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
+        for column_index in range(18, len(headers) + 1, 2):
             prize_fill = fill_for_prize(sheet.cell(row_index, column_index).value)
             if prize_fill:
                 sheet.cell(row_index, column_index).fill = prize_fill
-        for column_index in range(12, len(headers) + 1, 2):
+        for column_index in range(19, len(headers) + 1, 2):
             sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
     sheet.freeze_panes = "A2"
@@ -689,17 +824,25 @@ def write_xlsx(path: str, records: list[dict]):
         "F": 36,
         "G": 20,
         "H": 18,
-        "I": 36,
-        "J": 20,
+        "I": 14,
+        "J": 18,
+        "K": 18,
+        "L": 36,
+        "M": 36,
+        "N": 36,
+        "O": 18,
+        "P": 42,
+        "Q": 28,
     }
-    for column_index in range(11, len(headers) + 1):
-        widths[get_column_letter(column_index)] = 28 if column_index % 2 else 18
+    for column_index in range(18, len(headers) + 1):
+        widths[get_column_letter(column_index)] = 28 if column_index % 2 == 0 else 18
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    write_coupon_sheets(workbook, records)
     workbook.save(path)
 
 

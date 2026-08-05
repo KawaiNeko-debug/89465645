@@ -51,9 +51,13 @@ except ImportError:
     )
 
 try:
-    from feature_flags import SECKILL_ENABLED
+    from account_data import AccountDataCollector, empty_account_data
+    from feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
+    from listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
 except ImportError:
-    from h3.feature_flags import SECKILL_ENABLED
+    from h3.account_data import AccountDataCollector, empty_account_data
+    from h3.feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
+    from h3.listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -69,7 +73,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-07-30-campaign-vote-v17"
+SCRIPT_VERSION = "2026-08-05-account-data-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -90,6 +94,19 @@ VOTE_RESULT_FIELDS = (
     'vote_product_sku',
     'vote_product_name',
     'vote_detail',
+)
+ACCOUNT_DATA_RESULT_FIELDS = (
+    'account_data_required',
+    'account_data_fetch_success',
+    'account_data',
+)
+LISTING_GIFT_RESULT_FIELDS = (
+    'listing_gift_required',
+    'listing_gift_success',
+    'listing_gift_attempted',
+    'listing_gift_status',
+    'listing_gift_time',
+    'listing_gift_detail',
 )
 
 HEADER_ACCESS_TOKEN_FALLBACKS = [
@@ -891,13 +908,26 @@ class ApiClient:
         self.lottery_fetch_success = False
         self.voucher_fetch_success = False
         self.activity_fetch_success = False
-        self.vote_required = is_vote_date(current_date_text())
+        self.account_data = empty_account_data()
+        self.account_data_required = ACCOUNT_DATA_ENABLED
+        self.account_data_fetch_success = not ACCOUNT_DATA_ENABLED
+        self.listing_gift_required = LISTING_GIFT_ENABLED and is_listing_gift_date(current_date_text())
+        self.listing_gift_success = False
+        self.listing_gift_attempted = False
+        self.listing_gift_status = (
+            "待领取"
+            if self.listing_gift_required
+            else f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）"
+        )
+        self.listing_gift_time = ""
+        self.listing_gift_detail = ""
+        self.vote_required = VOTE_ENABLED and is_vote_date(current_date_text())
         self.vote_success = False
         self.vote_attempted = False
         self.vote_status = (
             "待执行"
             if self.vote_required
-            else f"非投票日期（仅 {VOTE_START_DATE} 至 {VOTE_END_DATE}）"
+            else "投票功能已关闭"
         )
         self.vote_time = ""
         self.vote_product_sku = VOTE_PRODUCT_SKU
@@ -935,8 +965,11 @@ class ApiClient:
         try:
             headers = dict(self.headers)
             if method == "POST":
-                headers.setdefault("content-type", "application/json;charset=UTF-8")
-                resp = requests.post(url, headers=headers, json=payload or {}, timeout=20)
+                request_kwargs = {"headers": headers, "timeout": 20}
+                if payload is not None:
+                    headers.setdefault("content-type", "application/json;charset=UTF-8")
+                    request_kwargs["json"] = payload
+                resp = requests.post(url, **request_kwargs)
             else:
                 resp = requests.get(url, headers=headers, timeout=12)
 
@@ -945,7 +978,7 @@ class ApiClient:
                 msg = f"账号{self.account_index} - {tag}请求失败 {resp.status_code} ({method} {url})"
                 if allow:
                     msg += f" Allow={allow}"
-                if method == "POST":
+                if method == "POST" and payload is not None:
                     msg += f" payload={redact_sensitive(truncate_text(json.dumps(payload or {}, ensure_ascii=False), 500))}"
                 log(msg)
                 if dump_body_on_error:
@@ -1388,7 +1421,7 @@ class ApiClient:
         )
         self.lottery_fetch_success = api_response_succeeded(data)
         rows = []
-        for item in [row for row in extract_data_list(data) if isinstance(row, dict)][:3]:
+        for item in [row for row in extract_data_list(data) if isinstance(row, dict)]:
             title = str(item.get("prizeTitle") or item.get("goodsName") or "").strip()
             is_points_prize = "金豆" in title
             expiry_date = next_year_last_day(item.get("createTime")) if is_points_prize else find_expiry_date(title, expiry_lookup)
@@ -1490,6 +1523,68 @@ class ApiClient:
             if failure_reason not in self.detail_reason:
                 self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
         return self.activity_records
+
+    def fetch_account_data(self) -> dict:
+        if not self.account_data_required:
+            return self.account_data
+        self.account_data = AccountDataCollector(
+            self.page,
+            self.account_index,
+            logger=log,
+        ).collect()
+        self.account_data_fetch_success = truthy(self.account_data.get("fetch_success"))
+        if self.account_data_fetch_success:
+            coupons = self.account_data.get("coupons") or {}
+            log(
+                f"账号{self.account_index} - 会员资料获取完成："
+                f"未使用 {len(coupons.get('unused') or [])} 张，"
+                f"已使用 {len(coupons.get('used') or [])} 张，"
+                f"已过期 {len(coupons.get('expired') or [])} 张"
+            )
+        else:
+            reason = str(self.account_data.get("error") or "会员资料接口未完整返回").strip()
+            log(f"账号{self.account_index} - 会员资料获取失败：{reason}")
+            if reason not in self.detail_reason:
+                self.detail_reason = "；".join(part for part in (self.detail_reason, reason) if part)
+        return self.account_data
+
+    def execute_listing_gift(self, task_date="") -> bool:
+        self.listing_gift_required = LISTING_GIFT_ENABLED and is_listing_gift_date(task_date or current_date_text())
+        if not self.listing_gift_required:
+            self.listing_gift_status = f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）"
+            return True
+
+        self.listing_gift_attempted = True
+        last_result = {"state": "error", "success": False, "message": "礼包接口尚未执行"}
+        for attempt in range(1, 4):
+            response = self._request_json_once(
+                "POST",
+                f"{self.base_url}{LISTING_GIFT_PATH}",
+                tag="上市礼包领取",
+                payload=None,
+                dump_body_on_error=True,
+                dump_json_on_success_false=True,
+            )
+            last_result = inspect_listing_gift_response(response)
+            if last_result.get("success"):
+                self.listing_gift_success = True
+                self.listing_gift_time = current_time_text()
+                self.listing_gift_detail = str(last_result.get("message") or "").strip()
+                self.listing_gift_status = (
+                    "上市礼包已领取"
+                    if last_result.get("state") == "already"
+                    else "上市礼包领取成功"
+                )
+                log(f"账号{self.account_index} - ✅ {self.listing_gift_status}")
+                return True
+            if attempt < 3:
+                log(f"账号{self.account_index} - 上市礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
+                time.sleep(0.8 * attempt)
+
+        self.listing_gift_detail = str(last_result.get("message") or "礼包接口未确认领取成功").strip()
+        self.listing_gift_status = f"上市礼包领取失败：{self.listing_gift_detail}"
+        log(f"账号{self.account_index} - ❌ {self.listing_gift_status}")
+        return False
 
     def _fetch_vote_config(self):
         return self._browser_fetch_json_once(
@@ -2295,14 +2390,23 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'points_fetch_success': False,
         'activity_fetch_success': False,
         'data_fetch_completed': False,
+        'account_data_required': ACCOUNT_DATA_ENABLED,
+        'account_data_fetch_success': not ACCOUNT_DATA_ENABLED,
+        'account_data': empty_account_data(),
         'next_day_success': False,
         'task_start_date': task_start_date,
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
-        'vote_required': is_vote_date(task_start_date),
+        'listing_gift_required': LISTING_GIFT_ENABLED and is_listing_gift_date(task_start_date),
+        'listing_gift_success': False,
+        'listing_gift_attempted': False,
+        'listing_gift_status': '待领取' if LISTING_GIFT_ENABLED and is_listing_gift_date(task_start_date) else f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）",
+        'listing_gift_time': '',
+        'listing_gift_detail': '',
+        'vote_required': VOTE_ENABLED and is_vote_date(task_start_date),
         'vote_success': False,
         'vote_attempted': False,
-        'vote_status': '待执行' if is_vote_date(task_start_date) else f'非投票日期（仅 {VOTE_START_DATE} 至 {VOTE_END_DATE}）',
+        'vote_status': '待执行' if VOTE_ENABLED and is_vote_date(task_start_date) else '投票功能已关闭',
         'vote_time': '',
         'vote_product_sku': VOTE_PRODUCT_SKU,
         'vote_product_name': VOTE_PRODUCT_NAME,
@@ -2449,6 +2553,8 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
             if access_token:
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
                 if banned_account:
+                    client.listing_gift_required = False
+                    client.listing_gift_status = "账号封禁，已跳过礼包领取"
                     log(f"账号{account_index} - 封禁账号已登录，开始获取金豆数量")
                     client.execute_banned_process()
                     success = False
@@ -2474,8 +2580,12 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                             client.final_points = latest_points
                             client.points_reward = client.final_points - client.initial_points
 
+                if not banned_account:
+                    client.execute_listing_gift(task_start_date)
+                client.fetch_account_data()
                 client.fetch_activity_records()
-                client.execute_campaign_vote()
+                if VOTE_ENABLED:
+                    client.execute_campaign_vote()
                 if banned_account:
                     client.finalize_banned_data_status()
                 result.update({
@@ -2490,9 +2600,22 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     'banned_account': banned_account,
                     'points_fetch_success': client.points_fetch_success,
                     'activity_fetch_success': client.activity_fetch_success,
-                    'data_fetch_completed': client.points_fetch_success and client.activity_fetch_success,
+                    'data_fetch_completed': (
+                        client.points_fetch_success
+                        and client.activity_fetch_success
+                        and client.account_data_fetch_success
+                    ),
+                    'account_data_required': client.account_data_required,
+                    'account_data_fetch_success': client.account_data_fetch_success,
+                    'account_data': client.account_data,
                     'sign_completed_at': client.sign_completed_at,
                     'activity_records': client.activity_records,
+                    'listing_gift_required': client.listing_gift_required,
+                    'listing_gift_success': client.listing_gift_success,
+                    'listing_gift_attempted': client.listing_gift_attempted,
+                    'listing_gift_status': client.listing_gift_status,
+                    'listing_gift_time': client.listing_gift_time,
+                    'listing_gift_detail': client.listing_gift_detail,
                     'vote_required': client.vote_required,
                     'vote_success': client.vote_success,
                     'vote_attempted': client.vote_attempted,
@@ -2569,11 +2692,20 @@ def process_single_account(username, password, account_index, total_accounts):
         'points_fetch_success': False,
         'activity_fetch_success': False,
         'data_fetch_completed': False,
+        'account_data_required': ACCOUNT_DATA_ENABLED,
+        'account_data_fetch_success': not ACCOUNT_DATA_ENABLED,
+        'account_data': empty_account_data(),
         'next_day_success': False,
         'task_start_date': normalize_task_start_date(),
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
-        'vote_required': is_vote_date(normalize_task_start_date()),
+        'listing_gift_required': LISTING_GIFT_ENABLED and is_listing_gift_date(normalize_task_start_date()),
+        'listing_gift_success': False,
+        'listing_gift_attempted': False,
+        'listing_gift_status': '未执行',
+        'listing_gift_time': '',
+        'listing_gift_detail': '',
+        'vote_required': VOTE_ENABLED and is_vote_date(normalize_task_start_date()),
         'vote_success': False,
         'vote_attempted': False,
         'vote_status': '未执行',
@@ -2607,12 +2739,19 @@ def process_single_account(username, password, account_index, total_accounts):
             if truthy(res.get('activity_fetch_success')):
                 merged['activity_records'] = res.get('activity_records') or make_empty_extra_records()
                 merged['activity_fetch_success'] = True
+            if truthy(res.get('account_data_fetch_success')):
+                merged['account_data'] = res.get('account_data') or empty_account_data()
+                merged['account_data_fetch_success'] = True
             for key in ('sign_time', 'sign_ip', 'task_start_date', 'sign_completed_at'):
                 if res.get(key):
                     merged[key] = res.get(key)
             merged['data_fetch_completed'] = (
                 truthy(merged.get('points_fetch_success'))
                 and truthy(merged.get('activity_fetch_success'))
+                and (
+                    not truthy(merged.get('account_data_required'))
+                    or truthy(merged.get('account_data_fetch_success'))
+                )
             )
             merged['sign_status'] = '账号封禁' if merged['data_fetch_completed'] else '封禁账号取数失败'
             failures = []
@@ -2620,18 +2759,24 @@ def process_single_account(username, password, account_index, total_accounts):
                 failures.append('金豆数量获取失败')
             if not merged.get('activity_fetch_success'):
                 failures.append('中奖记录获取未完成')
+            if merged.get('account_data_required') and not merged.get('account_data_fetch_success'):
+                failures.append('会员资料获取未完成')
             merged['detail_reason'] = '账号在 BANNED_ACCOUNTS 中，已跳过签到'
             if failures:
                 merged['detail_reason'] += '；' + '；'.join(failures)
         elif res['sign_success'] and not merged['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 merged[k] = res[k]
         elif not merged['sign_success']:
-            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'initial_points', 'final_points', 'points_reward', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 merged[k] = res.get(k)
 
         if truthy(res.get('vote_success')) or not truthy(merged.get('vote_success')):
             for key in VOTE_RESULT_FIELDS:
+                if key in res:
+                    merged[key] = res.get(key)
+        if truthy(res.get('listing_gift_success')) or not truthy(merged.get('listing_gift_success')):
+            for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in res:
                     merged[key] = res.get(key)
 
@@ -2694,31 +2839,44 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             if truthy(final.get('activity_fetch_success')):
                 orig['activity_records'] = final.get('activity_records') or make_empty_extra_records()
                 orig['activity_fetch_success'] = True
+            if truthy(final.get('account_data_fetch_success')):
+                orig['account_data'] = final.get('account_data') or empty_account_data()
+                orig['account_data_fetch_success'] = True
             for key in ('sign_time', 'sign_ip', 'task_start_date', 'sign_completed_at'):
                 if final.get(key):
                     orig[key] = final.get(key)
             orig['data_fetch_completed'] = (
                 truthy(orig.get('points_fetch_success'))
                 and truthy(orig.get('activity_fetch_success'))
+                and (
+                    not truthy(orig.get('account_data_required'))
+                    or truthy(orig.get('account_data_fetch_success'))
+                )
             )
             failures = []
             if not orig.get('points_fetch_success'):
                 failures.append('金豆数量获取失败')
             if not orig.get('activity_fetch_success'):
                 failures.append('中奖记录获取未完成')
+            if orig.get('account_data_required') and not orig.get('account_data_fetch_success'):
+                failures.append('会员资料获取未完成')
             orig['sign_status'] = '账号封禁' if not failures else '封禁账号取数失败'
             orig['detail_reason'] = '账号在 BANNED_ACCOUNTS 中，已跳过签到'
             if failures:
                 orig['detail_reason'] += '；' + '；'.join(failures)
         elif final['sign_success'] and not orig['sign_success']:
-            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
+            for k in ['sign_success', 'sign_status', 'initial_points', 'final_points', 'points_reward', 'has_reward', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 orig[k] = final[k]
         elif not orig['sign_success']:
-            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'initial_points', 'final_points', 'points_reward', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
+            for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'initial_points', 'final_points', 'points_reward', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 orig[k] = final.get(k)
 
         if truthy(final.get('vote_success')) or not truthy(orig.get('vote_success')):
             for key in VOTE_RESULT_FIELDS:
+                if key in final:
+                    orig[key] = final.get(key)
+        if truthy(final.get('listing_gift_success')) or not truthy(orig.get('listing_gift_success')):
+            for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in final:
                     orig[key] = final.get(key)
 
@@ -2846,6 +3004,9 @@ def write_results_json(path, all_results, total_accounts):
                 "banned_account": r.get("banned_account"),
                 "points_fetch_success": r.get("points_fetch_success"),
                 "activity_fetch_success": r.get("activity_fetch_success"),
+                "account_data_required": r.get("account_data_required"),
+                "account_data_fetch_success": r.get("account_data_fetch_success"),
+                "account_data": r.get("account_data") or empty_account_data(),
                 "data_fetch_completed": r.get("data_fetch_completed"),
                 "next_day_success": r.get("next_day_success"),
                 "task_start_date": r.get("task_start_date"),
@@ -2856,6 +3017,12 @@ def write_results_json(path, all_results, total_accounts):
                 "sign_time": r.get("sign_time"),
                 "sign_ip": r.get("sign_ip"),
                 "activity_records": r.get("activity_records") or make_empty_extra_records(),
+                "listing_gift_required": r.get("listing_gift_required"),
+                "listing_gift_success": r.get("listing_gift_success"),
+                "listing_gift_attempted": r.get("listing_gift_attempted"),
+                "listing_gift_status": r.get("listing_gift_status"),
+                "listing_gift_time": r.get("listing_gift_time"),
+                "listing_gift_detail": r.get("listing_gift_detail"),
                 "vote_required": r.get("vote_required"),
                 "vote_success": r.get("vote_success"),
                 "vote_attempted": r.get("vote_attempted"),
