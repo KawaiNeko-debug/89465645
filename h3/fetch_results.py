@@ -221,7 +221,7 @@ def merge_individual_results(results_dir: str, output_path: str) -> int:
                 "detail_reason": row.get("detail_reason", ""),
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
-                "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "activity_records": row.get("activity_records") or {"seckill": [], "lottery": [], "exchange": []},
                 "account_data_required": truthy(row.get("account_data_required")),
                 "account_data_fetch_success": truthy(row.get("account_data_fetch_success")),
                 "account_data": row.get("account_data") or {},

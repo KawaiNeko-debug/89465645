@@ -52,10 +52,12 @@ except ImportError:
 
 try:
     from account_data import AccountDataCollector, empty_account_data
+    from exchange_history import normalize_exchange_records
     from feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
+    from h3.exchange_history import normalize_exchange_records
     from h3.feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from h3.listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
 
@@ -73,7 +75,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-08-05-account-data-v1"
+SCRIPT_VERSION = "2026-08-11-exchange-history-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -141,8 +143,8 @@ VOUCHER_CHANGE_RECORD_PATH = "/api/activity/front/selectIntegralVoucherChangeRec
 BRAND_ACTIVITY_CONFIG_PATH = "/api/activity/brand/activity/ns/selectActivityConfig"
 SECKILL_GOODS_PATH = "/api/activity/seckill/ns/getSeckillGoods"
 RECORD_POST_PAYLOADS = [
-    {"pageNum": 1, "pageSize": 50},
-    {"pageNo": 1, "pageSize": 50},
+    {"pageNum": 1, "pageSize": 50, "subAccountIds": []},
+    {"pageNo": 1, "pageSize": 50, "subAccountIds": []},
 ]
 
 # 检查必要变量
@@ -569,7 +571,18 @@ def needs_expiry_lookup(records: list[dict]) -> bool:
     )
 
 def make_empty_extra_records() -> dict:
-    return {"seckill": [], "lottery": []}
+    return {"seckill": [], "lottery": [], "exchange": []}
+
+def merge_activity_record_components(*values) -> dict:
+    merged = make_empty_extra_records()
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for key in merged:
+            rows = value.get(key)
+            if isinstance(rows, list) and len(rows) > len(merged[key]):
+                merged[key] = rows
+    return merged
 
 def api_response_succeeded(data) -> bool:
     if not isinstance(data, dict):
@@ -1313,17 +1326,42 @@ class ApiClient:
         return None
 
     def fetch_voucher_change_records(self) -> list[dict]:
-        data = self.post_json_retry_candidates(
-            f"{self.base_url}{VOUCHER_CHANGE_RECORD_PATH}",
-            payloads=RECORD_POST_PAYLOADS,
-            tag="金豆变更记录",
-            dump_body_on_error=True,
-            dump_json_on_success_false=True,
-            prefer_records=True,
-        )
-        self.voucher_fetch_success = api_response_succeeded(data)
-        records = [item for item in extract_data_list(data) if isinstance(item, dict)]
-        log(f"账号{self.account_index} - 金豆变更记录 {len(records)} 条")
+        records = []
+        page_number = 1
+        total_pages = 1
+        self.voucher_fetch_success = True
+        while page_number <= total_pages and page_number <= 100:
+            payloads = [
+                {**payload, "pageNum" if "pageNum" in payload else "pageNo": page_number}
+                for payload in RECORD_POST_PAYLOADS
+            ]
+            data = self.post_json_retry_candidates(
+                f"{self.base_url}{VOUCHER_CHANGE_RECORD_PATH}",
+                payloads=payloads,
+                tag=f"兑换记录第{page_number}页",
+                dump_body_on_error=True,
+                dump_json_on_success_false=True,
+                prefer_records=True,
+            )
+            if not api_response_succeeded(data):
+                self.voucher_fetch_success = False
+                break
+            page_records = [item for item in extract_data_list(data) if isinstance(item, dict)]
+            records.extend(page_records)
+            page_data = data.get("data") if isinstance(data, dict) else None
+            if isinstance(page_data, dict):
+                page_size = max(1, safe_int(page_data.get("pageSize"), 50))
+                total_rows = max(0, safe_int(page_data.get("totalRows"), 0))
+                calculated_pages = (total_rows + page_size - 1) // page_size if total_rows else page_number
+                total_pages = max(
+                    page_number,
+                    safe_int(page_data.get("totalPages"), calculated_pages),
+                    calculated_pages,
+                )
+            if page_number >= total_pages:
+                break
+            page_number += 1
+        log(f"账号{self.account_index} - 兑换记录共获取 {len(records)} 条")
         return records
 
     def fetch_brand_activity_config(self) -> dict:
@@ -1461,7 +1499,7 @@ class ApiClient:
     def fetch_activity_records(self) -> dict:
         self.activity_fetch_success = False
         try:
-            activity_label = "秒杀/抽奖" if SECKILL_ENABLED else "抽奖"
+            activity_label = "秒杀/抽奖/兑换" if SECKILL_ENABLED else "抽奖/兑换"
             log(f"账号{self.account_index} - 开始获取{activity_label}中奖记录")
             config = self.fetch_brand_activity_config()
             lottery_activity_code = self.get_lottery_activity_code(config)
@@ -1480,37 +1518,47 @@ class ApiClient:
                 lambda: self.fetch_lottery_wins({}, lottery_activity_code),
                 "lottery_fetch_success",
             )
+            change_records = self.fetch_activity_component_with_retry(
+                "兑换记录",
+                self.fetch_voucher_change_records,
+                "voucher_fetch_success",
+            )
+            exchange_records = normalize_exchange_records(change_records)
             if needs_expiry_lookup(seckill_records + lottery_records):
-                change_records = self.fetch_voucher_change_records()
                 expiry_lookup = build_expiry_lookup(change_records)
                 if SECKILL_ENABLED:
                     apply_expiry_dates(seckill_records, expiry_lookup)
                 apply_expiry_dates(lottery_records, expiry_lookup, lottery=True)
-                expiry_fetch_success = self.voucher_fetch_success
             else:
                 log(f"账号{self.account_index} - 未发现需要补截止时间的未领取奖品，跳过过期时间查询")
-                expiry_fetch_success = True
             self.activity_records = {
                 "seckill": seckill_records,
                 "lottery": lottery_records,
+                "exchange": exchange_records,
             }
             self.activity_fetch_success = (
                 (not SECKILL_ENABLED or self.seckill_fetch_success)
                 and self.lottery_fetch_success
-                and expiry_fetch_success
+                and self.voucher_fetch_success
             )
             if SECKILL_ENABLED:
-                log(f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，抽奖 {len(lottery_records)} 条")
+                log(
+                    f"账号{self.account_index} - 活动记录获取完成：秒杀 {len(seckill_records)} 条，"
+                    f"抽奖 {len(lottery_records)} 条，2026年8月起兑换 {len(exchange_records)} 条"
+                )
             else:
-                log(f"账号{self.account_index} - 抽奖记录获取完成：{len(lottery_records)} 条")
+                log(
+                    f"账号{self.account_index} - 活动记录获取完成：抽奖 {len(lottery_records)} 条，"
+                    f"2026年8月起兑换 {len(exchange_records)} 条"
+                )
             if not self.activity_fetch_success:
                 failures = []
                 if SECKILL_ENABLED and not self.seckill_fetch_success:
                     failures.append("秒杀数据获取失败")
                 if not self.lottery_fetch_success:
                     failures.append("抽奖数据获取失败")
-                if not expiry_fetch_success:
-                    failures.append("奖品过期记录获取失败")
+                if not self.voucher_fetch_success:
+                    failures.append("兑换记录获取失败")
                 failure_reason = "；".join(failures) or "活动数据获取失败"
                 if failure_reason not in self.detail_reason:
                     self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
@@ -2726,7 +2774,9 @@ def process_single_account(username, password, account_index, total_accounts):
             merged['detail_reason'] = res.get('detail_reason') or '密码错误'
             merged['sign_time'] = res.get('sign_time', '')
             merged['sign_ip'] = res.get('sign_ip', '')
-            merged['activity_records'] = res.get('activity_records') or make_empty_extra_records()
+            merged['activity_records'] = merge_activity_record_components(
+                merged.get('activity_records'), res.get('activity_records')
+            )
             break
 
         if merged.get('banned_account'):
@@ -2770,6 +2820,21 @@ def process_single_account(username, password, account_index, total_accounts):
         elif not merged['sign_success']:
             for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'initial_points', 'final_points', 'points_reward', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 merged[k] = res.get(k)
+
+        merged['activity_records'] = merge_activity_record_components(
+            merged.get('activity_records'), res.get('activity_records')
+        )
+        merged['activity_fetch_success'] = truthy(merged.get('activity_fetch_success')) or truthy(
+            res.get('activity_fetch_success')
+        )
+        merged['data_fetch_completed'] = (
+            truthy(merged.get('points_fetch_success'))
+            and truthy(merged.get('activity_fetch_success'))
+            and (
+                not truthy(merged.get('account_data_required'))
+                or truthy(merged.get('account_data_fetch_success'))
+            )
+        )
 
         if truthy(res.get('vote_success')) or not truthy(merged.get('vote_success')):
             for key in VOTE_RESULT_FIELDS:
@@ -2824,7 +2889,9 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                 'detail_reason': final.get('detail_reason') or '密码错误',
                 'sign_time': final.get('sign_time', ''),
                 'sign_ip': final.get('sign_ip', ''),
-                'activity_records': final.get('activity_records') or orig.get('activity_records') or make_empty_extra_records(),
+                'activity_records': merge_activity_record_components(
+                    orig.get('activity_records'), final.get('activity_records')
+                ),
                 'is_final_retry': True
             })
             continue
@@ -2870,6 +2937,21 @@ def final_retry(all_results, usernames, passwords, total_accounts):
         elif not orig['sign_success']:
             for k in ['sign_status', 'token_extracted', 'secretkey_extracted', 'risk_controlled', 'detail_reason', 'sign_time', 'sign_ip', 'banned_account', 'points_fetch_success', 'activity_fetch_success', 'data_fetch_completed', 'next_day_success', 'task_start_date', 'sign_completed_at', 'activity_records', 'account_data_required', 'account_data_fetch_success', 'account_data', 'initial_points', 'final_points', 'points_reward', 'listing_gift_required', 'listing_gift_success', 'listing_gift_attempted', 'listing_gift_status', 'listing_gift_time', 'listing_gift_detail', 'vote_required', 'vote_success', 'vote_attempted', 'vote_status', 'vote_time', 'vote_product_sku', 'vote_product_name', 'vote_detail']:
                 orig[k] = final.get(k)
+
+        orig['activity_records'] = merge_activity_record_components(
+            orig.get('activity_records'), final.get('activity_records')
+        )
+        orig['activity_fetch_success'] = truthy(orig.get('activity_fetch_success')) or truthy(
+            final.get('activity_fetch_success')
+        )
+        orig['data_fetch_completed'] = (
+            truthy(orig.get('points_fetch_success'))
+            and truthy(orig.get('activity_fetch_success'))
+            and (
+                not truthy(orig.get('account_data_required'))
+                or truthy(orig.get('account_data_fetch_success'))
+            )
+        )
 
         if truthy(final.get('vote_success')) or not truthy(orig.get('vote_success')):
             for key in VOTE_RESULT_FIELDS:

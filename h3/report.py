@@ -156,9 +156,9 @@ def record_key(record: dict):
 
 def normalize_activity_records(value) -> dict:
     if not isinstance(value, dict):
-        return {"seckill": [], "lottery": []}
+        return {"seckill": [], "lottery": [], "exchange": []}
 
-    normalized = {"seckill": [], "lottery": []}
+    normalized = {"seckill": [], "lottery": [], "exchange": []}
     activity_types = (("seckill", 2), ("lottery", None)) if SECKILL_ENABLED else (("lottery", None),)
     for key, limit in activity_types:
         rows = value.get(key)
@@ -174,6 +174,24 @@ def normalize_activity_records(value) -> dict:
                     "status_text": str(item.get("status_text") or "").strip(),
                     "claimed": truthy(item.get("claimed")),
                     "expiry_date": str(item.get("expiry_date") or "").strip(),
+                }
+            )
+    exchange_rows = value.get("exchange")
+    if isinstance(exchange_rows, list):
+        for item in exchange_rows:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("goodsName") or "").strip()
+            if not title:
+                continue
+            normalized["exchange"].append(
+                {
+                    "title": title,
+                    "status": safe_int(item.get("status"), None),
+                    "status_text": str(item.get("status_text") or "").strip(),
+                    "quantity": max(1, safe_int(item.get("quantity"), 1)),
+                    "points": safe_float(item.get("points"), 0.0),
+                    "created_at": str(item.get("created_at") or "").strip(),
                 }
             )
     return normalized
@@ -323,7 +341,7 @@ def build_missing_record(group_number: int, account_index: int, username: str, t
         "detail_reason": "缺少签到结果",
         "sign_time": "",
         "sign_ip": "",
-        "activity_records": {"seckill": [], "lottery": []},
+        "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "account_data_required": truthy(os.getenv("ACCOUNT_DATA_ENABLED", "false")),
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),
@@ -424,6 +442,7 @@ def detail_text(record: dict) -> str:
             "秒杀数据获取失败",
             "抽奖数据获取失败",
             "奖品过期记录获取失败",
+            "兑换记录获取失败",
             "活动数据抓取异常",
             "会员资料接口未完整返回",
             "会员中心 SSO 未建立",
@@ -638,6 +657,57 @@ def max_lottery_count(records: list[dict]) -> int:
     )
 
 
+def exchange_prize_titles(records: list[dict]) -> list[str]:
+    titles = []
+    seen = set()
+    for record in sort_records(records):
+        for item in normalize_activity_records(record.get("activity_records")).get("exchange", []):
+            title = str(item.get("title") or "").strip()
+            if title and title not in seen:
+                seen.add(title)
+                titles.append(title)
+    return titles
+
+
+def exchange_detail_text(item: dict) -> str:
+    quantity = max(1, safe_int(item.get("quantity"), 1))
+    created_at = str(item.get("created_at") or "").strip()
+    points = safe_float(item.get("points"), 0.0)
+    values = [f"{quantity}件"]
+    if created_at:
+        values.append(created_at)
+    if points:
+        values.append(f"{points:g}金豆")
+    return "，".join(values)
+
+
+def exchange_columns(record: dict, prize_titles: list[str]) -> list[str]:
+    grouped = {}
+    for item in normalize_activity_records(record.get("activity_records")).get("exchange", []):
+        grouped.setdefault(str(item.get("title") or "").strip(), []).append(item)
+    values = []
+    for title in prize_titles:
+        rows = grouped.get(title, [])
+        values.extend(
+            [
+                "\n".join(exchange_detail_text(item) for item in rows),
+                "\n".join(str(item.get("status_text") or "").strip() for item in rows),
+            ]
+        )
+    return values
+
+
+def fill_for_exchange_status(value: str):
+    statuses = {line.strip() for line in str(value or "").splitlines() if line.strip()}
+    if "已退回" in statuses:
+        return STATUS_RED_FILL
+    if statuses.intersection({"已兑换待发货", "已确认收货"}):
+        return STATUS_GREEN_FILL
+    if "已兑换" in statuses:
+        return STATUS_YELLOW_FILL
+    return None
+
+
 def coupon_summary_text(coupons: list[dict]) -> str:
     values = []
     for coupon in coupons or []:
@@ -704,6 +774,7 @@ def write_xlsx(path: str, records: list[dict]):
     sheet = workbook.active
     sheet.title = "签到汇总"
     lottery_count = max_lottery_count(records)
+    exchange_titles = exchange_prize_titles(records)
     thresholds = {
         safe_int((record.get("account_data") or {}).get("invoice_month_threshold"), 12) or 12
         for record in records
@@ -729,6 +800,9 @@ def write_xlsx(path: str, records: list[dict]):
         "预测依据",
         "上市礼包领取情况",
     ]
+    for title in exchange_titles:
+        headers.extend([f"兑换物品：{title}", f"兑换状态：{title}"])
+    activity_start_column = len(headers) + 1
     if SECKILL_ENABLED:
         headers.extend([
             "秒杀一",
@@ -778,7 +852,7 @@ def write_xlsx(path: str, records: list[dict]):
                 )
                 if value
             ),
-        ] + activity_columns(record)
+        ] + exchange_columns(record, exchange_titles) + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
         for cell in sheet[row_index]:
@@ -807,11 +881,16 @@ def write_xlsx(path: str, records: list[dict]):
         prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
         gift_cell = sheet.cell(row_index, 17)
         gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
-        for column_index in range(18, len(headers) + 1, 2):
+        for exchange_index in range(len(exchange_titles)):
+            status_column = 19 + exchange_index * 2
+            exchange_fill = fill_for_exchange_status(sheet.cell(row_index, status_column).value)
+            if exchange_fill:
+                sheet.cell(row_index, status_column).fill = exchange_fill
+        for column_index in range(activity_start_column, len(headers) + 1, 2):
             prize_fill = fill_for_prize(sheet.cell(row_index, column_index).value)
             if prize_fill:
                 sheet.cell(row_index, column_index).fill = prize_fill
-        for column_index in range(19, len(headers) + 1, 2):
+        for column_index in range(activity_start_column + 1, len(headers) + 1, 2):
             sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
     sheet.freeze_panes = "A2"
@@ -834,8 +913,12 @@ def write_xlsx(path: str, records: list[dict]):
         "P": 42,
         "Q": 28,
     }
-    for column_index in range(18, len(headers) + 1):
-        widths[get_column_letter(column_index)] = 28 if column_index % 2 == 0 else 18
+    for exchange_index in range(len(exchange_titles)):
+        prize_column = 18 + exchange_index * 2
+        widths[get_column_letter(prize_column)] = 30
+        widths[get_column_letter(prize_column + 1)] = 20
+    for column_index in range(activity_start_column, len(headers) + 1):
+        widths[get_column_letter(column_index)] = 28 if (column_index - activity_start_column) % 2 == 0 else 18
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 

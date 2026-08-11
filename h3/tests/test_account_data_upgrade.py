@@ -16,6 +16,7 @@ from h3.account_data import (
 from h3.merge_results import pick_result
 from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
 from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
+from h3.exchange_history import exchange_status_text, normalize_exchange_records
 
 
 def lottery_rows(count: int) -> list[dict]:
@@ -113,6 +114,79 @@ class DynamicLotteryTests(unittest.TestCase):
         retry.update({"sign_success": True, "activity_fetch_success": True, "retry_count": 1})
         picked = pick_result(initial, retry)
         self.assertEqual(len(picked["activity_records"]["lottery"]), 15)
+
+
+class ExchangeHistoryTests(unittest.TestCase):
+    def test_status_mapping_and_august_2026_cutoff(self):
+        rows = [
+            {
+                "integralChangeType": 5,
+                "exchangeStates": state,
+                "exchangeNum": 1,
+                "integralChangeNum": 100,
+                "createTime": f"2026-08-0{state}T02:04:01.000Z",
+                "goodsName": f"奖品{state}",
+            }
+            for state in range(1, 7)
+        ]
+        rows.append(
+            {
+                "integralChangeType": 5,
+                "exchangeStates": 6,
+                "createTime": "2026-07-31T15:59:59.000Z",
+                "goodsName": "七月奖品",
+            }
+        )
+        normalized = normalize_exchange_records(rows)
+        self.assertEqual([item["status_text"] for item in normalized], [
+            "已确认收货", "已退回", "已冻结", "已兑换待发货", "已发货", "已兑换"
+        ])
+        self.assertNotIn("七月奖品", [item["title"] for item in normalized])
+        self.assertEqual(normalized[-1]["created_at"], "2026-08-01 10:04:01")
+        self.assertEqual(exchange_status_text({"integralChangeType": 2}), "已发到账户")
+
+    def test_xlsx_has_unique_prize_pairs_and_status_colors(self):
+        first = record(1, 0)
+        first["activity_records"]["exchange"] = [
+            {"title": "抽纸", "status": 1, "status_text": "已兑换", "quantity": 1, "points": 390, "created_at": "2026-08-06 10:04:01"},
+            {"title": "水杯", "status": 5, "status_text": "已退回", "quantity": 1, "points": 0, "created_at": "2026-08-05 09:00:00"},
+        ]
+        second = record(2, 0)
+        second["activity_records"]["exchange"] = [
+            {"title": "抽纸", "status": 3, "status_text": "已兑换待发货", "quantity": 2, "points": 780, "created_at": "2026-08-08 08:00:00"},
+            {"title": "露营车", "status": 6, "status_text": "已确认收货", "quantity": 1, "points": 1000, "created_at": "2026-08-07 08:00:00"},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.xlsx")
+            write_xlsx(path, [first, second])
+            sheet = load_workbook(path)["签到汇总"]
+            headers = [cell.value for cell in sheet[1]]
+            self.assertEqual(
+                [value for value in headers if str(value or "").startswith("兑换物品：")],
+                ["兑换物品：抽纸", "兑换物品：水杯", "兑换物品：露营车"],
+            )
+            paper_status = headers.index("兑换状态：抽纸") + 1
+            cup_status = headers.index("兑换状态：水杯") + 1
+            cart_status = headers.index("兑换状态：露营车") + 1
+            self.assertEqual(sheet.cell(2, paper_status).fill.fgColor.rgb, "00FFD966")
+            self.assertEqual(sheet.cell(2, cup_status).fill.fgColor.rgb, "00F8696B")
+            self.assertEqual(sheet.cell(3, paper_status).fill.fgColor.rgb, "00C6E0B4")
+            self.assertEqual(sheet.cell(3, cart_status).fill.fgColor.rgb, "00C6E0B4")
+            paper_detail = headers.index("兑换物品：抽纸") + 1
+            self.assertIn("2件", sheet.cell(3, paper_detail).value)
+
+    def test_retry_merge_keeps_longer_exchange_array(self):
+        initial = record(1, 1)
+        initial.update({"sign_success": False, "activity_fetch_success": True})
+        initial["activity_records"]["exchange"] = [
+            {"title": f"奖品{index}", "status_text": "已兑换"} for index in range(3)
+        ]
+        retry = record(1, 2)
+        retry.update({"sign_success": True, "activity_fetch_success": True, "retry_count": 1})
+        retry["activity_records"]["exchange"] = [{"title": "奖品0", "status_text": "已兑换"}]
+        picked = pick_result(initial, retry)
+        self.assertEqual(len(picked["activity_records"]["lottery"]), 2)
+        self.assertEqual(len(picked["activity_records"]["exchange"]), 3)
 
 
 class AccountDataTests(unittest.TestCase):

@@ -12,6 +12,7 @@ DATA_FAILURE_MARKERS = (
     "秒杀数据获取失败",
     "抽奖数据获取失败",
     "奖品过期记录获取失败",
+    "兑换记录获取失败",
     "活动数据获取失败",
     "活动数据抓取异常",
     "会员资料获取未完成",
@@ -35,6 +36,7 @@ LISTING_GIFT_FIELDS = (
     "listing_gift_time",
     "listing_gift_detail",
 )
+EMPTY_ACTIVITY_RECORDS = {"seckill": [], "lottery": [], "exchange": []}
 
 
 def truthy(value) -> bool:
@@ -83,16 +85,16 @@ def merge_data_fields(picked: dict, fallback: dict | None):
             picked[key] = fallback.get(key, 0.0)
         picked["points_fetch_success"] = True
     if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
-        picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
+        picked["activity_records"] = fallback.get("activity_records") or dict(EMPTY_ACTIVITY_RECORDS)
         picked["activity_fetch_success"] = True
-    picked_activity = picked.get("activity_records") or {}
-    fallback_activity = fallback.get("activity_records") or {}
-    picked_lottery = picked_activity.get("lottery") if isinstance(picked_activity, dict) else []
-    fallback_lottery = fallback_activity.get("lottery") if isinstance(fallback_activity, dict) else []
-    if not isinstance(picked_lottery, list):
-        picked_lottery = []
-    if isinstance(fallback_lottery, list) and len(fallback_lottery) > len(picked_lottery):
-        picked["activity_records"] = fallback_activity
+    picked_activity = picked.get("activity_records") if isinstance(picked.get("activity_records"), dict) else {}
+    fallback_activity = fallback.get("activity_records") if isinstance(fallback.get("activity_records"), dict) else {}
+    merged_activity = {}
+    for key in ("seckill", "lottery", "exchange"):
+        current_rows = picked_activity.get(key) if isinstance(picked_activity.get(key), list) else []
+        fallback_rows = fallback_activity.get(key) if isinstance(fallback_activity.get(key), list) else []
+        merged_activity[key] = fallback_rows if len(fallback_rows) > len(current_rows) else current_rows
+    picked["activity_records"] = merged_activity
     if truthy(fallback.get("account_data_fetch_success")) and not truthy(picked.get("account_data_fetch_success")):
         picked["account_data"] = fallback.get("account_data") or {}
         picked["account_data_fetch_success"] = True
@@ -172,7 +174,7 @@ def pick_result(initial: dict, retry: dict | None):
                     picked[key] = fallback.get(key, 0.0)
                 picked["points_fetch_success"] = True
             if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
-                picked["activity_records"] = fallback.get("activity_records") or {"seckill": [], "lottery": []}
+                picked["activity_records"] = fallback.get("activity_records") or dict(EMPTY_ACTIVITY_RECORDS)
                 picked["activity_fetch_success"] = True
             if truthy(fallback.get("account_data_fetch_success")) and not truthy(picked.get("account_data_fetch_success")):
                 picked["account_data"] = fallback.get("account_data") or {}
@@ -277,7 +279,7 @@ def main():
                 "detail_reason": row.get("detail_reason", ""),
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
-                "activity_records": row.get("activity_records") or {"seckill": [], "lottery": []},
+                "activity_records": row.get("activity_records") or dict(EMPTY_ACTIVITY_RECORDS),
                 "account_data_required": truthy(row.get("account_data_required")),
                 "account_data_fetch_success": truthy(row.get("account_data_fetch_success")),
                 "account_data": row.get("account_data") or {},
