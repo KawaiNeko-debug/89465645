@@ -96,6 +96,14 @@ def default_group_position(group_number: int, account_index: int) -> str:
     return f"账号{account_index}" if account_index > 0 else "未知账号"
 
 
+def mask_account(account: object) -> str:
+    text = str(account or "").strip()
+    if not text:
+        return ""
+    visible = 5
+    return "*" * max(0, len(text) - visible) + text[-visible:]
+
+
 def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
     lookup = {}
     total = 0
@@ -224,13 +232,14 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
     group_number = safe_int(record.get("group_number", payload.get("group_number")), 0)
     account_index = safe_int(record.get("account_index"), 0)
     group_code = str(record.get("group_code") or payload.get("group_code") or "").strip().lower()
-    username = str(
+    raw_username = str(
         record.get("username")
         or record.get("masked_username")
         or account_lookup.get((group_code, account_index))
         or account_lookup.get((group_number, account_index))
         or f"账号{account_index}"
     ).strip()
+    username = raw_username if "*" in raw_username else mask_account(raw_username)
     detail_reason = str(record.get("detail_reason") or "").strip()
     risk_controlled = truthy(record.get("risk_controlled")) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in detail_reason)
     banned_account = truthy(record.get("banned_account"))
@@ -362,7 +371,7 @@ def build_missing_record(group_identity, account_index: int, username: str, task
     return {
         "account_index": account_index,
         "execution_order": account_index,
-        "username": username,
+        "username": mask_account(username),
         "group_name": default_group_name(group_number),
         "group_number": group_number,
         "group_position": f"{group_code}账号{account_index}" if group_code else default_group_position(group_number, account_index),

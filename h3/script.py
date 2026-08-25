@@ -726,9 +726,8 @@ def mask_account(account):
     if account is None:
         return ""
     s = str(account)
-    if len(s) <= 4:
-        return "*" * len(s)
-    return s[:-4] + "****"
+    visible = 5
+    return "*" * max(0, len(s) - visible) + s[-visible:]
 
 def current_time_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

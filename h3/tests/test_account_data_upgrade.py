@@ -31,7 +31,7 @@ from h3.campaign_vote import (
 )
 from h3.dynamic_groups import configured_groups
 from h3.category_reports import main as category_reports_main
-from h3.report import is_problem_record, load_account_lookup, normalize_record, resolve_output_xlsx_path
+from h3.report import is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
 from h3.test_report import prepare_manifest
 
 
@@ -545,6 +545,10 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_account_display_masks_everything_except_last_five(self):
+        self.assertEqual(mask_account("1234567890A"), "******7890A")
+        self.assertEqual(mask_account("8565A"), "8565A")
+
     def test_test_group_lookup_is_limited_to_one_account(self):
         with patch.dict(
             os.environ,
