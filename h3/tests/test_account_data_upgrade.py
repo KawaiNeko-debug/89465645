@@ -450,6 +450,34 @@ class ListingGiftTests(unittest.TestCase):
 
 
 class VoteTests(unittest.TestCase):
+    def test_log_redacts_active_credentials(self):
+        required = {
+            "BASE_URL": "https://example.invalid",
+            "PASSPORT_URL": "https://example.invalid/login",
+            "REFERER": "https://example.invalid",
+            "SLIDER_ID": "slider",
+            "WRAPPER_ID": "wrapper",
+            "HEADER_CLIENT_TYPE": "client",
+            "HEADER_ACCESS_TOKEN": "access",
+            "TOKEN_KEY": "token",
+        }
+        with patch.dict(os.environ, required, clear=False):
+            import importlib
+            script_module = importlib.import_module("h3.script")
+        original = set(script_module._SENSITIVE_LOG_VALUES)
+        try:
+            script_module._SENSITIVE_LOG_VALUES.clear()
+            script_module._SENSITIVE_LOG_VALUES.update({"user-secret", "pass-secret"})
+            with patch("builtins.print") as printer:
+                script_module.log("user-secret pass-secret")
+            rendered = str(printer.call_args.args[0])
+            self.assertNotIn("user-secret", rendered)
+            self.assertNotIn("pass-secret", rendered)
+            self.assertEqual(rendered.count("[REDACTED]"), 2)
+        finally:
+            script_module._SENSITIVE_LOG_VALUES.clear()
+            script_module._SENSITIVE_LOG_VALUES.update(original)
+
     def test_vote_window_boundaries(self):
         self.assertFalse(is_vote_date("2026-08-10"))
         self.assertTrue(is_vote_date("2026-08-11"))

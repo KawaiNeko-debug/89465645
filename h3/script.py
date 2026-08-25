@@ -9,6 +9,7 @@ import threading
 import re
 from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeoutError
 from fake_useragent import UserAgent
@@ -242,7 +243,11 @@ def truncate_text(s: str, limit: int = 1200) -> str:
 def redact_sensitive(s: str) -> str:
     if not s:
         return ""
-    return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], s)
+    text = str(s)
+    for value in sorted(_SENSITIVE_LOG_VALUES, key=len, reverse=True):
+        if value:
+            text = text.replace(value, "[REDACTED]")
+    return _UUID_RE.sub(lambda m: m.group(0)[:8] + "-****-****-****-" + m.group(0)[-12:], text)
 
 def is_unclaimed_reward_error(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -708,12 +713,14 @@ def get_random_mobile_ua():
 # --- 全局日志变量 ---
 in_summary = False
 summary_logs = []
+_SENSITIVE_LOG_VALUES = set()
 
 def log(msg):
-    full_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {msg}"
+    safe_msg = redact_sensitive(str(msg))
+    full_msg = f"[{datetime.now().strftime('%H:%M:%S')}] {safe_msg}"
     print(full_msg, flush=True)
     if in_summary:
-        summary_logs.append(msg)
+        summary_logs.append(safe_msg)
 
 def mask_account(account):
     if account is None:
@@ -2525,6 +2532,9 @@ class ApiClient:
 # 单个账号登录与签到主流程
 # ==============================================================================
 def sign_in_account(username, password, account_index, total_accounts, retry_count=0, is_final_retry=False):
+    _SENSITIVE_LOG_VALUES.update(
+        value for value in (str(username or "").strip(), str(password or "")) if value
+    )
     label = f" (重试{retry_count})" if retry_count > 0 else (" (最终重试)" if is_final_retry else "")
     log(f"开始处理账号 {account_index}/{total_accounts}{label}")
     task_start_date = normalize_task_start_date()
@@ -3314,8 +3324,17 @@ def write_results_json(path, all_results, total_accounts):
 
 def main():
     if len(sys.argv) < 3:
-        print("用法: python script.py \"账号1,账号2\" \"密码1,密码2\" [失败退出标志]")
-        sys.exit(1)
+        credential_file = str(os.getenv("ACCOUNT_CREDENTIAL_FILE") or "").strip()
+        if credential_file:
+            try:
+                values = Path(credential_file).read_text(encoding="utf-8").splitlines()
+                if len(values) >= 2 and values[0].strip() and values[1].strip():
+                    sys.argv.extend([values[0].strip(), values[1].strip(), "false"])
+            except Exception:
+                pass
+        if len(sys.argv) < 3:
+            print("用法: python script.py \"账号1,账号2\" \"密码1,密码2\" [失败退出标志]")
+            sys.exit(1)
 
     usernames = [u.strip() for u in sys.argv[1].split(',') if u.strip()]
     passwords = [p.strip() for p in sys.argv[2].split(',') if p.strip()]

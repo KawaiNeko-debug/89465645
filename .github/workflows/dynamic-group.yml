@@ -202,6 +202,7 @@ jobs:
       - name: Select account
         shell: bash
         run: |
+          set +x
           python - <<'PY'
           import os
           code = os.environ['GROUP_CODE'].strip().lower()
@@ -209,14 +210,21 @@ jobs:
           if code == 'test':
               lines = lines[:1]
           username, password = lines[int(os.environ['ACCOUNT_INDEX']) - 1].split(',', 1)
+          print(f"::add-mask::{username}")
+          print(f"::add-mask::{password}")
+          with open('.account-credentials', 'w', encoding='utf-8') as credentials:
+              credentials.write(username + '\n' + password + '\n')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
-              output.write(f'ACCOUNT_USERNAME={username}\nACCOUNT_PASSWORD={password}\n')
+              output.write('ACCOUNT_CREDENTIAL_FILE=.account-credentials\n')
           PY
       - name: Run account
         timeout-minutes: 35
         env:
           RESULT_JSON_PATH: result.json
-        run: python h3/script.py "$ACCOUNT_USERNAME" "$ACCOUNT_PASSWORD" "false"
+        run: |
+          set +x
+          trap 'rm -f "$ACCOUNT_CREDENTIAL_FILE"' EXIT
+          python h3/script.py
       - name: Ensure result
         if: always()
         run: python h3/fallback_result.py result.json
