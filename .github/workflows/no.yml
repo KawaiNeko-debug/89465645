@@ -1,8 +1,6 @@
 name: 空
 
 on:
-  schedule:
-    - cron: '0 0 */7 * *'  # 每7天运行一次
   workflow_dispatch:
 
 env:

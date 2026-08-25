@@ -1,6 +1,9 @@
+import json
 import os
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -11,12 +14,23 @@ from h3.account_data import (
     parse_coupon_response,
     parse_invoice_profile_exists,
     parse_invoice_statistics,
+    parse_invoice_order_page,
     predict_pcb_smt,
+    sum_pcb_invoice_orders,
 )
 from h3.merge_results import pick_result
 from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
 from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
+from h3.campaign_vote import (
+    can_vote_after_sign,
+    inspect_vote_config,
+    is_vote_date,
+    parse_lottery_winning_response,
+)
+from h3.dynamic_groups import configured_groups
+from h3.category_reports import main as category_reports_main
+from h3.report import is_problem_record, normalize_record, resolve_output_xlsx_path
 
 
 def lottery_rows(count: int) -> list[dict]:
@@ -42,6 +56,11 @@ def account_data_with_amount(within=100, over=0) -> dict:
             "invoice_month_threshold": 12,
             "invoice_within_months_amount": within,
             "invoice_over_months_amount": over,
+            "pcb_order_fetch_success": True,
+            "pcb_within_months_amount": within,
+            "pcb_over_months_amount": over,
+            "pcb_total_amount": within + over,
+            "pcb_amount_shortfall": max(0, 40 - within - over),
         }
     )
     return data
@@ -333,9 +352,42 @@ class AccountDataTests(unittest.TestCase):
             path = os.path.join(temp_dir, "report.xlsx")
             write_xlsx(path, [record(1, 0, data)])
             sheet = load_workbook(path)["签到汇总"]
-            self.assertEqual(sheet["I2"].value, "无")
-            self.assertIsNone(sheet["J2"].value)
-            self.assertIsNone(sheet["K2"].value)
+            headers = {cell.value: cell.column for cell in sheet[1]}
+            self.assertEqual(sheet.cell(2, headers["开票资料"]).value, "无")
+            self.assertIsNone(sheet.cell(2, headers["不超过12个月可开金额"]).value)
+            self.assertIsNone(sheet.cell(2, headers["超过12个月可开金额"]).value)
+
+    def test_pcb_invoice_order_types_amount_fallback_and_deduplication(self):
+        response = {
+            "data": {
+                "pageNum": 1,
+                "totalPages": 2,
+                "data": [
+                    {"businessOrderType": 1, "invoiceMoney": "20.50", "businessOrderCode": "a"},
+                    {"businessOrderType": 2, "invoiceMoney": None, "orderMoney": "19.50", "businessOrderCode": "b"},
+                    {"businessOrderType": 3, "invoiceMoney": "100", "businessOrderCode": "c"},
+                    {"businessOrderType": 9, "invoiceMoney": "100", "businessOrderCode": "d"},
+                ],
+            }
+        }
+        page = parse_invoice_order_page(response)
+        self.assertEqual(page["total_pages"], 2)
+        self.assertEqual([item["business_order_type"] for item in page["orders"]], [1, 2])
+        total, count = sum_pcb_invoice_orders([response, response])
+        self.assertEqual(total, 40.0)
+        self.assertEqual(count, 2)
+
+    def test_pcb_threshold_boundaries(self):
+        for amount, expected, shortfall in (
+            (0, "不可能", 40),
+            (39.99, "不可能", 0.01),
+            (40, "100%可能", 0),
+            (40.01, "100%可能", 0),
+        ):
+            with self.subTest(amount=amount):
+                data = account_data_with_amount(amount, 0)
+                self.assertEqual(predict_pcb_smt(data)[0], expected)
+                self.assertAlmostEqual(data["pcb_amount_shortfall"], shortfall, places=2)
 
 
 class ListingGiftTests(unittest.TestCase):
@@ -393,6 +445,188 @@ class ListingGiftTests(unittest.TestCase):
             column = headers.index("上市礼包领取情况") + 1
             self.assertIn("上市礼包领取成功", sheet.cell(2, column).value)
             self.assertEqual(sheet.cell(2, column).font.color.rgb, "00008000")
+
+
+class VoteTests(unittest.TestCase):
+    def test_vote_window_boundaries(self):
+        self.assertFalse(is_vote_date("2026-08-10"))
+        self.assertTrue(is_vote_date("2026-08-11"))
+        self.assertTrue(is_vote_date("2026-08-31 23:59:59"))
+        self.assertFalse(is_vote_date("2026-09-01"))
+
+    def test_full_groups_must_sign_successfully_before_vote(self):
+        self.assertFalse(can_vote_after_sign(False))
+        self.assertTrue(can_vote_after_sign(True))
+        self.assertTrue(can_vote_after_sign(False, sign_skipped=True))
+        self.assertTrue(
+            can_vote_after_sign(
+                False,
+                data_only_retry=True,
+                previous_sign_success=True,
+            )
+        )
+        self.assertFalse(
+            can_vote_after_sign(
+                False,
+                data_only_retry=True,
+                previous_sign_success=False,
+            )
+        )
+
+    def test_vote_ready_already_and_conflict(self):
+        target_sku = "target"
+        target_name = "product"
+
+        def response(can_vote, voted=""):
+            return {
+                "success": True,
+                "data": {
+                    "myVotedProductSku": voted,
+                    "voteProductConfigList": [
+                        {"productSku": target_sku, "productName": target_name, "canVote": can_vote}
+                    ],
+                },
+            }
+
+        self.assertEqual(inspect_vote_config(response(True), target_sku, target_name)["state"], "ready")
+        self.assertEqual(inspect_vote_config(response(False, target_sku), target_sku, target_name)["state"], "already")
+        self.assertEqual(inspect_vote_config(response(False, "other"), target_sku, target_name)["state"], "conflict")
+
+    def test_new_winning_response_is_never_truncated(self):
+        for count in (0, 1, 8, 15):
+            with self.subTest(count=count):
+                response = {
+                    "success": True,
+                    "data": {
+                        "records": [
+                            {
+                                "prizeName": f"prize-{index}",
+                                "receiveStatus": 2 if index % 2 else 0,
+                            }
+                            for index in range(count)
+                        ]
+                    },
+                }
+                rows = parse_lottery_winning_response(response)
+                self.assertEqual(len(rows), count)
+                if rows:
+                    self.assertIn("claimed", rows[0])
+
+
+class DynamicGroupTests(unittest.TestCase):
+    def test_group_detection_keeps_global_order_and_skips_gaps(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        values.update(
+            {
+                "old2": "old,pw",
+                "new1": "new,pw\nnew2,pw",
+                "ll3": "peer,pw",
+                "zh1": "peer2,pw",
+            }
+        )
+        with patch.dict(os.environ, values, clear=False):
+            groups = configured_groups()
+        self.assertEqual(
+            [item["group_code"] for item in groups],
+            ["old2", "new1", "ll3", "zh1"],
+        )
+        self.assertEqual([item["account_count"] for item in groups], [1, 2, 1, 1])
+        self.assertEqual(groups[-1]["account_category"], "同行不签到组")
+
+    def test_skip_sign_is_normal_only_when_data_is_complete(self):
+        payload = {"group_code": "ll1", "account_category": "同行不签到组", "execution_mode": "skip_sign"}
+        base = {
+            "account_index": 1,
+            "sign_skipped": True,
+            "data_fetch_completed": True,
+            "account_data_required": False,
+            "points_fetch_success": True,
+            "activity_fetch_success": True,
+            "listing_gift_required": False,
+            "vote_required": False,
+        }
+        complete = normalize_record(base, payload, {})
+        self.assertFalse(is_problem_record(complete))
+        incomplete = normalize_record({**base, "data_fetch_completed": False, "points_fetch_success": False}, payload, {})
+        self.assertTrue(is_problem_record(incomplete))
+
+    def test_configured_report_path_is_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ, {"OUTPUT_XLSX_PATH": os.path.join(temp_dir, "2026-08-25-老号全干组.xlsx")}
+        ):
+            path = resolve_output_xlsx_path(temp_dir, {"task_start_date": "2026-08-25"})
+        self.assertTrue(path.endswith("2026-08-25-老号全干组.xlsx"))
+
+    def test_three_category_reports_are_generated_separately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            results_dir = os.path.join(temp_dir, "results")
+            os.makedirs(os.path.join(results_dir, "old1"))
+            with open(os.path.join(results_dir, "manifest.json"), "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "task_start_date": "2026-08-25",
+                        "groups": [
+                            {"group_code": "old1", "account_category": "老号全干组", "account_count": 1}
+                        ],
+                    },
+                    file,
+                    ensure_ascii=False,
+                )
+            with open(os.path.join(results_dir, "old1", "result.json"), "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "group_code": "old1",
+                        "account_category": "老号全干组",
+                        "results": [
+                            {
+                                "account_index": 1,
+                                "group_code": "old1",
+                                "account_category": "老号全干组",
+                                "sign_success": True,
+                                "sign_status": "签到成功",
+                                "points_fetch_success": True,
+                                "activity_fetch_success": True,
+                                "data_fetch_completed": True,
+                                "account_data_required": False,
+                                "activity_records": {"lottery": [], "exchange": []},
+                                "listing_gift_required": False,
+                                "vote_required": False,
+                            }
+                        ],
+                    },
+                    file,
+                    ensure_ascii=False,
+                )
+            values = {
+                f"{prefix}{index}": ""
+                for prefix in ("old", "new", "ll", "zh")
+                for index in range(1, 21)
+            }
+            values.update(
+                {
+                    "old1": "fixture-account,fixture-password",
+                    "NOTIFY_CHANNELS": "",
+                    "TELEGRAM_BOT_TOKEN": "",
+                    "TELEGRAM_CHAT_ID": "",
+                }
+            )
+            with patch.dict(os.environ, values, clear=False), patch.object(
+                sys, "argv", ["category_reports.py", results_dir]
+            ):
+                self.assertEqual(category_reports_main(), 0)
+            names = sorted(name for name in os.listdir(results_dir) if name.endswith(".xlsx"))
+            self.assertEqual(
+                names,
+                [
+                    "2026-08-25-同行不签到组.xlsx",
+                    "2026-08-25-新号全干组.xlsx",
+                    "2026-08-25-老号全干组.xlsx",
+                ],
+            )
 
 
 if __name__ == "__main__":

@@ -22,9 +22,11 @@ except ImportError:
 
 try:
     from account_data import empty_account_data
+    from campaign_vote import is_vote_date
     from listing_gift import is_listing_gift_date
 except ImportError:
     from h3.account_data import empty_account_data
+    from h3.campaign_vote import is_vote_date
     from h3.listing_gift import is_listing_gift_date
 
 for stream_name in ("stdout", "stderr"):
@@ -94,9 +96,26 @@ def default_group_position(group_number: int, account_index: int) -> str:
     return f"账号{account_index}" if account_index > 0 else "未知账号"
 
 
-def load_account_lookup() -> tuple[dict[tuple[int, int], str], int]:
+def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
     lookup = {}
     total = 0
+    for prefix in ("old", "new", "ll", "zh"):
+        for slot in range(1, 21):
+            group_code = f"{prefix}{slot}"
+            raw = os.getenv(group_code) or ""
+            for account_index, line in enumerate(
+                (line.strip() for line in raw.splitlines() if line.strip() and "," in line),
+                start=1,
+            ):
+                lookup[(group_code, account_index)] = line.split(",", 1)[0].strip()
+                total += 1
+    raw_test = os.getenv("test") or os.getenv("TEST") or ""
+    for account_index, line in enumerate(
+        (line.strip() for line in raw_test.splitlines() if line.strip() and "," in line),
+        start=1,
+    ):
+        lookup[("test", account_index)] = line.split(",", 1)[0].strip()
+        total += 1
     for group_number in range(1, 9):
         raw = os.getenv(f"ACCOUNTS_BATCH{group_number}", "") or ""
         for account_index, line in enumerate(raw.splitlines(), start=1):
@@ -123,6 +142,8 @@ def load_manifest(results_dir: str) -> dict:
 def target_date_text(manifest: dict) -> str:
     if isinstance(manifest, dict) and manifest.get("target_date"):
         return str(manifest["target_date"]).strip()
+    if isinstance(manifest, dict) and manifest.get("task_start_date"):
+        return date_part(manifest["task_start_date"]) or str(manifest["task_start_date"]).strip()
     return datetime.now().strftime("%Y-%m-%d")
 
 
@@ -130,10 +151,8 @@ def resolve_output_xlsx_path(results_dir: str, manifest: dict) -> str:
     filename = f"{target_date_text(manifest)}签到汇总.xlsx"
     configured_path = os.getenv("OUTPUT_XLSX_PATH") or ""
     if configured_path:
-        directory = os.path.dirname(configured_path) or results_dir
-    else:
-        directory = results_dir
-    return os.path.join(directory, filename)
+        return configured_path
+    return os.path.join(results_dir, filename)
 
 
 def find_json_files(results_dir: str) -> list[str]:
@@ -147,8 +166,11 @@ def find_json_files(results_dir: str) -> list[str]:
 
 
 def record_key(record: dict):
+    group_code = str(record.get("group_code") or "").strip().lower()
     group_number = safe_int(record.get("group_number"), 0)
     account_index = safe_int(record.get("account_index"), 0)
+    if group_code and account_index > 0:
+        return group_code, account_index
     if group_number > 0 and account_index > 0:
         return group_number, account_index
     return None
@@ -197,12 +219,14 @@ def normalize_activity_records(value) -> dict:
     return normalized
 
 
-def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int, int], str]) -> dict:
+def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[object, int], str]) -> dict:
     group_number = safe_int(record.get("group_number", payload.get("group_number")), 0)
     account_index = safe_int(record.get("account_index"), 0)
+    group_code = str(record.get("group_code") or payload.get("group_code") or "").strip().lower()
     username = str(
         record.get("username")
         or record.get("masked_username")
+        or account_lookup.get((group_code, account_index))
         or account_lookup.get((group_number, account_index))
         or f"账号{account_index}"
     ).strip()
@@ -229,9 +253,12 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     next_day_success = truthy(record.get("next_day_success")) or (
         truthy(record.get("sign_success")) and date_part(task_start_date) and date_part(sign_time) and date_part(sign_time) > date_part(task_start_date)
     )
-    vote_required = False
-    vote_success = False
-    vote_status = "投票功能已关闭"
+    account_category = str(record.get("account_category") or payload.get("account_category") or "").strip()
+    execution_mode = str(record.get("execution_mode") or payload.get("execution_mode") or "").strip()
+    sign_skipped = truthy(record.get("sign_skipped")) or execution_mode == "skip_sign"
+    vote_required = truthy(record.get("vote_required"))
+    vote_success = truthy(record.get("vote_success"))
+    vote_status = str(record.get("vote_status") or ("待执行" if vote_required else "非投票日期")).strip()
     listing_gift_required = (
         truthy(record.get("listing_gift_required"))
         if "listing_gift_required" in record
@@ -247,6 +274,10 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
         "group_name": group_name,
         "group_number": group_number,
         "group_position": group_position,
+        "group_code": group_code,
+        "account_category": account_category,
+        "execution_mode": execution_mode,
+        "sign_skipped": sign_skipped,
         "sign_success": truthy(record.get("sign_success")),
         "sign_status": str(record.get("sign_status") or "").strip(),
         "initial_points": safe_float(record.get("initial_points"), 0.0),
@@ -288,7 +319,7 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[int
     }
 
 
-def load_results(results_dir: str, account_lookup: dict[tuple[int, int], str]) -> list[dict]:
+def load_results(results_dir: str, account_lookup: dict[tuple[object, int], str]) -> list[dict]:
     records_by_key = {}
     extras = []
     for path in find_json_files(results_dir):
@@ -312,15 +343,32 @@ def load_results(results_dir: str, account_lookup: dict[tuple[int, int], str]) -
     return list(records_by_key.values()) + extras
 
 
-def build_missing_record(group_number: int, account_index: int, username: str, task_date: str = "") -> dict:
-    vote_required = False
+def build_missing_record(group_identity, account_index: int, username: str, task_date: str = "") -> dict:
+    group_code = str(group_identity).lower() if isinstance(group_identity, str) else ""
+    group_number = safe_int(group_identity, 0) if not group_code else 0
+    if group_code.startswith("old"):
+        category = "老号全干组"
+    elif group_code.startswith("new"):
+        category = "新号全干组"
+    elif group_code.startswith(("ll", "zh")):
+        category = "同行不签到组"
+    elif group_code == "test":
+        category = "测试组"
+    else:
+        category = ""
+    sign_skipped = group_code.startswith(("ll", "zh"))
+    vote_required = is_vote_date(task_date)
     return {
         "account_index": account_index,
         "execution_order": account_index,
         "username": username,
         "group_name": default_group_name(group_number),
         "group_number": group_number,
-        "group_position": default_group_position(group_number, account_index),
+        "group_position": f"{group_code}账号{account_index}" if group_code else default_group_position(group_number, account_index),
+        "group_code": group_code,
+        "account_category": category,
+        "execution_mode": "skip_sign" if sign_skipped else "full",
+        "sign_skipped": sign_skipped,
         "sign_success": False,
         "sign_status": "签到异常",
         "initial_points": 0.0,
@@ -354,7 +402,7 @@ def build_missing_record(group_number: int, account_index: int, username: str, t
         "vote_required": vote_required,
         "vote_success": False,
         "vote_attempted": False,
-        "vote_status": "投票功能已关闭",
+        "vote_status": "缺少投票结果" if vote_required else "非投票日期",
         "vote_time": "",
         "vote_product_sku": "",
         "vote_product_name": "",
@@ -364,7 +412,7 @@ def build_missing_record(group_number: int, account_index: int, username: str, t
 
 def merge_records_with_expected(
     records: list[dict],
-    account_lookup: dict[tuple[int, int], str],
+    account_lookup: dict[tuple[object, int], str],
     target_date: str = "",
 ) -> list[dict]:
     indexed = {}
@@ -380,7 +428,7 @@ def merge_records_with_expected(
         return list(indexed.values()) + extras
 
     merged = []
-    for key in sorted(account_lookup):
+    for key in sorted(account_lookup, key=lambda item: (str(item[0]), item[1])):
         record = indexed.pop(key, None)
         if record is None:
             merged.append(build_missing_record(key[0], key[1], account_lookup[key], target_date))
@@ -407,6 +455,8 @@ def status_label(record: dict) -> str:
         if not truthy(record.get("data_fetch_completed")):
             return "签到异常"
         return "账号封禁"
+    if truthy(record.get("sign_skipped")):
+        return "按配置跳过签到" if truthy(record.get("data_fetch_completed")) else "取数异常"
     if truthy(record.get("next_day_success")):
         return "签到成功但次日"
     if truthy(record.get("risk_controlled")):
@@ -436,6 +486,8 @@ def detail_text(record: dict) -> str:
             return reason
         status = str(record.get("sign_status") or "").strip()
         return f"账号在封禁列表中，已跳过签到；数据获取失败：{status or '未知异常'}"
+    if truthy(record.get("sign_skipped")):
+        return str(record.get("detail_reason") or record.get("sign_status") or "同行组按配置跳过签到").strip()
     if truthy(record.get("sign_success")):
         reason = str(record.get("detail_reason") or "").strip()
         activity_failure_markers = (
@@ -455,9 +507,11 @@ def detail_text(record: dict) -> str:
 
 
 def is_problem_record(record: dict) -> bool:
-    return status_sort_bucket(record) == 0 or (
-        truthy(record.get("listing_gift_required"))
-        and not truthy(record.get("listing_gift_success"))
+    return (
+        status_sort_bucket(record) == 0
+        or not truthy(record.get("data_fetch_completed"))
+        or (truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")))
+        or (truthy(record.get("vote_required")) and not truthy(record.get("vote_success")))
     )
 
 
@@ -467,12 +521,16 @@ def problem_reason(record: dict) -> str:
         reasons.append(detail_reason(record))
     if truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")):
         reasons.append(str(record.get("listing_gift_status") or record.get("listing_gift_detail") or "礼包领取未完成").strip())
+    if not truthy(record.get("data_fetch_completed")):
+        reasons.append("账号数据获取未完成")
+    if truthy(record.get("vote_required")) and not truthy(record.get("vote_success")):
+        reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
     return "；".join(dict.fromkeys(reason for reason in reasons if reason)) or "未知异常"
 
 
 def status_sort_bucket(record: dict) -> int:
     label = status_label(record)
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"签到失败", "签到异常", "签到风控", "取数异常"}:
         return 0
     if label == "签到成功但次日":
         return 1
@@ -504,6 +562,7 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
     risk = sum(1 for item in records if status_label(item) == "签到风控")
     failed = sum(1 for item in records if status_label(item) == "签到失败")
     abnormal = sum(1 for item in records if status_label(item) == "签到异常")
+    skipped = sum(1 for item in records if status_label(item) == "按配置跳过签到")
     reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
     success_rate = (success / total * 100) if total > 0 else 0.0
     listing_gift_required = sum(1 for item in records if truthy(item.get("listing_gift_required")))
@@ -519,6 +578,7 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "risk": risk,
         "failed": failed,
         "abnormal": abnormal,
+        "skipped": skipped,
         "problem_count": sum(1 for item in records if is_problem_record(item)),
         "reward": reward,
         "success_rate": success_rate,
@@ -533,6 +593,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 总账号数: {summary['total']}",
         f"  ├── 签到成功: {summary['success']}/{summary['total']}",
         f"  ├── 次日成功: {summary['next_day']}",
+        f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
         f"  ├── 上市礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
@@ -544,6 +605,12 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     sorted_records = sort_records(records)
     summary = build_summary(sorted_records, expected_total)
     problem_records = [record for record in sorted_records if is_problem_record(record)]
+    category_label = str(os.getenv("SUMMARY_CATEGORY_LABEL") or "").strip()
+
+    if category_label and not sorted_records and expected_total == 0:
+        lines = [f"{category_label}：本次未配置账号"]
+        lines.extend(build_stats_lines(summary))
+        return "\n".join(lines), summary
 
     if problem_records:
         lines = ["NO❗今天出现问题了捏"]
@@ -585,7 +652,7 @@ def font_for_status(label: str) -> Font:
         return Font(color="9C6500", bold=True)
     if label == "账号封禁":
         return Font(color="FFFFFF", bold=True)
-    if label == "签到成功":
+    if label in {"签到成功", "按配置跳过签到"}:
         return FONT_GREEN
     return FONT_DARK
 
@@ -786,6 +853,8 @@ def write_xlsx(path: str, records: list[dict]):
         "金豆数量",
         "账户",
         "组别",
+        "账号类别",
+        "执行模式",
         "签到情况",
         "详细原因",
         "签到时间",
@@ -793,12 +862,20 @@ def write_xlsx(path: str, records: list[dict]):
         "开票资料",
         f"不超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "不超过接口月份阈值可开金额",
         f"超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "超过接口月份阈值可开金额",
+        "PCB 12个月内消费",
+        "PCB 超过12个月消费",
+        "PCB累计消费",
+        "距离40元还差",
         "未使用优惠券",
         "已使用优惠券",
         "已过期优惠券",
         "PCB+SMT优惠券预测",
         "预测依据",
         "上市礼包领取情况",
+        "投票状态",
+        "投票时间",
+        "投票商品",
+        "投票详情",
     ]
     for title in exchange_titles:
         headers.extend([f"兑换物品：{title}", f"兑换状态：{title}"])
@@ -813,6 +890,7 @@ def write_xlsx(path: str, records: list[dict]):
     for index in range(1, lottery_count + 1):
         headers.extend([f"抽奖{index}", f"领取情况{index}"])
     sheet.append(headers)
+    header_index = {name: index for index, name in enumerate(headers, start=1)}
 
     header_fill = PatternFill("solid", fgColor="D9E2F3")
     header_font = Font(bold=True)
@@ -831,7 +909,9 @@ def write_xlsx(path: str, records: list[dict]):
             index,
             safe_float(record.get("final_points"), 0.0),
             str(record.get("username") or ""),
-            str(record.get("group_position") or ""),
+            str(record.get("group_code") or record.get("group_position") or ""),
+            str(record.get("account_category") or ""),
+            str(record.get("execution_mode") or ""),
             label,
             detail_text(record),
             str(record.get("sign_time") or ""),
@@ -839,6 +919,10 @@ def write_xlsx(path: str, records: list[dict]):
             str((record.get("account_data") or {}).get("invoice_profile_status") or "数据不足"),
             invoice_amount_text((record.get("account_data") or {}).get("invoice_within_months_amount")),
             invoice_amount_text((record.get("account_data") or {}).get("invoice_over_months_amount")),
+            invoice_amount_text((record.get("account_data") or {}).get("pcb_within_months_amount")),
+            invoice_amount_text((record.get("account_data") or {}).get("pcb_over_months_amount")),
+            invoice_amount_text((record.get("account_data") or {}).get("pcb_total_amount")),
+            invoice_amount_text((record.get("account_data") or {}).get("pcb_amount_shortfall")),
             coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("unused")),
             coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("used")),
             coupon_summary_text((record.get("account_data") or {}).get("coupons", {}).get("expired")),
@@ -852,6 +936,10 @@ def write_xlsx(path: str, records: list[dict]):
                 )
                 if value
             ),
+            str(record.get("vote_status") or ""),
+            str(record.get("vote_time") or ""),
+            str(record.get("vote_product_name") or record.get("vote_product_sku") or ""),
+            str(record.get("vote_detail") or ""),
         ] + exchange_columns(record, exchange_titles) + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
@@ -860,12 +948,10 @@ def write_xlsx(path: str, records: list[dict]):
             cell.alignment = Alignment(vertical="center")
         sheet.cell(row_index, 1).alignment = Alignment(horizontal="center", vertical="center")
         sheet.cell(row_index, 2).alignment = Alignment(horizontal="center", vertical="center")
-        sheet.cell(row_index, 4).alignment = Alignment(horizontal="center", vertical="center")
-        sheet.cell(row_index, 5).alignment = Alignment(horizontal="center", vertical="center")
-        sheet.cell(row_index, 7).alignment = Alignment(horizontal="center", vertical="center")
-        sheet.cell(row_index, 8).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        sheet.cell(row_index, 6).alignment = Alignment(vertical="center", wrap_text=True)
-        for column_index in range(9, len(headers) + 1):
+        for name in ("组别", "账号类别", "执行模式", "签到情况", "签到时间", "签到IP"):
+            sheet.cell(row_index, header_index[name]).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        sheet.cell(row_index, header_index["详细原因"]).alignment = Alignment(vertical="center", wrap_text=True)
+        for column_index in range(header_index["开票资料"], len(headers) + 1):
             sheet.cell(row_index, column_index).alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         sheet.cell(row_index, 2).number_format = "0.0"
         fill = color_for_points(safe_float(record.get("final_points"), 0.0))
@@ -873,16 +959,18 @@ def write_xlsx(path: str, records: list[dict]):
             sheet.cell(row_index, 2).fill = fill
         status_fill = fill_for_status(label)
         if status_fill:
-            sheet.cell(row_index, 5).fill = status_fill
-        sheet.cell(row_index, 5).font = font_for_status(label)
-        invoice_cell = sheet.cell(row_index, 9)
+            sheet.cell(row_index, header_index["签到情况"]).fill = status_fill
+        sheet.cell(row_index, header_index["签到情况"]).font = font_for_status(label)
+        invoice_cell = sheet.cell(row_index, header_index["开票资料"])
         invoice_cell.font = FONT_GREEN if invoice_cell.value == "有" else (FONT_RED if invoice_cell.value == "无" else FONT_BLUE)
-        prediction_cell = sheet.cell(row_index, 15)
+        prediction_cell = sheet.cell(row_index, header_index["PCB+SMT优惠券预测"])
         prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
-        gift_cell = sheet.cell(row_index, 17)
+        gift_cell = sheet.cell(row_index, header_index["上市礼包领取情况"])
         gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
-        for exchange_index in range(len(exchange_titles)):
-            status_column = 19 + exchange_index * 2
+        vote_cell = sheet.cell(row_index, header_index["投票状态"])
+        vote_cell.font = font_for_vote_status(record)
+        for title in exchange_titles:
+            status_column = header_index[f"兑换状态：{title}"]
             exchange_fill = fill_for_exchange_status(sheet.cell(row_index, status_column).value)
             if exchange_fill:
                 sheet.cell(row_index, status_column).fill = exchange_fill
@@ -894,29 +982,22 @@ def write_xlsx(path: str, records: list[dict]):
             sheet.cell(row_index, column_index).font = font_for_claim_status(sheet.cell(row_index, column_index).value)
 
     sheet.freeze_panes = "A2"
-    widths = {
-        "A": 8,
-        "B": 14,
-        "C": 24,
-        "D": 16,
-        "E": 18,
-        "F": 36,
-        "G": 20,
-        "H": 18,
-        "I": 14,
-        "J": 18,
-        "K": 18,
-        "L": 36,
-        "M": 36,
-        "N": 36,
-        "O": 18,
-        "P": 42,
-        "Q": 28,
-    }
-    for exchange_index in range(len(exchange_titles)):
-        prize_column = 18 + exchange_index * 2
-        widths[get_column_letter(prize_column)] = 30
-        widths[get_column_letter(prize_column + 1)] = 20
+    widths = {}
+    for name, column_index in header_index.items():
+        width = 18
+        if name == "序号":
+            width = 8
+        elif name in {"账户", "投票商品"}:
+            width = 24
+        elif name in {"详细原因", "预测依据", "投票详情"}:
+            width = 42
+        elif name in {"未使用优惠券", "已使用优惠券", "已过期优惠券"}:
+            width = 36
+        elif name.startswith("兑换物品："):
+            width = 30
+        elif name.startswith("兑换状态："):
+            width = 20
+        widths[get_column_letter(column_index)] = width
     for column_index in range(activity_start_column, len(headers) + 1):
         widths[get_column_letter(column_index)] = 28 if (column_index - activity_start_column) % 2 == 0 else 18
     for column, width in widths.items():
@@ -1028,6 +1109,23 @@ def main():
     manifest = load_manifest(results_dir)
     output_xlsx = resolve_output_xlsx_path(results_dir, manifest)
     raw_records = load_results(results_dir, account_lookup)
+    summary_category = str(os.getenv("SUMMARY_CATEGORY") or "").strip()
+    if summary_category:
+        allowed_prefixes = {
+            "老号全干组": {"old"},
+            "新号全干组": {"new"},
+            "同行不签到组": {"ll", "zh"},
+        }.get(summary_category, set())
+        raw_records = [
+            record for record in raw_records
+            if str(record.get("account_category") or "").strip() == summary_category
+        ]
+        account_lookup = {
+            key: username for key, username in account_lookup.items()
+            if isinstance(key[0], str) and any(key[0].startswith(prefix) for prefix in allowed_prefixes)
+        }
+    if os.getenv("EXPECTED_TOTAL") not in (None, ""):
+        expected_total = max(0, safe_int(os.getenv("EXPECTED_TOTAL"), 0))
     records = merge_records_with_expected(raw_records, account_lookup, target_date_text(manifest))
     message, summary = build_message(records, manifest, expected_total)
 

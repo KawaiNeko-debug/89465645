@@ -1,0 +1,23 @@
+name: test-group
+
+run-name: test-group-${{ github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_start_date:
+        description: 留空时使用上海当天日期
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/dynamic-group.yml
+    with:
+      orchestration_id: ${{ github.run_id }}
+      group_code: test
+      task_start_date: ${{ inputs.task_start_date }}
+    secrets: inherit

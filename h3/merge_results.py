@@ -130,12 +130,17 @@ def load_single_result(path: str):
     row["_batch_name"] = payload.get("batch_name") if isinstance(payload, dict) else ""
     row["_group_name"] = payload.get("group_name") if isinstance(payload, dict) else ""
     row["_group_number"] = payload.get("group_number") if isinstance(payload, dict) else 0
+    row["_group_code"] = payload.get("group_code") if isinstance(payload, dict) else ""
+    row["_account_category"] = payload.get("account_category") if isinstance(payload, dict) else ""
+    row["_execution_mode"] = payload.get("execution_mode") if isinstance(payload, dict) else ""
     return row
 
 
 def score(row: dict):
     return (
-        1 if truthy(row.get("sign_success")) else 0,
+        1 if truthy(row.get("sign_success")) or (
+            truthy(row.get("sign_skipped")) and truthy(row.get("data_fetch_completed"))
+        ) else 0,
         1 if truthy(row.get("listing_gift_success")) else 0,
         1 if truthy(row.get("vote_success")) else 0,
         1 if truthy(row.get("data_fetch_completed")) else 0,
@@ -216,7 +221,7 @@ def main():
         normalized_path = path.replace("\\", "/").lower()
         if "/retry-result-" in normalized_path:
             retry_map[account_index] = row
-        elif "/initial-result-" in normalized_path:
+        elif "/initial-result-" in normalized_path or "/account-result-" in normalized_path:
             initial_map[account_index] = row
 
     merged = []
@@ -233,10 +238,16 @@ def main():
 
     group_name = ""
     group_number = 0
+    group_code = ""
+    account_category = ""
+    execution_mode = ""
     task_start_date = ""
     if merged:
         group_name = merged[0].get("group_name") or merged[0].get("_group_name") or merged[0].get("_batch_name") or ""
         group_number = safe_int(merged[0].get("group_number", merged[0].get("_group_number")), 0)
+        group_code = str(merged[0].get("group_code") or merged[0].get("_group_code") or "").strip()
+        account_category = str(merged[0].get("account_category") or merged[0].get("_account_category") or "").strip()
+        execution_mode = str(merged[0].get("execution_mode") or merged[0].get("_execution_mode") or "").strip()
         task_start_date = str(merged[0].get("task_start_date") or "").strip()
 
     payload = {
@@ -244,6 +255,9 @@ def main():
         "batch_name": group_name,
         "group_name": group_name,
         "group_number": group_number,
+        "group_code": group_code,
+        "account_category": account_category,
+        "execution_mode": execution_mode,
         "task_start_date": task_start_date,
         "total_accounts": len(merged),
         "results": [],
@@ -257,8 +271,14 @@ def main():
                 "group_name": row.get("group_name") or group_name,
                 "group_number": safe_int(row.get("group_number"), group_number),
                 "group_position": row.get("group_position") or (
-                    f"{group_number}组账号{safe_int(row.get('account_index'), 0)}" if group_number > 0 else f"账号{safe_int(row.get('account_index'), 0)}"
+                    f"{group_code}账号{safe_int(row.get('account_index'), 0)}" if group_code else (
+                        f"{group_number}组账号{safe_int(row.get('account_index'), 0)}" if group_number > 0 else f"账号{safe_int(row.get('account_index'), 0)}"
+                    )
                 ),
+                "group_code": row.get("group_code") or group_code,
+                "account_category": row.get("account_category") or account_category,
+                "execution_mode": row.get("execution_mode") or execution_mode,
+                "sign_skipped": truthy(row.get("sign_skipped")),
                 "sign_success": truthy(row.get("sign_success")),
                 "sign_status": row.get("sign_status", ""),
                 "initial_points": row.get("initial_points", 0.0),

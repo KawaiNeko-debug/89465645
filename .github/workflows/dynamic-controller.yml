@@ -1,0 +1,140 @@
+name: dynamic-controller
+
+run-name: dynamic-controller-${{ github.run_id }}
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+env:
+  TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  old1: ${{ secrets.old1 }}
+  old2: ${{ secrets.old2 }}
+  old3: ${{ secrets.old3 }}
+  old4: ${{ secrets.old4 }}
+  old5: ${{ secrets.old5 }}
+  old6: ${{ secrets.old6 }}
+  old7: ${{ secrets.old7 }}
+  old8: ${{ secrets.old8 }}
+  old9: ${{ secrets.old9 }}
+  old10: ${{ secrets.old10 }}
+  old11: ${{ secrets.old11 }}
+  old12: ${{ secrets.old12 }}
+  old13: ${{ secrets.old13 }}
+  old14: ${{ secrets.old14 }}
+  old15: ${{ secrets.old15 }}
+  old16: ${{ secrets.old16 }}
+  old17: ${{ secrets.old17 }}
+  old18: ${{ secrets.old18 }}
+  old19: ${{ secrets.old19 }}
+  old20: ${{ secrets.old20 }}
+  new1: ${{ secrets.new1 }}
+  new2: ${{ secrets.new2 }}
+  new3: ${{ secrets.new3 }}
+  new4: ${{ secrets.new4 }}
+  new5: ${{ secrets.new5 }}
+  new6: ${{ secrets.new6 }}
+  new7: ${{ secrets.new7 }}
+  new8: ${{ secrets.new8 }}
+  new9: ${{ secrets.new9 }}
+  new10: ${{ secrets.new10 }}
+  new11: ${{ secrets.new11 }}
+  new12: ${{ secrets.new12 }}
+  new13: ${{ secrets.new13 }}
+  new14: ${{ secrets.new14 }}
+  new15: ${{ secrets.new15 }}
+  new16: ${{ secrets.new16 }}
+  new17: ${{ secrets.new17 }}
+  new18: ${{ secrets.new18 }}
+  new19: ${{ secrets.new19 }}
+  new20: ${{ secrets.new20 }}
+  ll1: ${{ secrets.ll1 }}
+  ll2: ${{ secrets.ll2 }}
+  ll3: ${{ secrets.ll3 }}
+  ll4: ${{ secrets.ll4 }}
+  ll5: ${{ secrets.ll5 }}
+  ll6: ${{ secrets.ll6 }}
+  ll7: ${{ secrets.ll7 }}
+  ll8: ${{ secrets.ll8 }}
+  ll9: ${{ secrets.ll9 }}
+  ll10: ${{ secrets.ll10 }}
+  ll11: ${{ secrets.ll11 }}
+  ll12: ${{ secrets.ll12 }}
+  ll13: ${{ secrets.ll13 }}
+  ll14: ${{ secrets.ll14 }}
+  ll15: ${{ secrets.ll15 }}
+  ll16: ${{ secrets.ll16 }}
+  ll17: ${{ secrets.ll17 }}
+  ll18: ${{ secrets.ll18 }}
+  ll19: ${{ secrets.ll19 }}
+  ll20: ${{ secrets.ll20 }}
+  zh1: ${{ secrets.zh1 }}
+  zh2: ${{ secrets.zh2 }}
+  zh3: ${{ secrets.zh3 }}
+  zh4: ${{ secrets.zh4 }}
+  zh5: ${{ secrets.zh5 }}
+  zh6: ${{ secrets.zh6 }}
+  zh7: ${{ secrets.zh7 }}
+  zh8: ${{ secrets.zh8 }}
+  zh9: ${{ secrets.zh9 }}
+  zh10: ${{ secrets.zh10 }}
+  zh11: ${{ secrets.zh11 }}
+  zh12: ${{ secrets.zh12 }}
+  zh13: ${{ secrets.zh13 }}
+  zh14: ${{ secrets.zh14 }}
+  zh15: ${{ secrets.zh15 }}
+  zh16: ${{ secrets.zh16 }}
+  zh17: ${{ secrets.zh17 }}
+  zh18: ${{ secrets.zh18 }}
+  zh19: ${{ secrets.zh19 }}
+  zh20: ${{ secrets.zh20 }}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install controller dependencies
+        run: python -m pip install --timeout 60 --retries 3 requests
+      - name: Run configured groups sequentially
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          python h3/dynamic_groups.py run \
+            --orchestration-id "${{ github.run_id }}" \
+            --ref "${{ github.ref_name }}" \
+            --output orchestration.json
+      - name: Download exact group artifacts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: python h3/dynamic_groups.py download --manifest orchestration.json --output-dir results
+      - name: Install report dependencies
+        run: python -m pip install --timeout 60 --retries 3 requests openpyxl
+      - name: Generate and send category reports
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_CHANNELS: telegram
+        run: python h3/category_reports.py results
+      - name: Upload orchestration reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: category-reports-${{ github.run_id }}
+          path: |
+            orchestration.json
+            results/manifest.json
+            results/*.xlsx
+          if-no-files-found: ignore
+          retention-days: 3

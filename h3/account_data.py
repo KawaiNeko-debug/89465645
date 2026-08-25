@@ -2,18 +2,22 @@ import os
 import re
 import time
 from copy import deepcopy
+from datetime import date
 from urllib.parse import urlparse
 
 
 MEMBER_API_BASE = (os.getenv("MEMBER_API_BASE") or "").strip().rstrip("/")
 MEMBER_ENTRY_PATH = "/integrated/content/couponList"
 INVOICE_STATISTICS_PATH = "/api/integrated/vatInvoiceInfo/selectStatisticsMoney"
+INVOICE_ORDERS_PATH = "/api/integrated/vatInvoiceInfo/noticeInvoiceInit"
 INVOICE_PROFILE_PATHS = (
     "/api/integrated/vatInvoiceInfo/selectInvoiceInfo/plaintext",
     "/api/integrated/customerInvoiceInfo/group/list",
 )
 COUPON_PATH = "/api/integrated/customerOrderCenter/getEffectiveCouponsList"
 LEGACY_COUPON_PATH = "/api/integrated/customerOrderCenter/LCCoupons"
+PCB_ORDER_TYPES = {1, 2}
+PCB_SPEND_THRESHOLD = 40.0
 
 COUPON_STATUS_CONFIG = {
     "unused": {"label": "未使用", "sort_status": 2, "legacy_status": "no"},
@@ -32,6 +36,12 @@ def empty_account_data() -> dict:
         "invoice_month_threshold": 12,
         "invoice_within_months_amount": None,
         "invoice_over_months_amount": None,
+        "pcb_order_fetch_success": False,
+        "pcb_within_months_amount": None,
+        "pcb_over_months_amount": None,
+        "pcb_total_amount": None,
+        "pcb_amount_shortfall": None,
+        "pcb_order_count": 0,
         "coupons": {"unused": [], "used": [], "expired": []},
         "coupon_prediction": "数据不足",
         "prediction_reason": "会员资料接口未完成",
@@ -154,6 +164,59 @@ def parse_invoice_statistics(response) -> dict:
     return {"month_threshold": threshold, "within_amount": within, "over_amount": over}
 
 
+def parse_invoice_order_page(response) -> dict:
+    """Return page metadata and PCB-only order rows from the invoice detail API."""
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        return {"page_num": 1, "total_pages": 1, "orders": []}
+    raw_rows = data.get("data")
+    orders = []
+    for item in raw_rows if isinstance(raw_rows, list) else []:
+        if not isinstance(item, dict) or safe_int(item.get("businessOrderType"), 0) not in PCB_ORDER_TYPES:
+            continue
+        amount = safe_float(item.get("invoiceMoney"))
+        if amount is None:
+            amount = safe_float(item.get("orderMoney"))
+        if amount is None:
+            continue
+        orders.append(
+            {
+                "amount": amount,
+                "business_order_type": safe_int(item.get("businessOrderType"), 0),
+                "business_order_code": _text(item, "businessOrderCode"),
+                "detail_id": _text(item, "vatDetailsRecordAccessId"),
+                "order_date": _text(item, "orderDate"),
+                "model": _text(item, "specificationModel"),
+            }
+        )
+    return {
+        "page_num": max(1, safe_int(data.get("pageNum"), 1)),
+        "total_pages": max(1, safe_int(data.get("totalPages"), 1)),
+        "orders": orders,
+    }
+
+
+def sum_pcb_invoice_orders(responses: list[dict]) -> tuple[float, int]:
+    total = 0.0
+    count = 0
+    seen = set()
+    for response in responses:
+        for item in parse_invoice_order_page(response)["orders"]:
+            identity = (
+                item["detail_id"],
+                item["business_order_code"],
+                item["order_date"],
+                item["model"],
+                item["amount"],
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            total += item["amount"]
+            count += 1
+    return round(total, 2), count
+
+
 PROFILE_SIGNAL_KEYS = {
     "customerInvoiceInfoId",
     "invoiceTitle",
@@ -268,18 +331,24 @@ def is_pcb_smt_coupon(coupon: dict) -> bool:
 
 
 def predict_pcb_smt(account_data: dict) -> tuple[str, str]:
-    if not account_data.get("invoice_fetch_success") or not account_data.get("coupon_fetch_success"):
+    if (
+        not account_data.get("invoice_fetch_success")
+        or not account_data.get("coupon_fetch_success")
+        or not account_data.get("pcb_order_fetch_success")
+    ):
         return "数据不足", "开票或优惠券接口未完整返回"
-    within = safe_float(account_data.get("invoice_within_months_amount"), 0.0) or 0.0
-    over = safe_float(account_data.get("invoice_over_months_amount"), 0.0) or 0.0
-    if within <= 0 and over <= 0:
-        return "不可能", "可开票金额为 0，未检测到消费"
+    if account_data.get("invoice_profile_exists") is False:
+        return "不可能", "无开票资料，无法形成有效 PCB 消费证据"
+    total = safe_float(account_data.get("pcb_total_amount"), 0.0) or 0.0
+    if total < PCB_SPEND_THRESHOLD:
+        shortfall = round(max(0.0, PCB_SPEND_THRESHOLD - total), 2)
+        return "不可能", f"样板/小批量 PCB 累计消费 {total:g} 元，距离 40 元还差 {shortfall:g} 元"
     coupons = account_data.get("coupons") or {}
     if any(is_pcb_smt_coupon(item) for key in ("unused", "used") for item in coupons.get(key, [])):
-        return "很小可能", "未使用或已使用列表中出现过 PCB+SMT 优惠券"
+        return "很小可能", f"PCB 累计消费 {total:g} 元；未使用或已使用列表中出现过 PCB+SMT 优惠券"
     if any(is_pcb_smt_coupon(item) for item in coupons.get("expired", [])):
-        return "很大可能", "仅已过期列表中出现过 PCB+SMT 优惠券"
-    return "100%可能", "账号有消费，全部优惠券状态中未出现过 PCB+SMT 优惠券"
+        return "很大可能", f"PCB 累计消费 {total:g} 元；仅已过期列表中出现过 PCB+SMT 优惠券"
+    return "100%可能", f"PCB 累计消费 {total:g} 元，全部优惠券状态中未出现过 PCB+SMT 优惠券"
 
 
 def browser_fetch_json(page, method: str, url: str, payload=None, form_encoded: bool = False):
@@ -352,6 +421,50 @@ class AccountDataCollector:
             self.log(f"账号{self.account_index} - 会员中心 SSO 页面打开失败: {type(exc).__name__}")
             return False
 
+    def _fetch_pcb_orders(self, profile_responses: list[dict]) -> tuple[bool, float, float, int]:
+        company_name = find_first_value(profile_responses, {"vatCompanyName", "companyName", "invoiceTitle"})
+        organization = find_first_value(profile_responses, {"invoiceOrganization"})
+        today = date.today()
+        try:
+            begin = today.replace(year=today.year - 2)
+        except ValueError:
+            begin = today.replace(year=today.year - 2, day=28)
+        common = {
+            "orderBeginTime": begin.isoformat(),
+            "orderEndTime": today.isoformat(),
+            "businessOrderType": None,
+            "businessOrderCode": None,
+            "pageSize": 1000,
+            "vatCompanyName": company_name,
+            "invoiceOrganization": organization,
+            "invoiceType": "1",
+            "invoiceFlag": 1,
+            "subAccountIds": None,
+        }
+        totals = {}
+        order_count = 0
+        for time_mark in (1, 2):
+            page_number = 1
+            responses = []
+            while True:
+                response = self._request_with_retry(
+                    "POST",
+                    INVOICE_ORDERS_PATH,
+                    {**common, "timeMark": time_mark, "pageNum": page_number},
+                    f"PCB开票订单（分区{time_mark}第{page_number}页）",
+                )
+                if response is None:
+                    return False, 0.0, 0.0, 0
+                responses.append(response)
+                page = parse_invoice_order_page(response)
+                if page_number >= page["total_pages"]:
+                    break
+                page_number += 1
+            amount, count = sum_pcb_invoice_orders(responses)
+            totals[time_mark] = amount
+            order_count += count
+        return True, totals.get(1, 0.0), totals.get(2, 0.0), order_count
+
     def collect(self) -> dict:
         result = empty_account_data()
         environment_error = member_environment_error(self.base)
@@ -392,6 +505,19 @@ class AccountDataCollector:
                 "invoice_within_months_amount": parsed["within_amount"] if profile_exists else None,
                 "invoice_over_months_amount": parsed["over_amount"] if profile_exists else None,
             })
+            if profile_exists:
+                pcb_success, pcb_within, pcb_over, pcb_order_count = self._fetch_pcb_orders(profile_responses)
+                pcb_total = round(pcb_within + pcb_over, 2) if pcb_success else None
+                result.update({
+                    "pcb_order_fetch_success": pcb_success,
+                    "pcb_within_months_amount": pcb_within if pcb_success else None,
+                    "pcb_over_months_amount": pcb_over if pcb_success else None,
+                    "pcb_total_amount": pcb_total,
+                    "pcb_amount_shortfall": round(max(0.0, PCB_SPEND_THRESHOLD - pcb_total), 2) if pcb_total is not None else None,
+                    "pcb_order_count": pcb_order_count if pcb_success else 0,
+                })
+            else:
+                result["pcb_order_fetch_success"] = True
 
         coupon_success = True
         coupons = {"unused": [], "used": [], "expired": []}
@@ -413,7 +539,7 @@ class AccountDataCollector:
 
         result["coupons"] = coupons
         result["coupon_fetch_success"] = coupon_success
-        result["fetch_success"] = invoice_success and coupon_success
+        result["fetch_success"] = invoice_success and coupon_success and result["pcb_order_fetch_success"]
         result["coupon_prediction"], result["prediction_reason"] = predict_pcb_smt(result)
         if not result["fetch_success"]:
             result["error"] = "会员资料接口未完整返回"

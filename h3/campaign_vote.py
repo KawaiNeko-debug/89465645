@@ -10,11 +10,13 @@ VOTE_CAMPAIGN_PATH = "/portal/brand-campaign"
 VOTE_USER_INFO_PATH = "/api/integral/user/getUserInfo"
 VOTE_CONFIG_PATH = "/api/integral/member/day/activity/ns/selectVoteConfig"
 VOTE_SUBMIT_PATH = "/api/integral/member/day/activity/vote"
-VOTE_ACTIVITY_ACCESS_ID = os.getenv("VOTE_ACTIVITY_ACCESS_ID", "fc7534debba644c5a0d26af52651d16f")
-VOTE_PRODUCT_SKU = os.getenv("VOTE_PRODUCT_SKU", "SKUJY5")
-VOTE_PRODUCT_NAME = os.getenv("VOTE_PRODUCT_NAME", "京东京造户外露营车 石墨黑")
-VOTE_START_DATE = os.getenv("VOTE_START_DATE", "2026-07-29")
-VOTE_END_DATE = os.getenv("VOTE_END_DATE", "2026-07-31")
+ACTIVITY_CONFIG_PATH = "/api/integral/member/day/activity/ns/selectActivityConfigDetail"
+ACTIVITY_WINNING_PATH = "/api/integral/member/day/activity/selectMyWinning"
+VOTE_ACTIVITY_ACCESS_ID = os.getenv("VOTE_ACTIVITY_ACCESS_ID", "bf69c3403f094a52a787bfae528da7ea")
+VOTE_PRODUCT_SKU = os.getenv("VOTE_PRODUCT_SKU", "SKUJM7")
+VOTE_PRODUCT_NAME = os.getenv("VOTE_PRODUCT_NAME", "当妮香氛洗衣液 1.9kg*3瓶")
+VOTE_START_DATE = os.getenv("VOTE_START_DATE", "2026-08-11")
+VOTE_END_DATE = os.getenv("VOTE_END_DATE", "2026-08-31")
 
 
 def vote_environment_error(campaign_url=CAMPAIGN_URL, api_base=VOTE_API_BASE) -> str:
@@ -49,6 +51,58 @@ def truthy(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def safe_int(value, default=None):
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def _response_rows(value) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    for key in ("records", "list", "rows", "items", "dataList", "root"):
+        candidate = value.get(key)
+        if isinstance(candidate, list):
+            return [item for item in candidate if isinstance(item, dict)]
+    for key in ("data", "body", "result", "page"):
+        rows = _response_rows(value.get(key))
+        if rows:
+            return rows
+    return []
+
+
+def parse_lottery_winning_response(response) -> list[dict]:
+    rows = []
+    for item in _response_rows(response):
+        title = str(
+            item.get("prizeTitle")
+            or item.get("prizeName")
+            or item.get("awardName")
+            or item.get("goodsName")
+            or item.get("productName")
+            or ""
+        ).strip()
+        if not title:
+            continue
+        receive_status = safe_int(item.get("receiveStatus"), None)
+        claimed = truthy(item.get("claimed")) or receive_status in {2, 3, 6}
+        status_text = str(item.get("statusText") or item.get("receiveStatusText") or "").strip()
+        rows.append(
+            {
+                "title": title,
+                "claimed": claimed,
+                "status_text": status_text or ("已经领取" if claimed else "未领取"),
+                "expiry_date": str(item.get("expiryDate") or item.get("expireTime") or "").strip(),
+                "biz_order_code": str(item.get("bizOrderCode") or "").strip(),
+                "receive_status": receive_status,
+            }
+        )
+    return rows
+
+
 def date_part(value="") -> str:
     match = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
     return match.group(0) if match else ""
@@ -60,6 +114,20 @@ def is_vote_date(value, start_date=VOTE_START_DATE, end_date=VOTE_END_DATE) -> b
         return date.fromisoformat(start_date) <= date.fromisoformat(current) <= date.fromisoformat(end_date)
     except (TypeError, ValueError):
         return False
+
+
+def can_vote_after_sign(
+    sign_success,
+    *,
+    sign_skipped=False,
+    data_only_retry=False,
+    previous_sign_success=False,
+) -> bool:
+    return (
+        truthy(sign_success)
+        or truthy(sign_skipped)
+        or (truthy(data_only_retry) and truthy(previous_sign_success))
+    )
 
 
 def campaign_session_ready(response) -> bool:
