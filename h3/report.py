@@ -615,6 +615,9 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     sorted_records = sort_records(records)
     summary = build_summary(sorted_records, expected_total)
     problem_records = [record for record in sorted_records if is_problem_record(record)]
+    visible_problem_records = [
+        record for record in problem_records if not truthy(record.get("risk_controlled"))
+    ]
     category_label = str(os.getenv("SUMMARY_CATEGORY_LABEL") or "").strip()
 
     if category_label and not sorted_records and expected_total == 0:
@@ -622,9 +625,14 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
-    if problem_records:
+    if problem_records and not visible_problem_records:
         lines = ["NO❗今天出现问题了捏"]
-        for record in problem_records:
+        lines.extend(build_stats_lines(summary))
+        return "\n".join(lines), summary
+
+    if visible_problem_records:
+        lines = ["NO❗今天出现问题了捏"]
+        for record in visible_problem_records:
             lines.append(f"{record['username']}：{problem_reason(record)}❌")
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary

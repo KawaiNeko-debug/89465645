@@ -31,7 +31,7 @@ from h3.campaign_vote import (
 )
 from h3.dynamic_groups import configured_groups
 from h3.category_reports import main as category_reports_main
-from h3.report import is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
+from h3.report import build_message, is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
 from h3.test_report import prepare_manifest
 
 
@@ -548,6 +548,30 @@ class DynamicGroupTests(unittest.TestCase):
     def test_account_display_masks_everything_except_last_five(self):
         self.assertEqual(mask_account("1234567890A"), "******7890A")
         self.assertEqual(mask_account("8565A"), "8565A")
+
+    def test_risk_controlled_failure_has_no_account_detail_in_message(self):
+        record = normalize_record(
+            {
+                "account_index": 1,
+                "group_code": "test",
+                "account_category": "测试组",
+                "risk_controlled": True,
+                "sign_success": False,
+                "sign_status": "签到风控",
+                "detail_reason": "签到失败，疑似违反签到规则",
+                "points_fetch_success": True,
+                "activity_fetch_success": True,
+                "data_fetch_completed": True,
+                "account_data_required": False,
+                "vote_required": False,
+            },
+            {"task_start_date": "2026-08-26"},
+            {("test", 1): "1234567890A"},
+        )
+        message, _ = build_message([record], {"task_start_date": "2026-08-26"}, 1)
+        self.assertIn("总账号数", message)
+        self.assertNotIn("7890A", message)
+        self.assertNotIn("疑似违反签到规则", message)
 
     def test_test_group_lookup_is_limited_to_one_account(self):
         with patch.dict(
