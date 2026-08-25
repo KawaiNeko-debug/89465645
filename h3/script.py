@@ -83,7 +83,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-08-25-dynamic-groups-v1"
+SCRIPT_VERSION = "2026-08-25-test-report-vote-v2"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2773,13 +2773,14 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                 if VOTE_ENABLED:
                     vote_allowed = can_vote_after_sign(
                         success,
+                        sign_step_completed=not banned_account and not data_only_retry,
                         sign_skipped=skip_sign,
                         data_only_retry=data_only_retry,
                         previous_sign_success=previous_sign_success,
                     )
                     if client.vote_required and not vote_allowed:
-                        client.vote_status = '签到未成功，已跳过投票'
-                        client.vote_detail = '完整执行组必须先签到成功，未请求投票接口'
+                        client.vote_status = '签到步骤未执行，已跳过投票'
+                        client.vote_detail = '必须先完成签到步骤，未请求投票接口'
                         log(f"账号{account_index} - {client.vote_status}")
                     else:
                         client.execute_campaign_vote()

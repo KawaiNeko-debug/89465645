@@ -119,12 +119,14 @@ def is_vote_date(value, start_date=VOTE_START_DATE, end_date=VOTE_END_DATE) -> b
 def can_vote_after_sign(
     sign_success,
     *,
+    sign_step_completed=False,
     sign_skipped=False,
     data_only_retry=False,
     previous_sign_success=False,
 ) -> bool:
     return (
         truthy(sign_success)
+        or truthy(sign_step_completed)
         or truthy(sign_skipped)
         or (truthy(data_only_retry) and truthy(previous_sign_success))
     )

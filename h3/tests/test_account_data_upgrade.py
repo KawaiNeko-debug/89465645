@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from openpyxl import load_workbook
@@ -30,7 +31,8 @@ from h3.campaign_vote import (
 )
 from h3.dynamic_groups import configured_groups
 from h3.category_reports import main as category_reports_main
-from h3.report import is_problem_record, normalize_record, resolve_output_xlsx_path
+from h3.report import is_problem_record, load_account_lookup, normalize_record, resolve_output_xlsx_path
+from h3.test_report import prepare_manifest
 
 
 def lottery_rows(count: int) -> list[dict]:
@@ -454,8 +456,9 @@ class VoteTests(unittest.TestCase):
         self.assertTrue(is_vote_date("2026-08-31 23:59:59"))
         self.assertFalse(is_vote_date("2026-09-01"))
 
-    def test_full_groups_must_sign_successfully_before_vote(self):
+    def test_full_groups_vote_only_after_sign_step(self):
         self.assertFalse(can_vote_after_sign(False))
+        self.assertTrue(can_vote_after_sign(False, sign_step_completed=True))
         self.assertTrue(can_vote_after_sign(True))
         self.assertTrue(can_vote_after_sign(False, sign_skipped=True))
         self.assertTrue(
@@ -514,6 +517,36 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_test_group_lookup_is_limited_to_one_account(self):
+        with patch.dict(
+            os.environ,
+            {
+                "TEST": "first,password\nsecond,password",
+                "TEST_ACCOUNT_LIMIT": "1",
+            },
+            clear=False,
+        ):
+            lookup, total = load_account_lookup()
+        self.assertEqual(lookup[("test", 1)], "first")
+        self.assertNotIn(("test", 2), lookup)
+        self.assertGreaterEqual(total, 1)
+
+    def test_test_report_manifest_uses_merged_result_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            results_dir = os.path.join(temp_dir, "results")
+            os.makedirs(os.path.join(results_dir, "test"))
+            with open(os.path.join(results_dir, "test", "result.json"), "w", encoding="utf-8") as file:
+                json.dump(
+                    {
+                        "task_start_date": "2026-08-25",
+                        "results": [{"account_index": 1, "group_code": "test"}],
+                    },
+                    file,
+                )
+            manifest = prepare_manifest(Path(results_dir), "123")
+        self.assertEqual(manifest["groups"][0]["account_category"], "测试组")
+        self.assertEqual(manifest["groups"][0]["account_count"], 1)
+
     def test_group_detection_keeps_global_order_and_skips_gaps(self):
         values = {
             f"{prefix}{index}": ""
