@@ -15,6 +15,7 @@ The controller waited for every account group in one job. When the cumulative ru
 - The last group dispatches an independent summary workflow.
 - Summary downloads artifacts by exact run ID and continues when a group artifact is missing.
 - Report account placeholders are constrained by the frozen group list and account counts.
+- Chain state is transferred as Base64 JSON so shells and workflow inputs cannot strip JSON quotes.
 
 ## Validation
 

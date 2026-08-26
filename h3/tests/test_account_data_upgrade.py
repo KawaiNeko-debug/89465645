@@ -38,6 +38,8 @@ from h3.dynamic_groups import (
     dispatch_once,
     download_groups,
     new_chain_state,
+    encode_chain_state,
+    load_chain_state,
 )
 from h3.category_reports import main as category_reports_main
 from h3.report import build_message, is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
@@ -554,6 +556,18 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_chain_state_base64_round_trip(self):
+        state = {
+            "schema_version": 1,
+            "orchestration_id": "123",
+            "task_start_date": "2026-08-26",
+            "ref": "main",
+            "groups": [{"group_code": "ll3", "account_category": "同行不签到组", "account_count": 234}],
+        }
+        encoded = encode_chain_state(state)
+        self.assertNotIn("{", encoded)
+        self.assertEqual(load_chain_state(encoded), state)
+
     def test_start_chain_dispatches_only_first_group_or_summary_when_empty(self):
         values = {
             f"{prefix}{index}": ""

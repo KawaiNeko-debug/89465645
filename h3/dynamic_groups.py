@@ -1,4 +1,5 @@
 import argparse
+import base64
 import io
 import json
 import os
@@ -59,7 +60,17 @@ def compact_json(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def encode_chain_state(payload: dict) -> str:
+    return base64.b64encode(compact_json(payload).encode("utf-8")).decode("ascii")
+
+
 def load_chain_state(raw: str) -> dict:
+    raw = str(raw or "").strip()
+    if raw and not raw.startswith("{"):
+        try:
+            raw = base64.b64decode(raw, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("chain_state is neither JSON nor valid Base64 JSON") from exc
     try:
         state = json.loads(raw)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -189,7 +200,7 @@ def dispatch_group(state: dict, group_code: str) -> dict:
             "group_code": group_code,
             "task_start_date": str(state.get("task_start_date") or ""),
             "continue_chain": "true",
-            "chain_state": compact_json(state),
+            "chain_state": encode_chain_state(state),
         },
     )
 
@@ -205,7 +216,7 @@ def dispatch_summary(state: dict) -> dict:
         ref,
         SUMMARY_WORKFLOW_FILE,
         title,
-        {"orchestration_id": orchestration_id, "chain_state": compact_json(state)},
+        {"orchestration_id": orchestration_id, "chain_state": encode_chain_state(state)},
     )
 
 
