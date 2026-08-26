@@ -3,6 +3,9 @@ import os
 import sys
 import tempfile
 import unittest
+import io
+import zipfile
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +32,13 @@ from h3.campaign_vote import (
     is_vote_date,
     parse_lottery_winning_response,
 )
-from h3.dynamic_groups import configured_groups
+from h3.dynamic_groups import (
+    compact_json,
+    configured_groups,
+    dispatch_once,
+    download_groups,
+    new_chain_state,
+)
 from h3.category_reports import main as category_reports_main
 from h3.report import build_message, is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
 from h3.test_report import prepare_manifest
@@ -545,6 +554,167 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_start_chain_dispatches_only_first_group_or_summary_when_empty(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        values.update({"old2": "a,p", "new1": "b,p"})
+        from h3.dynamic_groups import start_chain
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, values, clear=False), patch(
+            "h3.dynamic_groups.dispatch_group"
+        ) as first_group, patch("h3.dynamic_groups.dispatch_summary") as summary:
+            args = SimpleNamespace(
+                orchestration_id="123",
+                ref="main",
+                task_start_date="2026-08-26",
+                output=os.path.join(temp_dir, "state.json"),
+            )
+            self.assertEqual(start_chain(args), 0)
+            first_group.assert_called_once()
+            self.assertEqual(first_group.call_args.args[1], "old2")
+            summary.assert_not_called()
+
+        empty_values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, empty_values, clear=False), patch(
+            "h3.dynamic_groups.dispatch_group"
+        ) as first_group, patch("h3.dynamic_groups.dispatch_summary") as summary:
+            args.output = os.path.join(temp_dir, "state.json")
+            self.assertEqual(start_chain(args), 0)
+            first_group.assert_not_called()
+            summary.assert_called_once()
+
+    def test_eighty_group_chain_state_stays_within_dispatch_input_limit(self):
+        values = {
+            f"{prefix}{index}": "account,password"
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        with patch.dict(os.environ, values, clear=False):
+            state = new_chain_state("123", "main", "2026-08-26")
+        self.assertEqual(len(state["groups"]), 80)
+        self.assertLess(len(compact_json(state).encode("utf-8")), 65535)
+
+    def test_existing_run_prevents_duplicate_dispatch(self):
+        existing = {"id": 987, "display_title": "group-123-old1"}
+        with patch("h3.dynamic_groups.existing_run", return_value=existing), patch(
+            "h3.dynamic_groups.api_request"
+        ) as api:
+            result = dispatch_once(
+                "owner/repo",
+                "token",
+                "main",
+                "dynamic-group.yml",
+                "group-123-old1",
+                {"group_code": "old1"},
+            )
+        self.assertEqual(result, {"status": "existing", "run_id": 987})
+        api.assert_not_called()
+
+    def test_chain_freezes_configured_groups_and_advances_once(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        values.update({"old2": "a,p", "new1": "b,p", "zh3": "c,p"})
+        with patch.dict(os.environ, values, clear=False):
+            state = new_chain_state("123", "main", "2026-08-26")
+        self.assertEqual([item["group_code"] for item in state["groups"]], ["old2", "new1", "zh3"])
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "h3.dynamic_groups.dispatch_group"
+        ) as next_group, patch("h3.dynamic_groups.dispatch_summary") as summary:
+            output = os.path.join(temp_dir, "state.json")
+            args = SimpleNamespace(
+                chain_state=json.dumps(state, ensure_ascii=False),
+                chain_state_env="",
+                current_group="old2",
+                current_run_id=456,
+                current_result="",
+                output=output,
+            )
+            from h3.dynamic_groups import advance_chain
+
+            self.assertEqual(advance_chain(args), 0)
+            next_group.assert_called_once()
+            self.assertEqual(next_group.call_args.args[1], "new1")
+            summary.assert_not_called()
+
+    def test_chain_last_group_dispatches_summary_and_preserves_run_ids(self):
+        state = {
+            "schema_version": 1,
+            "orchestration_id": "123",
+            "task_start_date": "2026-08-26",
+            "ref": "main",
+            "groups": [
+                {"group_code": "old1", "account_category": "老号全干组", "account_count": 1, "run_id": 111},
+                {"group_code": "new1", "account_category": "新号全干组", "account_count": 1, "run_id": 0},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, patch("h3.dynamic_groups.dispatch_summary") as summary:
+            args = SimpleNamespace(
+                chain_state=json.dumps(state, ensure_ascii=False),
+                chain_state_env="",
+                current_group="new1",
+                current_run_id=222,
+                current_result="",
+                output=os.path.join(temp_dir, "state.json"),
+            )
+            from h3.dynamic_groups import advance_chain
+
+            self.assertEqual(advance_chain(args), 0)
+            summary.assert_called_once()
+            updated = json.loads(Path(args.output).read_text(encoding="utf-8"))
+            self.assertEqual(updated["groups"][0]["run_id"], 111)
+            self.assertEqual(updated["groups"][1]["run_id"], 222)
+
+    def test_download_uses_only_manifest_run_ids_and_keeps_missing_artifact(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("result.json", json.dumps({"group_code": "old1", "results": []}))
+        responses = {
+            "/actions/runs/111": {"status": "completed", "conclusion": "success", "html_url": "run-url"},
+            "/actions/runs/111/artifacts": {"artifacts": [{"id": 9, "name": "group-result-123-old1", "expired": False}]},
+            "/actions/runs/222": {"status": "completed", "conclusion": "failure", "html_url": "run-url-2"},
+            "/actions/runs/222/artifacts": {"artifacts": []},
+        }
+        state = {
+            "schema_version": 1,
+            "orchestration_id": "123",
+            "task_start_date": "2026-08-26",
+            "ref": "main",
+            "groups": [
+                {"group_code": "old1", "account_category": "老号全干组", "account_count": 1, "run_id": 111},
+                {"group_code": "new1", "account_category": "新号全干组", "account_count": 1, "run_id": 222},
+            ],
+        }
+
+        def fake_api(method, repo, token, path, **kwargs):
+            if path == "/actions/artifacts/9/zip":
+                return archive.getvalue()
+            return responses[path]
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            os.environ,
+            {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_TOKEN": "token", "GITHUB_API_URL": "https://api.example"},
+            clear=False,
+        ), patch("h3.dynamic_groups.api_request", side_effect=fake_api):
+            args = SimpleNamespace(
+                chain_state=json.dumps(state, ensure_ascii=False),
+                chain_state_env="",
+                output_dir=temp_dir,
+            )
+            self.assertEqual(download_groups(args), 0)
+            manifest = json.loads(Path(temp_dir, "manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(manifest["groups"][0]["artifact_downloaded"])
+            self.assertEqual(manifest["groups"][1]["artifact_error"], "exact group artifact not found")
+
     def test_account_display_masks_everything_except_last_five(self):
         self.assertEqual(mask_account("1234567890A"), "******7890A")
         self.assertEqual(mask_account("8565A"), "8565A")
@@ -586,6 +756,20 @@ class DynamicGroupTests(unittest.TestCase):
         self.assertEqual(lookup[("test", 1)], "first")
         self.assertNotIn(("test", 2), lookup)
         self.assertGreaterEqual(total, 1)
+
+    def test_empty_frozen_group_list_does_not_read_later_secrets(self):
+        with patch.dict(
+            os.environ,
+            {
+                "old1": "late-account,password",
+                "REPORT_GROUP_FILTER_ACTIVE": "true",
+                "REPORT_GROUP_CODES": "",
+                "REPORT_GROUP_LIMITS": "{}",
+            },
+            clear=False,
+        ):
+            lookup, total = load_account_lookup()
+        self.assertNotIn(("old1", 1), lookup)
 
     def test_test_report_manifest_uses_merged_result_count(self):
         with tempfile.TemporaryDirectory() as temp_dir:

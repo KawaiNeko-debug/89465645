@@ -1,11 +1,16 @@
-name: dynamic-controller
+name: dynamic-summary
 
-run-name: dynamic-controller-${{ github.run_id }}
+run-name: dynamic-summary-${{ inputs.orchestration_id }}
 
 on:
-  schedule:
-    - cron: "0 1 * * *"
   workflow_dispatch:
+    inputs:
+      orchestration_id:
+        required: true
+        type: string
+      chain_state:
+        required: true
+        type: string
 
 env:
   TZ: Asia/Shanghai
@@ -93,25 +98,40 @@ env:
 
 permissions:
   contents: read
-  actions: write
+  actions: read
 
 jobs:
-  start-chain:
+  summarize:
     runs-on: ubuntu-22.04
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      CHAIN_STATE: ${{ inputs.chain_state }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      NOTIFY_CHANNELS: telegram
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - name: Install dispatcher dependency
-        run: python -m pip install --timeout 60 --retries 3 requests
-      - name: Dispatch first configured group
+          cache: pip
+          cache-dependency-path: h3/requirements.txt
+      - name: Install report dependencies
+        run: python -m pip install --timeout 60 --retries 3 requests openpyxl
+      - name: Download exact group artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
-        run: >-
-          python h3/dynamic_groups.py start
-          --orchestration-id "${{ github.run_id }}"
-          --ref "${{ github.ref_name }}"
-          --output chain-state.json
+        run: python h3/dynamic_groups.py download --chain-state-env CHAIN_STATE --output-dir results
+      - name: Generate and send category reports
+        run: python h3/category_reports.py results
+      - name: Upload category reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: category-reports-${{ inputs.orchestration_id }}
+          path: |
+            results/manifest.json
+            results/*.xlsx
+          if-no-files-found: warn
+          retention-days: 3

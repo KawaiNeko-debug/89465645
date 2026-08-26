@@ -16,12 +16,23 @@ def main() -> int:
     results_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
     manifest = json.loads((results_dir / "manifest.json").read_text(encoding="utf-8"))
     task_date = str(manifest.get("task_start_date") or "").strip()
+    group_codes = ",".join(
+        str(group.get("group_code") or "").strip().lower()
+        for group in manifest.get("groups", [])
+        if str(group.get("group_code") or "").strip()
+    )
+    group_limits = {
+        str(group.get("group_code") or "").strip().lower(): int(group.get("account_count") or 0)
+        for group in manifest.get("groups", [])
+        if str(group.get("group_code") or "").strip()
+    }
     counts = {category: 0 for category, _ in CATEGORIES}
     for group in manifest.get("groups", []):
         category = str(group.get("account_category") or "")
         if category in counts:
             counts[category] += int(group.get("account_count") or 0)
 
+    failures = []
     for category, filename_label in CATEGORIES:
         env = os.environ.copy()
         env.update(
@@ -33,10 +44,20 @@ def main() -> int:
                 "GENERATE_XLSX": "true",
                 "TELEGRAM_SEND_TEXT": "true",
                 "TELEGRAM_SEND_XLSX": "true",
+                "REPORT_GROUP_CODES": group_codes,
+                "REPORT_GROUP_FILTER_ACTIVE": "true",
+                "REPORT_GROUP_LIMITS": json.dumps(group_limits, ensure_ascii=False),
             }
         )
-        subprocess.run([sys.executable, str(Path(__file__).with_name("report.py")), str(results_dir)], env=env, check=True)
-    return 0
+        completed = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("report.py")), str(results_dir)],
+            env=env,
+            check=False,
+        )
+        if completed.returncode:
+            failures.append(category)
+            print(f"::error::{category} report failed with exit code {completed.returncode}", flush=True)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

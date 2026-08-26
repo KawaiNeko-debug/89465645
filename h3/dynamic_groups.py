@@ -13,7 +13,9 @@ import requests
 
 GROUP_PREFIXES = ("old", "new", "ll", "zh")
 GROUP_CODES = [f"{prefix}{index}" for prefix in GROUP_PREFIXES for index in range(1, 21)]
-WORKFLOW_FILE = "dynamic-group.yml"
+GROUP_WORKFLOW_FILE = "dynamic-group.yml"
+SUMMARY_WORKFLOW_FILE = "dynamic-summary.yml"
+DISPATCH_ATTEMPTS = 3
 
 
 def category_for(code: str) -> str:
@@ -35,8 +37,57 @@ def configured_groups() -> list[dict]:
     for code in GROUP_CODES:
         count = account_count(os.getenv(code, ""))
         if count:
-            groups.append({"group_code": code, "account_category": category_for(code), "account_count": count})
+            groups.append(
+                {
+                    "group_code": code,
+                    "account_category": category_for(code),
+                    "account_count": count,
+                    "run_id": 0,
+                    "handoff_status": "pending",
+                }
+            )
     return groups
+
+
+def write_json(path: str | Path, payload: dict):
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def compact_json(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_chain_state(raw: str) -> dict:
+    try:
+        state = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("chain_state is not valid JSON") from exc
+    if not isinstance(state, dict) or not str(state.get("orchestration_id") or "").strip():
+        raise ValueError("chain_state has no orchestration_id")
+    groups = state.get("groups")
+    if not isinstance(groups, list):
+        raise ValueError("chain_state groups must be a list")
+    seen = set()
+    for group in groups:
+        code = str(group.get("group_code") or "").strip().lower() if isinstance(group, dict) else ""
+        if code not in GROUP_CODES or code in seen:
+            raise ValueError(f"invalid or duplicate group code: {code}")
+        seen.add(code)
+    return state
+
+
+def new_chain_state(orchestration_id: str, ref: str, task_start_date: str = "") -> dict:
+    task_date = task_start_date or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    return {
+        "schema_version": 1,
+        "orchestration_id": str(orchestration_id),
+        "task_start_date": task_date,
+        "ref": ref or "main",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "groups": configured_groups(),
+    }
 
 
 def api_request(method: str, repo: str, token: str, path: str, *, params=None, payload=None, raw=False):
@@ -62,8 +113,8 @@ def api_request(method: str, repo: str, token: str, path: str, *, params=None, p
     return response.json() if response.content else {}
 
 
-def workflow_runs(repo: str, token: str, ref: str) -> list[dict]:
-    encoded = quote(WORKFLOW_FILE, safe="")
+def workflow_runs(repo: str, token: str, ref: str, workflow_file: str) -> list[dict]:
+    encoded = quote(workflow_file, safe="")
     data = api_request(
         "GET",
         repo,
@@ -74,86 +125,130 @@ def workflow_runs(repo: str, token: str, ref: str) -> list[dict]:
     return data.get("workflow_runs", [])
 
 
-def dispatch(repo: str, token: str, ref: str, orchestration_id: str, group_code: str, task_date: str):
-    encoded = quote(WORKFLOW_FILE, safe="")
-    api_request(
-        "POST",
+def existing_run(repo: str, token: str, ref: str, workflow_file: str, title: str) -> dict | None:
+    matches = [
+        run
+        for run in workflow_runs(repo, token, ref, workflow_file)
+        if str(run.get("display_title") or "") == title
+    ]
+    return min(matches, key=lambda item: int(item.get("id") or 0)) if matches else None
+
+
+def dispatch_once(repo: str, token: str, ref: str, workflow_file: str, title: str, inputs: dict) -> dict:
+    existing = existing_run(repo, token, ref, workflow_file, title)
+    if existing:
+        print(f"[handoff] already exists: {title} (run {existing.get('id')})", flush=True)
+        return {"status": "existing", "run_id": int(existing.get("id") or 0)}
+
+    encoded = quote(workflow_file, safe="")
+    last_error = None
+    for attempt in range(1, DISPATCH_ATTEMPTS + 1):
+        try:
+            api_request(
+                "POST",
+                repo,
+                token,
+                f"/actions/workflows/{encoded}/dispatches",
+                payload={"ref": ref, "inputs": inputs},
+            )
+            print(f"[handoff] dispatched: {title}", flush=True)
+            return {"status": "dispatched", "run_id": 0}
+        except Exception as exc:
+            last_error = exc
+            print(f"[handoff] dispatch attempt {attempt}/{DISPATCH_ATTEMPTS} failed: {exc}", flush=True)
+            for _ in range(10):
+                time.sleep(2)
+                existing = existing_run(repo, token, ref, workflow_file, title)
+                if existing:
+                    print(f"[handoff] dispatch confirmed: {title} (run {existing.get('id')})", flush=True)
+                    return {"status": "existing", "run_id": int(existing.get("id") or 0)}
+            if attempt < DISPATCH_ATTEMPTS:
+                time.sleep(attempt * 2)
+    raise RuntimeError(f"failed to dispatch {title} after {DISPATCH_ATTEMPTS} attempts") from last_error
+
+
+def github_context() -> tuple[str, str]:
+    repo = os.environ["GITHUB_REPOSITORY"]
+    token = os.environ.get("GITHUB_TOKEN") or os.environ["GH_TOKEN"]
+    return repo, token
+
+
+def dispatch_group(state: dict, group_code: str) -> dict:
+    repo, token = github_context()
+    orchestration_id = str(state["orchestration_id"])
+    ref = str(state.get("ref") or os.getenv("GITHUB_REF_NAME") or "main")
+    title = f"group-{orchestration_id}-{group_code}"
+    return dispatch_once(
         repo,
         token,
-        f"/actions/workflows/{encoded}/dispatches",
-        payload={
-            "ref": ref,
-            "inputs": {
-                "orchestration_id": orchestration_id,
-                "group_code": group_code,
-                "task_start_date": task_date,
-            },
+        ref,
+        GROUP_WORKFLOW_FILE,
+        title,
+        {
+            "orchestration_id": orchestration_id,
+            "group_code": group_code,
+            "task_start_date": str(state.get("task_start_date") or ""),
+            "continue_chain": "true",
+            "chain_state": compact_json(state),
         },
     )
 
 
-def wait_for_run(repo: str, token: str, ref: str, title: str, known_ids: set[int]) -> dict:
-    deadline = time.monotonic() + int(os.getenv("ORCHESTRATION_DISCOVERY_TIMEOUT_SECONDS", "240"))
-    while time.monotonic() < deadline:
-        candidates = [
-            run for run in workflow_runs(repo, token, ref)
-            if int(run.get("id") or 0) not in known_ids and str(run.get("display_title") or "") == title
-        ]
-        if candidates:
-            return max(candidates, key=lambda item: int(item.get("id") or 0))
-        time.sleep(10)
-    raise TimeoutError(f"timed out discovering {title}")
+def dispatch_summary(state: dict) -> dict:
+    repo, token = github_context()
+    orchestration_id = str(state["orchestration_id"])
+    ref = str(state.get("ref") or os.getenv("GITHUB_REF_NAME") or "main")
+    title = f"dynamic-summary-{orchestration_id}"
+    return dispatch_once(
+        repo,
+        token,
+        ref,
+        SUMMARY_WORKFLOW_FILE,
+        title,
+        {"orchestration_id": orchestration_id, "chain_state": compact_json(state)},
+    )
 
 
-def wait_for_completion(repo: str, token: str, run_id: int) -> dict:
-    deadline = time.monotonic() + int(os.getenv("ORCHESTRATION_GROUP_TIMEOUT_SECONDS", "7200"))
-    while time.monotonic() < deadline:
-        run = api_request("GET", repo, token, f"/actions/runs/{run_id}")
-        if run.get("status") == "completed":
-            return run
-        time.sleep(15)
-    raise TimeoutError(f"timed out waiting for run {run_id}")
+def start_chain(args) -> int:
+    state = new_chain_state(args.orchestration_id, args.ref, args.task_start_date)
+    write_json(args.output, state)
+    groups = state["groups"]
+    if groups:
+        dispatch_group(state, groups[0]["group_code"])
+    else:
+        dispatch_summary(state)
+    print(f"[handoff] chain started with {len(groups)} configured groups", flush=True)
+    return 0
 
 
-def write_json(path: str | Path, payload: dict):
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def run_groups(args) -> int:
-    repo = os.environ["GITHUB_REPOSITORY"]
-    token = os.environ.get("GITHUB_TOKEN") or os.environ["GH_TOKEN"]
-    groups = configured_groups()
-    if not groups:
-        print("no configured account groups", flush=True)
-    task_date = args.task_start_date or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    manifest = {
-        "orchestration_id": args.orchestration_id,
-        "task_start_date": task_date,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "groups": [],
-    }
-    write_json(args.output, manifest)
-    for group in groups:
-        record = dict(group)
+def advance_chain(args) -> int:
+    raw = os.environ.get(args.chain_state_env, "") if args.chain_state_env else args.chain_state
+    state = load_chain_state(raw)
+    current_code = args.current_group.strip().lower()
+    current_index = next(
+        (index for index, group in enumerate(state["groups"]) if group["group_code"] == current_code),
+        None,
+    )
+    if current_index is None:
+        raise ValueError(f"current group is not present in chain_state: {current_code}")
+    state["groups"][current_index]["run_id"] = int(args.current_run_id)
+    if args.current_result:
         try:
-            known_ids = {int(run.get("id") or 0) for run in workflow_runs(repo, token, args.ref)}
-            dispatch(repo, token, args.ref, args.orchestration_id, group["group_code"], task_date)
-            title = f"group-{args.orchestration_id}-{group['group_code']}"
-            run = wait_for_run(repo, token, args.ref, title, known_ids)
-            record["run_id"] = int(run["id"])
-            completed = wait_for_completion(repo, token, record["run_id"])
-            record["conclusion"] = completed.get("conclusion")
-            record["run_url"] = completed.get("html_url", "")
-            print(f"{group['group_code']}: {record['conclusion']} (run {record['run_id']})", flush=True)
-        except Exception as exc:
-            record.update({"conclusion": "failure", "error": str(exc)})
-            print(f"::error::{group['group_code']}: {exc}", flush=True)
-        manifest["groups"].append(record)
-        write_json(args.output, manifest)
-    manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
-    write_json(args.output, manifest)
+            result_payload = json.loads(Path(args.current_result).read_text(encoding="utf-8"))
+            result_count = int(result_payload.get("total_accounts") or len(result_payload.get("results") or []))
+            state["groups"][current_index]["account_count"] = max(0, result_count)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print(f"::warning::could not read current group account count: {exc}", flush=True)
+    state["groups"][current_index]["handoff_status"] = "finalized"
+    state["groups"][current_index]["finalized_at"] = datetime.now(timezone.utc).isoformat()
+    write_json(args.output, state)
+
+    if current_index + 1 < len(state["groups"]):
+        dispatch_group(state, state["groups"][current_index + 1]["group_code"])
+    else:
+        state["completed_at"] = datetime.now(timezone.utc).isoformat()
+        write_json(args.output, state)
+        dispatch_summary(state)
     return 0
 
 
@@ -169,26 +264,41 @@ def safe_extract(content: bytes, target: Path):
 
 
 def download_groups(args) -> int:
-    repo = os.environ["GITHUB_REPOSITORY"]
-    token = os.environ.get("GITHUB_TOKEN") or os.environ["GH_TOKEN"]
-    manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    repo, token = github_context()
+    raw = os.environ.get(args.chain_state_env, "") if args.chain_state_env else args.chain_state
+    manifest = load_chain_state(raw)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    for group in manifest.get("groups", []):
+    orchestration_id = str(manifest["orchestration_id"])
+
+    for group in manifest["groups"]:
         run_id = int(group.get("run_id") or 0)
+        group["artifact_downloaded"] = False
         if not run_id:
+            group["artifact_error"] = "group run id is missing"
             continue
-        data = api_request("GET", repo, token, f"/actions/runs/{run_id}/artifacts", params={"per_page": 100})
-        expected = f"group-result-{manifest['orchestration_id']}-{group['group_code']}"
-        artifact = next(
-            (item for item in data.get("artifacts", []) if item.get("name") == expected and not item.get("expired")),
-            None,
-        )
-        if not artifact:
-            group["artifact_error"] = "exact run artifact not found"
-            continue
-        content = api_request("GET", repo, token, f"/actions/artifacts/{artifact['id']}/zip", raw=True)
-        safe_extract(content, output / group["group_code"])
+        try:
+            run = api_request("GET", repo, token, f"/actions/runs/{run_id}")
+            group["run_status"] = str(run.get("status") or "")
+            group["conclusion"] = str(run.get("conclusion") or "")
+            group["run_url"] = str(run.get("html_url") or "")
+            data = api_request("GET", repo, token, f"/actions/runs/{run_id}/artifacts", params={"per_page": 100})
+            expected = f"group-result-{orchestration_id}-{group['group_code']}"
+            artifact = next(
+                (item for item in data.get("artifacts", []) if item.get("name") == expected and not item.get("expired")),
+                None,
+            )
+            if not artifact:
+                raise FileNotFoundError("exact group artifact not found")
+            content = api_request("GET", repo, token, f"/actions/artifacts/{artifact['id']}/zip", raw=True)
+            safe_extract(content, output / group["group_code"])
+            group["artifact_downloaded"] = True
+            group.pop("artifact_error", None)
+        except Exception as exc:
+            group["artifact_error"] = str(exc)
+            print(f"::warning::{group['group_code']}: {exc}", flush=True)
+
+    manifest["summary_downloaded_at"] = datetime.now(timezone.utc).isoformat()
     write_json(output / "manifest.json", manifest)
     return 0
 
@@ -196,16 +306,32 @@ def download_groups(args) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
-    run = subparsers.add_parser("run")
-    run.add_argument("--ref", default=os.getenv("GITHUB_REF_NAME") or "main")
-    run.add_argument("--orchestration-id", required=True)
-    run.add_argument("--task-start-date", default="")
-    run.add_argument("--output", default="orchestration.json")
+
+    start = subparsers.add_parser("start")
+    start.add_argument("--ref", default=os.getenv("GITHUB_REF_NAME") or "main")
+    start.add_argument("--orchestration-id", required=True)
+    start.add_argument("--task-start-date", default="")
+    start.add_argument("--output", default="chain-state.json")
+
+    advance = subparsers.add_parser("advance")
+    advance.add_argument("--chain-state", default="")
+    advance.add_argument("--chain-state-env", default="")
+    advance.add_argument("--current-group", required=True)
+    advance.add_argument("--current-run-id", required=True, type=int)
+    advance.add_argument("--current-result", default="")
+    advance.add_argument("--output", default="chain-state.json")
+
     download = subparsers.add_parser("download")
-    download.add_argument("--manifest", default="orchestration.json")
+    download.add_argument("--chain-state", default="")
+    download.add_argument("--chain-state-env", default="")
     download.add_argument("--output-dir", default="results")
+
     args = parser.parse_args()
-    return run_groups(args) if args.command == "run" else download_groups(args)
+    if args.command == "start":
+        return start_chain(args)
+    if args.command == "advance":
+        return advance_chain(args)
+    return download_groups(args)
 
 
 if __name__ == "__main__":

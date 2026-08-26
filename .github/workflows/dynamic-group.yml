@@ -14,6 +14,14 @@ on:
       task_start_date:
         required: true
         type: string
+      continue_chain:
+        required: false
+        default: "false"
+        type: string
+      chain_state:
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       orchestration_id:
@@ -24,6 +32,14 @@ on:
         type: string
       task_start_date:
         required: false
+        type: string
+      continue_chain:
+        required: false
+        default: "false"
+        type: string
+      chain_state:
+        required: false
+        default: ""
         type: string
 
 env:
@@ -113,6 +129,7 @@ env:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   prepare:
@@ -242,14 +259,35 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dispatcher dependency
+        run: python -m pip install --timeout 60 --retries 3 requests
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           pattern: account-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-*
           path: account-results
       - name: Merge group results
+        if: always()
         run: python h3/merge_results.py account-results merged/result.json
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: group-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}
           path: merged/result.json
           retention-days: 2
+      - name: Continue account group chain
+        if: ${{ always() && inputs.continue_chain == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          CHAIN_STATE: ${{ inputs.chain_state }}
+        run: >-
+          python h3/dynamic_groups.py advance
+          --chain-state-env CHAIN_STATE
+          --current-group "${{ inputs.group_code }}"
+          --current-run-id "${{ github.run_id }}"
+          --current-result merged/result.json
+          --output chain-state.json

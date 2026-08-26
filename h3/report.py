@@ -107,16 +107,36 @@ def mask_account(account: object) -> str:
 def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
     lookup = {}
     total = 0
+    group_filter_active = truthy(os.getenv("REPORT_GROUP_FILTER_ACTIVE"))
+    requested_codes = {
+        item.strip().lower()
+        for item in str(os.getenv("REPORT_GROUP_CODES") or "").split(",")
+        if item.strip()
+    }
+    try:
+        requested_limits = {
+            str(key).strip().lower(): max(0, safe_int(value, 0))
+            for key, value in json.loads(os.getenv("REPORT_GROUP_LIMITS") or "{}").items()
+        }
+    except (AttributeError, json.JSONDecodeError):
+        requested_limits = {}
     for prefix in ("old", "new", "ll", "zh"):
         for slot in range(1, 21):
             group_code = f"{prefix}{slot}"
+            if group_filter_active and group_code not in requested_codes:
+                continue
             raw = os.getenv(group_code) or ""
-            for account_index, line in enumerate(
-                (line.strip() for line in raw.splitlines() if line.strip() and "," in line),
-                start=1,
-            ):
+            lines = [line.strip() for line in raw.splitlines() if line.strip() and "," in line]
+            limit = requested_limits.get(group_code)
+            if limit is not None:
+                lines = lines[:limit]
+            for account_index, line in enumerate(lines, start=1):
                 lookup[(group_code, account_index)] = line.split(",", 1)[0].strip()
                 total += 1
+            if limit is not None:
+                for account_index in range(len(lines) + 1, limit + 1):
+                    lookup[(group_code, account_index)] = "*****"
+                    total += 1
     raw_test = os.getenv("test") or os.getenv("TEST") or ""
     test_lines = [line.strip() for line in raw_test.splitlines() if line.strip() and "," in line]
     test_limit = max(0, safe_int(os.getenv("TEST_ACCOUNT_LIMIT"), 0))
