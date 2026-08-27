@@ -1101,10 +1101,11 @@ class DynamicGroupTests(unittest.TestCase):
         self.assertEqual(merged["account_data"]["coupons"]["unused"][0]["name"], "fixture")
 
     def test_zero_runner_recovery_only_allows_first_attempt(self):
-        run = {"run_attempt": 1, "status": "completed"}
+        run = {"run_attempt": 1, "status": "completed", "conclusion": "failure"}
         jobs = [{"runner_id": 0, "steps": []}, {"runner_id": 0, "steps": []}]
         self.assertTrue(should_rerun(run, jobs))
         self.assertFalse(should_rerun({**run, "run_attempt": 2}, jobs))
+        self.assertFalse(should_rerun({**run, "conclusion": "cancelled"}, jobs))
         self.assertFalse(should_rerun(run, [{"runner_id": 7, "steps": []}]))
         self.assertFalse(
             should_rerun(run, [{"runner_id": 0, "steps": [{"status": "completed", "conclusion": "success"}]}])

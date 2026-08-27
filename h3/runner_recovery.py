@@ -11,6 +11,8 @@ def should_rerun(run: dict, jobs: list[dict]) -> bool:
         return False
     if str(run.get("status") or "") != "completed":
         return False
+    if str(run.get("conclusion") or "") != "failure":
+        return False
     if not jobs:
         return False
     for job in jobs:
