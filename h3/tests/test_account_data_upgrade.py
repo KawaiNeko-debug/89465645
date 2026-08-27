@@ -29,6 +29,7 @@ from h3.retry_components import build_retry_matrix, component_status, retry_comp
 from h3.runner_recovery import should_rerun
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
 from h3.campaign_vote import (
+    activity_config_payload,
     can_vote_after_sign,
     inspect_vote_config,
     is_vote_date,
@@ -114,6 +115,13 @@ def record(index: int, lottery_count: int, account_data=None) -> dict:
 
 
 class DynamicLotteryTests(unittest.TestCase):
+    def test_activity_config_request_never_uses_an_empty_payload(self):
+        self.assertEqual(
+            activity_config_payload(" campaign-id "),
+            {"activityAccessId": "campaign-id"},
+        )
+        self.assertEqual(activity_config_payload(""), {})
+
     def test_normalization_never_truncates_supported_counts(self):
         for count in (0, 1, 3, 5, 8, 15):
             with self.subTest(count=count):

@@ -30,6 +30,7 @@ try:
         VOTE_START_DATE,
         VOTE_SUBMIT_PATH,
         VOTE_USER_INFO_PATH,
+        activity_config_payload,
         campaign_session_ready,
         can_vote_after_sign,
         inspect_vote_config,
@@ -52,6 +53,7 @@ except ImportError:
         VOTE_START_DATE,
         VOTE_SUBMIT_PATH,
         VOTE_USER_INFO_PATH,
+        activity_config_payload,
         campaign_session_ready,
         can_vote_after_sign,
         inspect_vote_config,
@@ -87,7 +89,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-08-27-component-retry-v1"
+SCRIPT_VERSION = "2026-08-27-activity-config-v2"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1491,22 +1493,25 @@ class ApiClient:
     def fetch_member_day_activity_config(self) -> dict:
         if not self.ensure_campaign_session():
             return {}
-        for payload in ({}, {"activityAccessId": self.activity_access_id}):
-            data = self._browser_fetch_json_once(
-                "POST",
-                f"{VOTE_API_BASE}{ACTIVITY_CONFIG_PATH}",
-                payload=payload,
-                tag="盛夏活动配置",
-                dump_body_on_error=True,
-                dump_json_on_success_false=False,
+        payload = activity_config_payload(self.activity_access_id)
+        if not payload:
+            log(f"账号{self.account_index} - 盛夏活动配置缺少活动标识，跳过配置请求")
+            return {}
+        data = self._browser_fetch_json_once(
+            "POST",
+            f"{VOTE_API_BASE}{ACTIVITY_CONFIG_PATH}",
+            payload=payload,
+            tag="盛夏活动配置",
+            dump_body_on_error=True,
+            dump_json_on_success_false=False,
+        )
+        if api_response_succeeded(data):
+            values = unique_text_values(
+                find_values_by_key(data, {"activityAccessId", "accessId"})
             )
-            if api_response_succeeded(data):
-                values = unique_text_values(
-                    find_values_by_key(data, {"activityAccessId", "accessId"})
-                )
-                if values:
-                    self.activity_access_id = values[0]
-                return data
+            if values:
+                self.activity_access_id = values[0]
+            return data
         return {}
 
     def get_seckill_category_ids(self, config=None) -> list[str]:

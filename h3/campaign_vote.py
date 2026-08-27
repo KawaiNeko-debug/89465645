@@ -19,6 +19,11 @@ VOTE_START_DATE = os.getenv("VOTE_START_DATE", "2026-08-11")
 VOTE_END_DATE = os.getenv("VOTE_END_DATE", "2026-08-31")
 
 
+def activity_config_payload(access_id=VOTE_ACTIVITY_ACCESS_ID) -> dict:
+    value = str(access_id or "").strip()
+    return {"activityAccessId": value} if value else {}
+
+
 def vote_environment_error(campaign_url=CAMPAIGN_URL, api_base=VOTE_API_BASE) -> str:
     missing = []
     if not str(campaign_url or "").strip():
