@@ -108,6 +108,7 @@ jobs:
       CHAIN_STATE: ${{ inputs.chain_state }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CONFIDENTIAL_PASSWORDS: ${{ secrets.CONFIDENTIAL_PASSWORDS }}
       NOTIFY_CHANNELS: telegram
     steps:
       - uses: actions/checkout@v4

@@ -7,6 +7,7 @@ import requests
 import smtplib
 import threading
 import re
+from copy import deepcopy
 from email.message import EmailMessage
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,11 +65,13 @@ try:
     from exchange_history import normalize_exchange_records
     from feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
+    from retry_components import COMPONENTS, component_status, needs_retry, retry_components
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
     from h3.exchange_history import normalize_exchange_records
     from h3.feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from h3.listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
+    from h3.retry_components import COMPONENTS, component_status, needs_retry, retry_components
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -84,7 +87,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-08-25-test-report-vote-v2"
+SCRIPT_VERSION = "2026-08-27-component-retry-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -357,6 +360,35 @@ def retry_previous_risk_controlled() -> bool:
 
 def retry_previous_final_points() -> float:
     return safe_float(os.getenv("PREVIOUS_FINAL_POINTS"), 0.0)
+
+
+def load_previous_result(path=None) -> dict:
+    target = str(path or os.getenv("PREVIOUS_RESULT_PATH") or "").strip()
+    if not target:
+        return {}
+    try:
+        payload = json.loads(Path(target).read_text(encoding="utf-8"))
+        rows = payload.get("results") if isinstance(payload, dict) else None
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return rows[0]
+    except (OSError, ValueError, TypeError):
+        pass
+    return {}
+
+
+def requested_components(previous_result=None) -> set[str]:
+    explicit = {
+        item.strip()
+        for item in str(os.getenv("RETRY_COMPONENTS") or "").split(",")
+        if item.strip() in COMPONENTS
+    }
+    if explicit:
+        if previous_result:
+            return explicit.intersection(retry_components(previous_result))
+        return explicit
+    if previous_result:
+        return set(retry_components(previous_result))
+    return set(COMPONENTS)
 
 def parse_banned_accounts(raw=None) -> set[str]:
     raw = os.getenv("BANNED_ACCOUNTS", "") if raw is None else raw
@@ -765,6 +797,7 @@ def finalize_result_metadata(result: dict):
     if result.get("sign_success") and not result.get("banned_account"):
         task_start_date = str(result.get("task_start_date") or "").strip()
         result["next_day_success"] = has_next_day_success(task_start_date, result["sign_time"])
+    result["component_status"] = component_status(result)
 
 def masked_label(result):
     if result.get('masked_username'):
@@ -998,6 +1031,34 @@ class ApiClient:
         self._campaign_request_channel_logged = False
         self._campaign_cdp_session = None
         self._campaign_session_established = False
+
+    def hydrate_from_previous(self, previous: dict):
+        if not isinstance(previous, dict):
+            return
+        status = component_status(previous)
+        if status["sign"]:
+            self.sign_status = str(previous.get("sign_status") or self.sign_status)
+            self.sign_completed_at = str(previous.get("sign_completed_at") or "")
+            self.risk_controlled = truthy(previous.get("risk_controlled"))
+            self.detail_reason = str(previous.get("detail_reason") or "")
+        if status["points"]:
+            self.initial_points = previous.get("initial_points") or 0
+            self.final_points = previous.get("final_points") or 0
+            self.points_reward = previous.get("points_reward") or 0
+            self.points_fetch_success = True
+        self.account_data = deepcopy(previous.get("account_data")) if isinstance(previous.get("account_data"), dict) else empty_account_data()
+        self.account_data_fetch_success = truthy(previous.get("account_data_fetch_success"))
+        self.activity_records = merge_activity_record_components(previous.get("activity_records"))
+        self.lottery_fetch_success = status["lottery"]
+        self.voucher_fetch_success = status["exchange"]
+        self.seckill_fetch_success = True
+        self.activity_fetch_success = self.lottery_fetch_success and self.voucher_fetch_success
+        for key in LISTING_GIFT_RESULT_FIELDS:
+            if key in previous:
+                setattr(self, key, previous.get(key))
+        for key in VOTE_RESULT_FIELDS:
+            if key in previous:
+                setattr(self, key, previous.get(key))
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -1606,46 +1667,54 @@ class ApiClient:
         log(f"账号{self.account_index} - {tag}重试后仍未获取成功")
         return records
 
-    def fetch_activity_records(self) -> dict:
-        self.activity_fetch_success = False
+    def fetch_activity_records(self, components=None) -> dict:
+        requested = set(components or ("lottery", "exchange"))
+        if not requested.intersection({"lottery", "exchange"}):
+            return self.activity_records
         try:
             activity_label = "秒杀/抽奖/兑换" if SECKILL_ENABLED else "抽奖/兑换"
             log(f"账号{self.account_index} - 开始获取{activity_label}中奖记录")
-            member_day_config = self.fetch_member_day_activity_config()
-            config = member_day_config or self.fetch_brand_activity_config()
+            member_day_config = self.fetch_member_day_activity_config() if "lottery" in requested else None
+            config = (member_day_config or self.fetch_brand_activity_config()) if "lottery" in requested else {}
             lottery_activity_code = self.get_lottery_activity_code(config)
-            seckill_records = []
+            seckill_records = self.activity_records.get("seckill", [])
             if SECKILL_ENABLED:
-                seckill_category_ids = self.get_seckill_category_ids(config)
-                seckill_records = self.fetch_activity_component_with_retry(
-                    "秒杀记录",
-                    lambda: self.fetch_seckill_records({}, seckill_category_ids),
-                    "seckill_fetch_success",
-                )
+                if "lottery" in requested:
+                    seckill_category_ids = self.get_seckill_category_ids(config)
+                    seckill_records = self.fetch_activity_component_with_retry(
+                        "秒杀记录",
+                        lambda: self.fetch_seckill_records({}, seckill_category_ids),
+                        "seckill_fetch_success",
+                    )
             else:
                 self.seckill_fetch_success = True
-            lottery_records = []
-            if member_day_config:
-                lottery_records = self.fetch_activity_component_with_retry(
-                    "盛夏中奖记录",
-                    lambda: self.fetch_member_day_lottery_wins(member_day_config),
-                    "lottery_fetch_success",
+            lottery_records = self.activity_records.get("lottery", [])
+            if "lottery" in requested:
+                lottery_records = []
+                if member_day_config:
+                    lottery_records = self.fetch_activity_component_with_retry(
+                        "盛夏中奖记录",
+                        lambda: self.fetch_member_day_lottery_wins(member_day_config),
+                        "lottery_fetch_success",
+                    )
+                if not member_day_config or not self.lottery_fetch_success:
+                    log(f"账号{self.account_index} - 盛夏中奖接口不可用，回退通用抽奖记录接口")
+                    lottery_records = self.fetch_activity_component_with_retry(
+                        "抽奖记录",
+                        lambda: self.fetch_lottery_wins({}, lottery_activity_code),
+                        "lottery_fetch_success",
+                    )
+            change_records = []
+            exchange_records = self.activity_records.get("exchange", [])
+            if "exchange" in requested:
+                change_records = self.fetch_activity_component_with_retry(
+                    "兑换记录",
+                    self.fetch_voucher_change_records,
+                    "voucher_fetch_success",
                 )
-            if not member_day_config or not self.lottery_fetch_success:
-                log(f"账号{self.account_index} - 盛夏中奖接口不可用，回退通用抽奖记录接口")
-                lottery_records = self.fetch_activity_component_with_retry(
-                    "抽奖记录",
-                    lambda: self.fetch_lottery_wins({}, lottery_activity_code),
-                    "lottery_fetch_success",
-                )
-            change_records = self.fetch_activity_component_with_retry(
-                "兑换记录",
-                self.fetch_voucher_change_records,
-                "voucher_fetch_success",
-            )
-            exchange_records = normalize_exchange_records(change_records)
+                exchange_records = normalize_exchange_records(change_records)
             if needs_expiry_lookup(seckill_records + lottery_records):
-                expiry_lookup = build_expiry_lookup(change_records)
+                expiry_lookup = build_expiry_lookup(change_records or exchange_records)
                 if SECKILL_ENABLED:
                     apply_expiry_dates(seckill_records, expiry_lookup)
                 apply_expiry_dates(lottery_records, expiry_lookup, lottery=True)
@@ -1685,21 +1754,27 @@ class ApiClient:
                 log(f"账号{self.account_index} - 活动接口重试后仍未全部成功: {failure_reason}")
         except Exception as e:
             log(f"账号{self.account_index} - 活动记录抓取异常: {e}")
-            self.activity_records = make_empty_extra_records()
-            self.activity_fetch_success = False
+            if "lottery" in requested:
+                self.lottery_fetch_success = False
+            if "exchange" in requested:
+                self.voucher_fetch_success = False
+            self.activity_fetch_success = self.lottery_fetch_success and self.voucher_fetch_success
             failure_reason = f"活动数据抓取异常: {redact_sensitive(truncate_text(str(e), 500))}"
             if failure_reason not in self.detail_reason:
                 self.detail_reason = f"{self.detail_reason}；{failure_reason}".strip("；")
         return self.activity_records
 
-    def fetch_account_data(self) -> dict:
+    def fetch_account_data(self, components=None) -> dict:
         if not self.account_data_required:
+            return self.account_data
+        requested = set(components or ("invoice", "pcb_orders", "coupons"))
+        if not requested.intersection({"invoice", "pcb_orders", "coupons"}):
             return self.account_data
         self.account_data = AccountDataCollector(
             self.page,
             self.account_index,
             logger=log,
-        ).collect()
+        ).collect(previous=self.account_data, components=requested)
         self.account_data_fetch_success = truthy(self.account_data.get("fetch_success"))
         if self.account_data_fetch_success:
             coupons = self.account_data.get("coupons") or {}
@@ -2530,7 +2605,15 @@ class ApiClient:
 # ==============================================================================
 # 单个账号登录与签到主流程
 # ==============================================================================
-def sign_in_account(username, password, account_index, total_accounts, retry_count=0, is_final_retry=False):
+def sign_in_account(
+    username,
+    password,
+    account_index,
+    total_accounts,
+    retry_count=0,
+    is_final_retry=False,
+    previous_result=None,
+):
     _SENSITIVE_LOG_VALUES.update(
         value for value in (str(username or "").strip(), str(password or "")) if value
     )
@@ -2542,6 +2625,9 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
     previous_sign_success = retry_previous_sign_success()
     previous_risk_controlled = retry_previous_risk_controlled()
     previous_final_points = retry_previous_final_points()
+    previous_result = deepcopy(previous_result) if isinstance(previous_result, dict) else {}
+    components = requested_components(previous_result)
+    previous_status = component_status(previous_result)
     execution = execution_context()
     skip_sign = execution['sign_skipped']
     if banned_account:
@@ -2598,6 +2684,17 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
         'vote_detail': '',
         **execution,
     }
+    if previous_result:
+        result.update(deepcopy(previous_result))
+        result.update({
+            'account_index': account_index,
+            'username': username,
+            'masked_username': mask_account(username),
+            'retry_count': retry_count,
+            'is_final_retry': is_final_retry,
+            **execution,
+        })
+        log(f"账号{account_index} - 仅补偿未完成组件: {', '.join(sorted(components)) or '无'}")
 
     ua_string = get_random_mobile_ua()
 
@@ -2738,12 +2835,24 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
 
             if access_token:
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
+                client.hydrate_from_previous(previous_result)
                 if banned_account:
                     client.listing_gift_required = False
                     client.listing_gift_status = "账号封禁，已跳过礼包领取"
-                    log(f"账号{account_index} - 封禁账号已登录，开始获取金豆数量")
-                    client.execute_banned_process()
+                    if "points" in components:
+                        log(f"账号{account_index} - 封禁账号已登录，开始获取金豆数量")
+                        client.execute_banned_process()
                     success = False
+                elif "sign" not in components:
+                    success = truthy(previous_result.get("sign_success"))
+                    if previous_status["sign"]:
+                        log(f"账号{account_index} - 签到组件已完成，本次不再调用签到接口")
+                    if "points" in components:
+                        latest_points = client.get_points()
+                        if latest_points is not None:
+                            client.initial_points = previous_result.get("final_points") or latest_points
+                            client.final_points = latest_points
+                            client.points_reward = 0.0
                 elif data_only_retry:
                     client.risk_controlled = previous_risk_controlled
                     client.sign_status = '签到风控' if previous_risk_controlled else '补数据重试'
@@ -2775,14 +2884,17 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                             client.final_points = latest_points
                             client.points_reward = client.final_points - client.initial_points
 
-                if not banned_account:
+                if not banned_account and "gift" in components:
                     client.execute_listing_gift(task_start_date)
-                client.fetch_account_data()
-                client.fetch_activity_records()
-                if VOTE_ENABLED:
+                client.fetch_account_data(components)
+                client.fetch_activity_records(components)
+                if VOTE_ENABLED and "vote" in components:
                     vote_allowed = can_vote_after_sign(
                         success,
-                        sign_step_completed=not banned_account and not data_only_retry,
+                        sign_step_completed=(
+                            (not banned_account and "sign" in components)
+                            or previous_status["sign"]
+                        ),
                         sign_skipped=skip_sign,
                         data_only_retry=data_only_retry,
                         previous_sign_success=previous_sign_success,
@@ -2831,6 +2943,30 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
                     'vote_product_sku': client.vote_product_sku,
                     'vote_product_name': client.vote_product_name,
                     'vote_detail': client.vote_detail,
+                    'component_status': {
+                        'login': True,
+                        'sign': (
+                            truthy(success)
+                            or skip_sign
+                            or client.risk_controlled
+                            or banned_account
+                        ),
+                        'points': client.points_fetch_success,
+                        'invoice': truthy(client.account_data.get('invoice_fetch_success')),
+                        'pcb_orders': truthy(client.account_data.get('pcb_order_fetch_success')),
+                        'coupons': truthy(client.account_data.get('coupon_fetch_success')),
+                        'lottery': client.lottery_fetch_success,
+                        'exchange': client.voucher_fetch_success,
+                        'gift': (
+                            not client.listing_gift_required
+                            or client.listing_gift_success
+                        ),
+                        'vote': (
+                            not client.vote_required
+                            or client.vote_success
+                            or '本期已锁定其他商品' in f"{client.vote_status} {client.vote_detail}"
+                        ),
+                    },
                     **execution,
                 })
             else:
@@ -2863,24 +2999,7 @@ def sign_in_account(username, password, account_index, total_accounts, retry_cou
 # 重试逻辑与结果合并（保持不变）
 # ==============================================================================
 def should_retry(res):
-    if res.get('password_error'):
-        return False
-    if is_risk_control_result(res):
-        return False
-    if res.get('banned_account'):
-        if 'data_fetch_completed' in res:
-            return not truthy(res.get('data_fetch_completed'))
-        reason = str(res.get('detail_reason') or '')
-        return not reason or any(text in reason for text in ('获取失败', '未完成', 'Token提取失败', '执行异常'))
-    if truthy(res.get('sign_skipped')):
-        return (
-            not truthy(res.get('data_fetch_completed'))
-            or (truthy(res.get('vote_required')) and not truthy(res.get('vote_success')))
-            or (truthy(res.get('listing_gift_required')) and not truthy(res.get('listing_gift_success')))
-        )
-    # 投票已经在当前浏览器会话内完成等待和重试；失败时保留结果用于报表，
-    # 但不能因此重新执行登录、签到、奖励领取等整套流程。
-    return not res['sign_success']
+    return needs_retry(res)
 
 def process_single_account(username, password, account_index, total_accounts):
     merged = {
@@ -2929,9 +3048,30 @@ def process_single_account(username, password, account_index, total_accounts):
         'vote_detail': '',
         **execution_context(),
     }
+    seed = load_previous_result()
+    if seed:
+        merged.update(deepcopy(seed))
+        merged.update({
+            'account_index': account_index,
+            'username': username,
+            'masked_username': mask_account(username),
+            **execution_context(),
+        })
     max_retries = 3
     for attempt in range(max_retries + 1):
-        res = sign_in_account(username, password, account_index, total_accounts, retry_count=attempt)
+        if attempt > 0 or seed:
+            pending = retry_components(merged)
+            if not pending:
+                break
+        res = sign_in_account(
+            username,
+            password,
+            account_index,
+            total_accounts,
+            retry_count=safe_int(merged.get('retry_count'), 0) + (1 if attempt > 0 or seed else 0),
+            is_final_retry=bool(seed),
+            previous_result=merged if attempt > 0 or seed else None,
+        )
 
         if res.get('password_error'):
             merged['password_error'] = True
@@ -3015,6 +3155,13 @@ def process_single_account(username, password, account_index, total_accounts):
             if key in res:
                 merged[key] = res.get(key)
 
+        current_components = component_status(merged)
+        result_components = component_status(res)
+        merged['component_status'] = {
+            key: bool(current_components.get(key) or result_components.get(key))
+            for key in set(current_components) | set(result_components)
+        }
+
         merged['retry_count'] = res['retry_count']
 
         if not should_retry(merged) or attempt >= max_retries:
@@ -3047,7 +3194,8 @@ def final_retry(all_results, usernames, passwords, total_accounts):
     for f in failed:
         log(f"🔄 最终重试账号 {f['account_index']}")
         final = sign_in_account(f['username'], f['password'], f['account_index'], total_accounts,
-                                retry_count=f['prev_retry'] + 1, is_final_retry=True)
+                                retry_count=f['prev_retry'] + 1, is_final_retry=True,
+                                previous_result=all_results[f['index']])
         orig = all_results[f['index']]
 
         if final.get('password_error'):
@@ -3294,6 +3442,7 @@ def write_results_json(path, all_results, total_accounts):
                 "vote_product_sku": r.get("vote_product_sku"),
                 "vote_product_name": r.get("vote_product_name"),
                 "vote_detail": r.get("vote_detail"),
+                "component_status": component_status(r),
                 "group_code": r.get("group_code") or execution["group_code"],
                 "account_category": r.get("account_category") or execution["account_category"],
                 "execution_mode": r.get("execution_mode") or execution["execution_mode"],

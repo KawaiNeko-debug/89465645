@@ -25,6 +25,8 @@ from h3.account_data import (
 from h3.merge_results import pick_result
 from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
 from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
+from h3.retry_components import build_retry_matrix, component_status, retry_components
+from h3.runner_recovery import should_rerun
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
 from h3.campaign_vote import (
     can_vote_after_sign,
@@ -42,7 +44,17 @@ from h3.dynamic_groups import (
     load_chain_state,
 )
 from h3.category_reports import main as category_reports_main
-from h3.report import build_message, is_problem_record, load_account_lookup, mask_account, normalize_record, resolve_output_xlsx_path
+from h3.report import (
+    build_message,
+    is_problem_record,
+    load_account_lookup,
+    load_credential_lookup,
+    mask_account,
+    normalize_record,
+    redact_accounts_for_log,
+    report_password,
+    resolve_output_xlsx_path,
+)
 from h3.test_report import prepare_manifest
 
 
@@ -345,11 +357,49 @@ class AccountDataTests(unittest.TestCase):
             path = os.path.join(temp_dir, "report.xlsx")
             write_xlsx(path, [record(1, 0, first), record(2, 0, second)])
             workbook = load_workbook(path)
-            coupon_sheets = workbook.sheetnames[1:]
+            self.assertEqual(workbook.sheetnames[1], "PCB+SMT券")
+            coupon_sheets = workbook.sheetnames[2:]
             self.assertEqual(len(coupon_sheets), 2)
             self.assertTrue(all(len(name) <= 31 for name in coupon_sheets))
             self.assertEqual(len({name.lower() for name in coupon_sheets}), 2)
             self.assertEqual(workbook[coupon_sheets[0]].max_row + workbook[coupon_sheets[1]].max_row, 5)
+
+    def test_pcb_smt_sheet_is_second_and_contains_credentials(self):
+        data = account_data_with_amount()
+        data["coupons"]["unused"] = [
+            normalize_coupon(
+                {"couponName": "PCB+SMT组合券", "expirationTime": "2026-12-31"},
+                "unused",
+            )
+        ]
+        row = record(1, 0, data)
+        row.update({"username": "customer123", "password": "plain-password"})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.xlsx")
+            write_xlsx(path, [row])
+            workbook = load_workbook(path)
+            self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
+            main_headers = [cell.value for cell in workbook["签到汇总"][1]]
+            self.assertEqual(main_headers[2:4], ["客编", "密码"])
+            self.assertEqual(workbook["PCB+SMT券"][2][1].value, "customer123")
+            self.assertEqual(workbook["PCB+SMT券"][2][2].value, "plain-password")
+
+    def test_future_or_expired_pcb_smt_coupon_does_not_create_sheet(self):
+        data = account_data_with_amount()
+        data["coupons"]["unused"] = [
+            normalize_coupon(
+                {
+                    "couponName": "PCB+SMT组合券",
+                    "effectiveTime": "2027-01-01",
+                    "expirationTime": "2027-12-31",
+                },
+                "unused",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.xlsx")
+            write_xlsx(path, [record(1, 0, data)])
+            self.assertNotIn("PCB+SMT券", load_workbook(path).sheetnames)
 
     def test_no_profile_keeps_invoice_amount_cells_empty(self):
         data = account_data_with_amount(10, 5)
@@ -914,6 +964,143 @@ class DynamicGroupTests(unittest.TestCase):
                     "2026-08-25-老号全干组.xlsx",
                 ],
             )
+
+    def test_report_uses_plain_account_and_confidential_password_marker(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        values.update({
+            "old1": "plain-account,secret-value\nother-account,visible-value",
+            "CONFIDENTIAL_PASSWORDS": "secret-value\nsecond-secret",
+        })
+        with patch.dict(os.environ, values, clear=False):
+            lookup, total = load_credential_lookup()
+            self.assertEqual(total, 2)
+            self.assertEqual(lookup[("old1", 1)]["username"], "plain-account")
+            self.assertEqual(report_password(lookup[("old1", 1)]["password"]), "保密")
+            self.assertEqual(report_password(lookup[("old1", 2)]["password"]), "visible-value")
+            normalized = normalize_record(
+                {"account_index": 1, "group_code": "old1"},
+                {},
+                {("old1", 1): "plain-account"},
+            )
+            self.assertEqual(normalized["username"], "plain-account")
+
+    def test_telegram_message_is_plain_but_log_message_is_masked(self):
+        record = normalize_record(
+            {
+                "account_index": 1,
+                "group_code": "test",
+                "sign_success": False,
+                "sign_status": "执行异常",
+                "detail_reason": "网络超时",
+                "account_data_required": False,
+                "vote_required": False,
+            },
+            {},
+            {("test", 1): "1234567890A"},
+        )
+        message, _ = build_message([record], {}, 1)
+        self.assertIn("1234567890A", message)
+        logged = redact_accounts_for_log(message, [record])
+        self.assertNotIn("1234567890A", logged)
+        self.assertIn("******7890A", logged)
+
+    def test_retry_matrix_only_contains_unfinished_components(self):
+        complete_vote = {
+            "account_index": 1,
+            "sign_success": False,
+            "points_fetch_success": True,
+            "account_data": {
+                "invoice_fetch_success": True,
+                "pcb_order_fetch_success": True,
+                "coupon_fetch_success": True,
+            },
+            "activity_fetch_success": True,
+            "listing_gift_required": False,
+            "vote_required": True,
+            "vote_success": True,
+        }
+        self.assertEqual(retry_components(complete_vote), ["sign"])
+        vote_failure = {**complete_vote, "sign_success": True, "vote_success": False}
+        self.assertEqual(retry_components(vote_failure), ["vote"])
+        conflict = {
+            **vote_failure,
+            "vote_detail": "本期已锁定其他商品 fixture-sku",
+        }
+        self.assertEqual(retry_components(conflict), [])
+        password_error = {**vote_failure, "password_error": True}
+        self.assertEqual(retry_components(password_error), [])
+        partial_activity = {
+            **complete_vote,
+            "sign_success": True,
+            "activity_fetch_success": False,
+            "component_status": {"lottery": True, "exchange": False},
+        }
+        self.assertEqual(retry_components(partial_activity), ["exchange"])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result_dir = Path(temp_dir, "initial-result-1")
+            result_dir.mkdir()
+            Path(result_dir, "result.json").write_text(
+                json.dumps({"results": [vote_failure]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            matrix = build_retry_matrix(temp_dir, 2)
+            self.assertEqual(matrix[0]["account_index"], 1)
+            self.assertEqual(matrix[0]["retry_components"], "vote")
+            self.assertEqual(matrix[1]["account_index"], 2)
+
+    def test_component_merge_preserves_successful_vote_and_data(self):
+        initial = {
+            "account_index": 1,
+            "sign_success": False,
+            "points_fetch_success": True,
+            "initial_points": 10,
+            "final_points": 10,
+            "account_data_fetch_success": True,
+            "account_data": {
+                "invoice_fetch_success": True,
+                "pcb_order_fetch_success": True,
+                "coupon_fetch_success": True,
+                "coupons": {"unused": [{"name": "fixture"}], "used": [], "expired": []},
+            },
+            "activity_fetch_success": True,
+            "activity_records": {"seckill": [], "lottery": [{"title": "reward"}], "exchange": []},
+            "listing_gift_required": False,
+            "vote_required": True,
+            "vote_success": True,
+            "vote_status": "投票成功",
+            "retry_count": 0,
+        }
+        retry = {
+            **initial,
+            "sign_success": True,
+            "account_data_fetch_success": False,
+            "account_data": {},
+            "activity_fetch_success": False,
+            "activity_records": {"seckill": [], "lottery": [], "exchange": []},
+            "vote_success": False,
+            "vote_status": "未执行",
+            "retry_count": 1,
+        }
+        merged = pick_result(initial, retry)
+        self.assertTrue(merged["sign_success"])
+        self.assertTrue(merged["vote_success"])
+        self.assertEqual(merged["activity_records"]["lottery"][0]["title"], "reward")
+        self.assertEqual(merged["account_data"]["coupons"]["unused"][0]["name"], "fixture")
+
+    def test_zero_runner_recovery_only_allows_first_attempt(self):
+        run = {"run_attempt": 1, "status": "completed"}
+        jobs = [{"runner_id": 0, "steps": []}, {"runner_id": 0, "steps": []}]
+        self.assertTrue(should_rerun(run, jobs))
+        self.assertFalse(should_rerun({**run, "run_attempt": 2}, jobs))
+        self.assertFalse(should_rerun(run, [{"runner_id": 7, "steps": []}]))
+        self.assertFalse(
+            should_rerun(run, [{"runner_id": 0, "steps": [{"status": "completed", "conclusion": "success"}]}])
+        )
 
 
 if __name__ == "__main__":

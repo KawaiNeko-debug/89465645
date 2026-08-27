@@ -21,11 +21,11 @@ except ImportError:
     from h3.feature_flags import SECKILL_ENABLED
 
 try:
-    from account_data import empty_account_data
+    from account_data import empty_account_data, is_pcb_smt_coupon
     from campaign_vote import is_vote_date
     from listing_gift import is_listing_gift_date
 except ImportError:
-    from h3.account_data import empty_account_data
+    from h3.account_data import empty_account_data, is_pcb_smt_coupon
     from h3.campaign_vote import is_vote_date
     from h3.listing_gift import is_listing_gift_date
 
@@ -104,7 +104,7 @@ def mask_account(account: object) -> str:
     return "*" * max(0, len(text) - visible) + text[-visible:]
 
 
-def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
+def load_credential_lookup() -> tuple[dict[tuple[object, int], dict[str, str]], int]:
     lookup = {}
     total = 0
     group_filter_active = truthy(os.getenv("REPORT_GROUP_FILTER_ACTIVE"))
@@ -131,11 +131,15 @@ def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
             if limit is not None:
                 lines = lines[:limit]
             for account_index, line in enumerate(lines, start=1):
-                lookup[(group_code, account_index)] = line.split(",", 1)[0].strip()
+                username, password = line.split(",", 1)
+                lookup[(group_code, account_index)] = {
+                    "username": username.strip(),
+                    "password": password.strip(),
+                }
                 total += 1
             if limit is not None:
                 for account_index in range(len(lines) + 1, limit + 1):
-                    lookup[(group_code, account_index)] = "*****"
+                    lookup[(group_code, account_index)] = {"username": "*****", "password": ""}
                     total += 1
     raw_test = os.getenv("test") or os.getenv("TEST") or ""
     test_lines = [line.strip() for line in raw_test.splitlines() if line.strip() and "," in line]
@@ -143,7 +147,11 @@ def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
     if test_limit:
         test_lines = test_lines[:test_limit]
     for account_index, line in enumerate(test_lines, start=1):
-        lookup[("test", account_index)] = line.split(",", 1)[0].strip()
+        username, password = line.split(",", 1)
+        lookup[("test", account_index)] = {
+            "username": username.strip(),
+            "password": password.strip(),
+        }
         total += 1
     for group_number in range(1, 9):
         raw = os.getenv(f"ACCOUNTS_BATCH{group_number}", "") or ""
@@ -151,10 +159,34 @@ def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
             line = line.strip()
             if not line or "," not in line:
                 continue
-            username = line.split(",", 1)[0].strip()
-            lookup[(group_number, account_index)] = username
+            username, password = line.split(",", 1)
+            lookup[(group_number, account_index)] = {
+                "username": username.strip(),
+                "password": password.strip(),
+            }
             total += 1
     return lookup, total
+
+
+def load_account_lookup() -> tuple[dict[tuple[object, int], str], int]:
+    credentials, total = load_credential_lookup()
+    return {
+        key: str(value.get("username") or "")
+        for key, value in credentials.items()
+    }, total
+
+
+def confidential_passwords() -> set[str]:
+    return {
+        line.strip()
+        for line in str(os.getenv("CONFIDENTIAL_PASSWORDS") or "").splitlines()
+        if line.strip()
+    }
+
+
+def report_password(password: str) -> str:
+    value = str(password or "")
+    return "保密" if value and value in confidential_passwords() else value
 
 
 def load_manifest(results_dir: str) -> dict:
@@ -253,13 +285,13 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
     account_index = safe_int(record.get("account_index"), 0)
     group_code = str(record.get("group_code") or payload.get("group_code") or "").strip().lower()
     raw_username = str(
-        record.get("username")
-        or record.get("masked_username")
-        or account_lookup.get((group_code, account_index))
+        account_lookup.get((group_code, account_index))
         or account_lookup.get((group_number, account_index))
+        or record.get("username")
+        or record.get("masked_username")
         or f"账号{account_index}"
     ).strip()
-    username = raw_username if "*" in raw_username else mask_account(raw_username)
+    username = raw_username
     detail_reason = str(record.get("detail_reason") or "").strip()
     risk_controlled = truthy(record.get("risk_controlled")) or (RISK_CONTROL_MESSAGE and RISK_CONTROL_MESSAGE in detail_reason)
     banned_account = truthy(record.get("banned_account"))
@@ -301,6 +333,7 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
         "username": username,
+        "password": "",
         "group_name": group_name,
         "group_number": group_number,
         "group_position": group_position,
@@ -391,7 +424,8 @@ def build_missing_record(group_identity, account_index: int, username: str, task
     return {
         "account_index": account_index,
         "execution_order": account_index,
-        "username": mask_account(username),
+        "username": username,
+        "password": "",
         "group_name": default_group_name(group_number),
         "group_number": group_number,
         "group_position": f"{group_code}账号{account_index}" if group_code else default_group_position(group_number, account_index),
@@ -667,6 +701,18 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     return "\n".join(lines), summary
 
 
+def redact_accounts_for_log(message: str, records: list[dict]) -> str:
+    redacted = str(message or "")
+    usernames = sorted(
+        {str(record.get("username") or "") for record in records if record.get("username")},
+        key=len,
+        reverse=True,
+    )
+    for username in usernames:
+        redacted = redacted.replace(username, mask_account(username))
+    return redacted
+
+
 def color_for_points(points: float):
     if points > 2000:
         return PatternFill("solid", fgColor="F8696B")
@@ -850,28 +896,81 @@ def safe_sheet_title(raw: str, used: set[str]) -> str:
     return candidate
 
 
+def parse_coupon_datetime(value, end_of_day=False):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("/", "-").replace("T", " ").replace("Z", "")
+    if end_of_day and re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        normalized += " 23:59:59"
+    for candidate in (normalized, normalized[:19], normalized[:10]):
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            continue
+    return None
+
+
+def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
+    if not isinstance(coupon, dict) or not is_pcb_smt_coupon(coupon):
+        return False
+    if str(coupon.get("status_key") or "unused").lower() != "unused":
+        return False
+    now = now or datetime.now()
+    valid_from = parse_coupon_datetime(coupon.get("valid_from"))
+    expires_at = parse_coupon_datetime(coupon.get("expires_at"), end_of_day=True)
+    return not (valid_from and valid_from > now) and not (expires_at and expires_at < now)
+
+
+def write_pcb_smt_sheet(workbook, records: list[dict]):
+    rows = []
+    for record in sort_records(records):
+        for coupon in (record.get("account_data") or {}).get("coupons", {}).get("unused", []) or []:
+            if is_current_pcb_smt_coupon(coupon):
+                rows.append((
+                    str(record.get("username") or ""),
+                    str(record.get("password") or ""),
+                    str(coupon.get("name") or "未命名优惠券"),
+                    str(coupon.get("expires_at") or ""),
+                ))
+    if not rows:
+        return
+    sheet = workbook.create_sheet("PCB+SMT券", 1)
+    sheet.append(["序号", "客编", "密码", "优惠券名称", "优惠券过期时间"])
+    for cell in sheet[1]:
+        cell.fill = PatternFill("solid", fgColor="E2F0D9")
+        cell.font = Font(bold=True)
+    for index, row in enumerate(rows, start=1):
+        sheet.append([index, *row])
+    sheet.freeze_panes = "A2"
+    for column, width in {"A": 8, "B": 24, "C": 20, "D": 36, "E": 24}.items():
+        sheet.column_dimensions[column].width = width
+
+
 def write_coupon_sheets(workbook, records: list[dict]):
     by_name = {}
     for record in sort_records(records):
         account = str(record.get("username") or "").strip()
+        password = str(record.get("password") or "")
         for coupon in (record.get("account_data") or {}).get("coupons", {}).get("unused", []) or []:
             name = str(coupon.get("name") or "未命名优惠券").strip()
             by_name.setdefault(name, []).append(
-                (account, str(coupon.get("expires_at") or "").strip())
+                (account, password, str(coupon.get("expires_at") or "").strip())
             )
-    used = {workbook.active.title}
+    used = set(workbook.sheetnames)
     for name, rows in sorted(by_name.items(), key=lambda item: item[0]):
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
-        sheet.append(["序号", "账户", "优惠券过期时间"])
+        sheet.append(["序号", "客编", "密码", "优惠券过期时间"])
         for cell in sheet[1]:
             cell.fill = PatternFill("solid", fgColor="E2F0D9")
             cell.font = Font(bold=True)
-        for index, (account, expiry) in enumerate(rows, start=1):
-            sheet.append([index, account, expiry])
+        for index, (account, password, expiry) in enumerate(rows, start=1):
+            sheet.append([index, account, password, expiry])
         sheet.freeze_panes = "A2"
         sheet.column_dimensions["A"].width = 8
         sheet.column_dimensions["B"].width = 24
-        sheet.column_dimensions["C"].width = 24
+        sheet.column_dimensions["C"].width = 20
+        sheet.column_dimensions["D"].width = 24
 
 
 def write_xlsx(path: str, records: list[dict]):
@@ -889,7 +988,8 @@ def write_xlsx(path: str, records: list[dict]):
     headers = [
         "序号",
         "金豆数量",
-        "账户",
+        "客编",
+        "密码",
         "组别",
         "账号类别",
         "执行模式",
@@ -947,6 +1047,7 @@ def write_xlsx(path: str, records: list[dict]):
             index,
             safe_float(record.get("final_points"), 0.0),
             str(record.get("username") or ""),
+            str(record.get("password") or ""),
             str(record.get("group_code") or record.get("group_position") or ""),
             str(record.get("account_category") or ""),
             str(record.get("execution_mode") or ""),
@@ -1025,7 +1126,7 @@ def write_xlsx(path: str, records: list[dict]):
         width = 18
         if name == "序号":
             width = 8
-        elif name in {"账户", "投票商品"}:
+        elif name in {"客编", "投票商品"}:
             width = 24
         elif name in {"详细原因", "预测依据", "投票详情"}:
             width = 42
@@ -1044,6 +1145,7 @@ def write_xlsx(path: str, records: list[dict]):
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    write_pcb_smt_sheet(workbook, records)
     write_coupon_sheets(workbook, records)
     workbook.save(path)
 
@@ -1143,7 +1245,11 @@ def is_enabled(env_name: str, default: str = "true") -> bool:
 
 def main():
     results_dir = sys.argv[1] if len(sys.argv) > 1 else "results"
-    account_lookup, expected_total = load_account_lookup()
+    credential_lookup, expected_total = load_credential_lookup()
+    account_lookup = {
+        key: str(value.get("username") or "")
+        for key, value in credential_lookup.items()
+    }
     manifest = load_manifest(results_dir)
     output_xlsx = resolve_output_xlsx_path(results_dir, manifest)
     raw_records = load_results(results_dir, account_lookup)
@@ -1163,9 +1269,19 @@ def main():
             key: username for key, username in account_lookup.items()
             if isinstance(key[0], str) and any(key[0].startswith(prefix) for prefix in allowed_prefixes)
         }
+        credential_lookup = {
+            key: value for key, value in credential_lookup.items()
+            if isinstance(key[0], str) and any(key[0].startswith(prefix) for prefix in allowed_prefixes)
+        }
     if os.getenv("EXPECTED_TOTAL") not in (None, ""):
         expected_total = max(0, safe_int(os.getenv("EXPECTED_TOTAL"), 0))
     records = merge_records_with_expected(raw_records, account_lookup, target_date_text(manifest))
+    for record in records:
+        key = record_key(record)
+        credential = credential_lookup.get(key, {}) if key is not None else {}
+        if credential.get("username"):
+            record["username"] = str(credential["username"])
+        record["password"] = report_password(str(credential.get("password") or ""))
     message, summary = build_message(records, manifest, expected_total)
 
     channels = parse_channels()
@@ -1188,7 +1304,7 @@ def main():
         subject = f"{target_date_text(manifest)} 签到汇总"
         sent = send_email(subject, message) or sent
 
-    print(message)
+    print(redact_accounts_for_log(message, records))
     print(
         f"[summary] total={summary['total']} success={summary['success']} "
         f"sent={'yes' if sent else 'no'} tg_text={'on' if send_tg_text else 'off'} "

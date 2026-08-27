@@ -5,6 +5,11 @@ import re
 import sys
 from datetime import datetime
 
+try:
+    from retry_components import component_status
+except ImportError:
+    from h3.retry_components import component_status
+
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 DATA_FAILURE_MARKERS = (
     "金豆数量获取失败",
@@ -115,6 +120,67 @@ def merge_data_fields(picked: dict, fallback: dict | None):
             picked["detail_reason"] = RISK_CONTROL_MESSAGE
 
 
+def merge_component_fields(picked: dict, fallback: dict | None):
+    if not fallback:
+        picked["component_status"] = component_status(picked)
+        return
+    picked_status = component_status(picked)
+    fallback_status = component_status(fallback)
+    picked_account = picked.get("account_data") if isinstance(picked.get("account_data"), dict) else {}
+    fallback_account = fallback.get("account_data") if isinstance(fallback.get("account_data"), dict) else {}
+    account_groups = {
+        "invoice": (
+            "invoice_fetch_success", "invoice_profile_status", "invoice_profile_exists",
+            "invoice_month_threshold", "invoice_within_months_amount", "invoice_over_months_amount",
+        ),
+        "pcb_orders": (
+            "pcb_order_fetch_success", "pcb_within_months_amount", "pcb_over_months_amount",
+            "pcb_total_amount", "pcb_amount_shortfall", "pcb_order_count",
+        ),
+        "coupons": ("coupon_fetch_success", "coupons", "coupon_prediction", "prediction_reason"),
+    }
+    for component, keys in account_groups.items():
+        if not picked_status[component] and fallback_status[component]:
+            for key in keys:
+                if key in fallback_account:
+                    picked_account[key] = fallback_account[key]
+            picked_status[component] = True
+    picked["account_data"] = picked_account
+
+    picked_activity = picked.get("activity_records") if isinstance(picked.get("activity_records"), dict) else {}
+    fallback_activity = fallback.get("activity_records") if isinstance(fallback.get("activity_records"), dict) else {}
+    for component, key in (("lottery", "lottery"), ("exchange", "exchange")):
+        if not picked_status[component] and fallback_status[component]:
+            picked_activity[key] = fallback_activity.get(key) or []
+            picked_status[component] = True
+    picked["activity_records"] = {
+        "seckill": picked_activity.get("seckill") or fallback_activity.get("seckill") or [],
+        "lottery": picked_activity.get("lottery") or [],
+        "exchange": picked_activity.get("exchange") or [],
+    }
+    picked["component_status"] = {
+        key: bool(picked_status.get(key) or fallback_status.get(key))
+        for key in set(picked_status) | set(fallback_status)
+    }
+    picked_account["fetch_success"] = all(
+        picked["component_status"].get(key, False)
+        for key in ("invoice", "pcb_orders", "coupons")
+    )
+    picked["account_data_fetch_success"] = picked_account["fetch_success"]
+    picked["activity_fetch_success"] = all(
+        picked["component_status"].get(key, False)
+        for key in ("lottery", "exchange")
+    )
+    picked["data_fetch_completed"] = (
+        picked["component_status"].get("points", False)
+        and picked["activity_fetch_success"]
+        and (
+            not truthy(picked.get("account_data_required"))
+            or picked["account_data_fetch_success"]
+        )
+    )
+
+
 def load_single_result(path: str):
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -167,6 +233,7 @@ def pick_result(initial: dict, retry: dict | None):
             if not picked.get(key) and fallback.get(key):
                 picked[key] = fallback[key]
         merge_data_fields(picked, fallback)
+        merge_component_fields(picked, fallback)
         if truthy(fallback.get("vote_success")) and not truthy(picked.get("vote_success")):
             for key in VOTE_FIELDS:
                 picked[key] = fallback.get(key)
@@ -201,6 +268,7 @@ def pick_result(initial: dict, retry: dict | None):
             picked["detail_reason"] = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
             if failures:
                 picked["detail_reason"] += "；" + "；".join(failures)
+    picked["component_status"] = component_status(picked)
     return picked
 
 
@@ -317,6 +385,7 @@ def main():
                 "vote_product_sku": row.get("vote_product_sku", ""),
                 "vote_product_name": row.get("vote_product_name", ""),
                 "vote_detail": row.get("vote_detail", ""),
+                "component_status": component_status(row),
             }
         )
 

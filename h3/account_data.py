@@ -465,8 +465,11 @@ class AccountDataCollector:
             order_count += count
         return True, totals.get(1, 0.0), totals.get(2, 0.0), order_count
 
-    def collect(self) -> dict:
+    def collect(self, previous=None, components=None) -> dict:
+        previous = previous if isinstance(previous, dict) else {}
+        requested = set(components or ("invoice", "pcb_orders", "coupons"))
         result = empty_account_data()
+        result.update(deepcopy(previous))
         environment_error = member_environment_error(self.base)
         if environment_error:
             result["error"] = environment_error
@@ -475,27 +478,32 @@ class AccountDataCollector:
             result["error"] = "会员中心 SSO 未建立"
             return result
 
-        statistics = self._request_with_retry(
-            "POST",
-            INVOICE_STATISTICS_PATH,
-            {"invoiceType": "2"},
-            "开票金额",
-            form_encoded=True,
-        )
+        statistics = None
         profile_responses = []
         profile_request_successes = []
-        for path in INVOICE_PROFILE_PATHS:
-            response = self._request_with_retry("POST", path, None, "开票资料")
-            if response is not None:
-                profile_request_successes.append(True)
-                profile_responses.append(response)
-                break
+        if requested.intersection({"invoice", "pcb_orders"}):
+            for path in INVOICE_PROFILE_PATHS:
+                response = self._request_with_retry("POST", path, None, "开票资料")
+                if response is not None:
+                    profile_request_successes.append(True)
+                    profile_responses.append(response)
+                    break
+        if "invoice" in requested:
+            statistics = self._request_with_retry(
+                "POST",
+                INVOICE_STATISTICS_PATH,
+                {"invoiceType": "2"},
+                "开票金额",
+                form_encoded=True,
+            )
 
         # The profile response carries the two available-amount fields. The
         # statistics call is supplemental and must not invalidate usable data.
-        invoice_success = any(profile_request_successes)
-        result["invoice_fetch_success"] = invoice_success
-        if invoice_success:
+        invoice_success = result.get("invoice_fetch_success", False)
+        if "invoice" in requested:
+            invoice_success = any(profile_request_successes)
+            result["invoice_fetch_success"] = invoice_success
+        if "invoice" in requested and invoice_success:
             parsed = parse_invoice_statistics([statistics, *profile_responses])
             profile_exists = parse_invoice_profile_exists(profile_responses)
             result.update({
@@ -505,7 +513,7 @@ class AccountDataCollector:
                 "invoice_within_months_amount": parsed["within_amount"] if profile_exists else None,
                 "invoice_over_months_amount": parsed["over_amount"] if profile_exists else None,
             })
-            if profile_exists:
+            if profile_exists and "pcb_orders" in requested:
                 pcb_success, pcb_within, pcb_over, pcb_order_count = self._fetch_pcb_orders(profile_responses)
                 pcb_total = round(pcb_within + pcb_over, 2) if pcb_success else None
                 result.update({
@@ -516,29 +524,45 @@ class AccountDataCollector:
                     "pcb_amount_shortfall": round(max(0.0, PCB_SPEND_THRESHOLD - pcb_total), 2) if pcb_total is not None else None,
                     "pcb_order_count": pcb_order_count if pcb_success else 0,
                 })
-            else:
+            elif not profile_exists:
                 result["pcb_order_fetch_success"] = True
 
-        coupon_success = True
-        coupons = {"unused": [], "used": [], "expired": []}
-        for status_key, config in COUPON_STATUS_CONFIG.items():
-            common = {"pageNum": 1, "pageSize": 1000}
-            current = self._request_with_retry(
-                "POST", COUPON_PATH, {**common, "sortStatus": config["sort_status"]}, f"{config['label']}优惠券"
-            )
-            legacy = self._request_with_retry(
-                "POST", LEGACY_COUPON_PATH, {**common, "couponUseStatus": config["legacy_status"]}, f"{config['label']}旧版优惠券"
-            )
-            if current is None and legacy is None:
-                coupon_success = False
-                continue
-            coupons[status_key] = merge_coupons(
-                parse_coupon_response(current, status_key) if current is not None else [],
-                parse_coupon_response(legacy, status_key) if legacy is not None else [],
-            )
+        if "pcb_orders" in requested and result.get("invoice_profile_exists") is True:
+            if not profile_responses:
+                result["pcb_order_fetch_success"] = False
+            elif "invoice" not in requested:
+                pcb_success, pcb_within, pcb_over, pcb_order_count = self._fetch_pcb_orders(profile_responses)
+                pcb_total = round(pcb_within + pcb_over, 2) if pcb_success else None
+                result.update({
+                    "pcb_order_fetch_success": pcb_success,
+                    "pcb_within_months_amount": pcb_within if pcb_success else None,
+                    "pcb_over_months_amount": pcb_over if pcb_success else None,
+                    "pcb_total_amount": pcb_total,
+                    "pcb_amount_shortfall": round(max(0.0, PCB_SPEND_THRESHOLD - pcb_total), 2) if pcb_total is not None else None,
+                    "pcb_order_count": pcb_order_count if pcb_success else 0,
+                })
 
-        result["coupons"] = coupons
-        result["coupon_fetch_success"] = coupon_success
+        coupon_success = result.get("coupon_fetch_success", False)
+        if "coupons" in requested:
+            coupon_success = True
+            coupons = {"unused": [], "used": [], "expired": []}
+            for status_key, config in COUPON_STATUS_CONFIG.items():
+                common = {"pageNum": 1, "pageSize": 1000}
+                current = self._request_with_retry(
+                    "POST", COUPON_PATH, {**common, "sortStatus": config["sort_status"]}, f"{config['label']}优惠券"
+                )
+                legacy = self._request_with_retry(
+                    "POST", LEGACY_COUPON_PATH, {**common, "couponUseStatus": config["legacy_status"]}, f"{config['label']}旧版优惠券"
+                )
+                if current is None and legacy is None:
+                    coupon_success = False
+                    continue
+                coupons[status_key] = merge_coupons(
+                    parse_coupon_response(current, status_key) if current is not None else [],
+                    parse_coupon_response(legacy, status_key) if legacy is not None else [],
+                )
+            result["coupons"] = coupons
+            result["coupon_fetch_success"] = coupon_success
         result["fetch_success"] = invoice_success and coupon_success and result["pcb_order_fetch_success"]
         result["coupon_prediction"], result["prediction_reason"] = predict_pcb_smt(result)
         if not result["fetch_success"]:

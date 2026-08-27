@@ -31,6 +31,7 @@ jobs:
       TEST: ${{ secrets.TEST }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CONFIDENTIAL_PASSWORDS: ${{ secrets.CONFIDENTIAL_PASSWORDS }}
       NOTIFY_CHANNELS: telegram
       TEST_ACCOUNT_LIMIT: "1"
     steps:
