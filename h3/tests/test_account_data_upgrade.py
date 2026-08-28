@@ -407,7 +407,7 @@ class AccountDataTests(unittest.TestCase):
             self.assertEqual(workbook["PCB+SMT券"][2][3].value, "有")
             self.assertEqual(workbook["PCB+SMT券"][2][3].font.color.rgb, "00008000")
 
-    def test_future_or_expired_pcb_smt_coupon_does_not_create_sheet(self):
+    def test_future_or_expired_pcb_smt_coupon_creates_empty_status_sheet(self):
         data = account_data_with_amount()
         data["coupons"]["unused"] = [
             normalize_coupon(
@@ -422,7 +422,17 @@ class AccountDataTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "report.xlsx")
             write_xlsx(path, [record(1, 0, data)])
-            self.assertNotIn("PCB+SMT券", load_workbook(path).sheetnames)
+            workbook = load_workbook(path)
+            self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
+            self.assertEqual(workbook["PCB+SMT券"]["A2"].value, "当前未检测到可用的PCB+SMT券")
+
+    def test_pcb_smt_sheet_is_always_created_when_coupon_list_is_empty(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.xlsx")
+            write_xlsx(path, [record(1, 0, account_data_with_amount())])
+            workbook = load_workbook(path)
+            self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
+            self.assertEqual(workbook["PCB+SMT券"]["A2"].value, "当前未检测到可用的PCB+SMT券")
 
     def test_no_profile_keeps_invoice_amount_cells_empty(self):
         data = account_data_with_amount(10, 5)

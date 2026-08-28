@@ -942,16 +942,20 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
                     str(coupon.get("name") or "未命名优惠券"),
                     str(coupon.get("expires_at") or ""),
                 ))
-    if not rows:
-        return
     sheet = workbook.create_sheet("PCB+SMT券", 1)
     sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="E2F0D9")
         cell.font = Font(bold=True)
-    for index, row in enumerate(rows, start=1):
-        sheet.append([index, *row])
-        style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
+    if rows:
+        for index, row in enumerate(rows, start=1):
+            sheet.append([index, *row])
+            style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
+    else:
+        sheet.append(["当前未检测到可用的PCB+SMT券"])
+        sheet.merge_cells("A2:F2")
+        sheet["A2"].font = FONT_BLUE
+        sheet["A2"].alignment = Alignment(horizontal="center")
     sheet.freeze_panes = "A2"
     for column, width in {"A": 8, "B": 24, "C": 20, "D": 14, "E": 36, "F": 24}.items():
         sheet.column_dimensions[column].width = width
