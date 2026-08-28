@@ -354,6 +354,7 @@ class AccountDataTests(unittest.TestCase):
     def test_coupon_sheets_handle_duplicates_illegal_chars_and_long_names(self):
         first = account_data_with_amount()
         second = account_data_with_amount()
+        second.update({"invoice_profile_status": "无", "invoice_profile_exists": False})
         shared_name = "PCB/SMT:*?[]优惠券" + "A" * 30
         colliding_name = "PCB_SMT______优惠券" + "A" * 30
         first["coupons"]["unused"] = [
@@ -373,6 +374,14 @@ class AccountDataTests(unittest.TestCase):
             self.assertTrue(all(len(name) <= 31 for name in coupon_sheets))
             self.assertEqual(len({name.lower() for name in coupon_sheets}), 2)
             self.assertEqual(workbook[coupon_sheets[0]].max_row + workbook[coupon_sheets[1]].max_row, 5)
+            for sheet_name in coupon_sheets:
+                sheet = workbook[sheet_name]
+                headers = [cell.value for cell in sheet[1]]
+                self.assertEqual(headers[:5], ["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
+                invoice_column = headers.index("开票资料") + 1
+                for row_index in range(2, sheet.max_row + 1):
+                    expected = "00C00000" if sheet.cell(row_index, invoice_column).value == "无" else "00008000"
+                    self.assertEqual(sheet.cell(row_index, invoice_column).font.color.rgb, expected)
 
     def test_pcb_smt_sheet_is_second_and_contains_credentials(self):
         data = account_data_with_amount()
@@ -393,6 +402,10 @@ class AccountDataTests(unittest.TestCase):
             self.assertEqual(main_headers[2:4], ["客编", "密码"])
             self.assertEqual(workbook["PCB+SMT券"][2][1].value, "customer123")
             self.assertEqual(workbook["PCB+SMT券"][2][2].value, "plain-password")
+            pcb_headers = [cell.value for cell in workbook["PCB+SMT券"][1]]
+            self.assertEqual(pcb_headers[:6], ["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
+            self.assertEqual(workbook["PCB+SMT券"][2][3].value, "有")
+            self.assertEqual(workbook["PCB+SMT券"][2][3].font.color.rgb, "00008000")
 
     def test_future_or_expired_pcb_smt_coupon_does_not_create_sheet(self):
         data = account_data_with_amount()
