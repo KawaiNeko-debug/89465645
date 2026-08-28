@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 from h3.account_data import (
     browser_fetch_json,
     empty_account_data,
+    is_pcb_smt_coupon,
     normalize_coupon,
     parse_coupon_response,
     parse_invoice_profile_exists,
@@ -88,7 +89,7 @@ def account_data_with_amount(within=100, over=0) -> dict:
             "pcb_within_months_amount": within,
             "pcb_over_months_amount": over,
             "pcb_total_amount": within + over,
-            "pcb_amount_shortfall": max(0, 40 - within - over),
+            "pcb_amount_shortfall": max(0, 50 - within - over),
         }
     )
     return data
@@ -317,6 +318,19 @@ class AccountDataTests(unittest.TestCase):
         )
         self.assertEqual(legacy[0]["name"], "旧版券")
 
+    def test_structured_coupon_extend_state_marks_pcb_smt_coupon(self):
+        coupon = normalize_coupon(
+            {
+                "couponName": "2-4层沉金通用券",
+                "operateCoupon": {
+                    "businessExtendJson": '{"couponExtendState":"pcbAndSmtFree"}',
+                },
+            },
+            "unused",
+        )
+        self.assertEqual(coupon["coupon_extend_state"], "pcbAndSmtFree")
+        self.assertTrue(is_pcb_smt_coupon(coupon))
+
     def test_har_coupon_date_fields_are_preserved(self):
         coupon = normalize_coupon(
             {
@@ -475,10 +489,10 @@ class AccountDataTests(unittest.TestCase):
 
     def test_pcb_threshold_boundaries(self):
         for amount, expected, shortfall in (
-            (0, "不可能", 40),
-            (39.99, "不可能", 0.01),
-            (40, "100%可能", 0),
-            (40.01, "100%可能", 0),
+            (0, "不可能", 50),
+            (49.99, "不可能", 0.01),
+            (50, "100%可能", 0),
+            (50.01, "100%可能", 0),
         ):
             with self.subTest(amount=amount):
                 data = account_data_with_amount(amount, 0)

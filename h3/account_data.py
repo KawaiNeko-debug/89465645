@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -17,7 +18,7 @@ INVOICE_PROFILE_PATHS = (
 COUPON_PATH = "/api/integrated/customerOrderCenter/getEffectiveCouponsList"
 LEGACY_COUPON_PATH = "/api/integrated/customerOrderCenter/LCCoupons"
 PCB_ORDER_TYPES = {1, 2}
-PCB_SPEND_THRESHOLD = 40.0
+PCB_SPEND_THRESHOLD = 50.0
 
 COUPON_STATUS_CONFIG = {
     "unused": {"label": "未使用", "sort_status": 2, "legacy_status": "no"},
@@ -259,6 +260,34 @@ def _text(item: dict, *keys) -> str:
     return ""
 
 
+def _find_coupon_extend_state(value):
+    """Extract the structured eligibility state nested in coupon metadata."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[0] not in "[{":
+            return ""
+        try:
+            return _find_coupon_extend_state(json.loads(text))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key in {"couponextendstate", "businessextendstate", "extendstate"}:
+                if item not in (None, ""):
+                    return str(item).strip()
+        for item in value.values():
+            state = _find_coupon_extend_state(item)
+            if state:
+                return state
+    elif isinstance(value, list):
+        for item in value:
+            state = _find_coupon_extend_state(item)
+            if state:
+                return state
+    return ""
+
+
 def normalize_coupon(item: dict, status_key: str) -> dict:
     source = {}
     for key in ("operateCoupon", "historyCoupon", "coupon"):
@@ -266,6 +295,8 @@ def normalize_coupon(item: dict, status_key: str) -> dict:
         if isinstance(nested, dict):
             source.update(nested)
     source.update(item)
+    extend_state = _find_coupon_extend_state(source)
+    business_extend_json = _text(source, "businessExtendJson", "businessExtend", "extendJson")
     rule_parts = []
     for key in ("couponRule", "ruleText", "useRule", "couponDesc", "description", "remark", "limitDesc"):
         value = source.get(key)
@@ -274,6 +305,17 @@ def normalize_coupon(item: dict, status_key: str) -> dict:
     return {
         "name": _text(source, "couponName", "name", "couponTitle", "title", "displayName", "couponDesc") or "未命名优惠券",
         "business_type": _text(source, "businessType", "bizType", "businessName", "businessLine", "productType", "useScope"),
+        "applicable_scope": _text(
+            source,
+            "applicableScope",
+            "applicableBusiness",
+            "couponScope",
+            "useScope",
+            "tips",
+            "ruleDetails",
+        ),
+        "coupon_extend_state": extend_state,
+        "business_extend_json": business_extend_json,
         "valid_from": _text(
             source, "effectiveTime", "startDate", "startTime", "validStartTime", "beginTime", "createDate"
         ),
@@ -323,8 +365,20 @@ def merge_coupons(*groups: list[dict]) -> list[dict]:
 
 
 def is_pcb_smt_coupon(coupon: dict) -> bool:
+    extend_state = re.sub(r"[^a-z0-9]", "", str(coupon.get("coupon_extend_state") or "").lower())
+    if extend_state == "pcbandsmtfree":
+        return True
     text = " ".join(
-        str(coupon.get(key) or "") for key in ("name", "business_type", "rule_text", "target_url")
+        str(coupon.get(key) or "")
+        for key in (
+            "name",
+            "business_type",
+            "applicable_scope",
+            "coupon_extend_state",
+            "business_extend_json",
+            "rule_text",
+            "target_url",
+        )
     ).upper()
     text = re.sub(r"\s+", "", text)
     return "PCB" in text and "SMT" in text
@@ -342,7 +396,7 @@ def predict_pcb_smt(account_data: dict) -> tuple[str, str]:
     total = safe_float(account_data.get("pcb_total_amount"), 0.0) or 0.0
     if total < PCB_SPEND_THRESHOLD:
         shortfall = round(max(0.0, PCB_SPEND_THRESHOLD - total), 2)
-        return "不可能", f"样板/小批量 PCB 累计消费 {total:g} 元，距离 40 元还差 {shortfall:g} 元"
+        return "不可能", f"样板/小批量 PCB 累计消费 {total:g} 元，距离 50 元还差 {shortfall:g} 元"
     coupons = account_data.get("coupons") or {}
     if any(is_pcb_smt_coupon(item) for key in ("unused", "used") for item in coupons.get(key, [])):
         return "很小可能", f"PCB 累计消费 {total:g} 元；未使用或已使用列表中出现过 PCB+SMT 优惠券"
