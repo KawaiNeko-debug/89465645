@@ -421,7 +421,45 @@ class AccountDataTests(unittest.TestCase):
             self.assertEqual(workbook["PCB+SMT券"][2][3].value, "有")
             self.assertEqual(workbook["PCB+SMT券"][2][3].font.color.rgb, "00008000")
 
-    def test_future_or_expired_pcb_smt_coupon_creates_empty_status_sheet(self):
+    def test_coupon_detail_sheets_sort_profile_and_confidential_passwords(self):
+        rows = []
+        cases = (
+            ("no-confidential", "hidden-value", "无"),
+            ("yes-confidential", "hidden-value", "有"),
+            ("no-visible", "visible-value", "无"),
+            ("yes-visible", "visible-value", "有"),
+        )
+        for index, (username, password, invoice_status) in enumerate(cases, start=1):
+            data = account_data_with_amount()
+            data.update({
+                "invoice_profile_status": invoice_status,
+                "invoice_profile_exists": invoice_status == "有",
+            })
+            data["coupons"]["unused"] = [
+                normalize_coupon(
+                    {"couponName": "PCB+SMT顺序券", "expirationTime": "2026-12-31"},
+                    "unused",
+                )
+            ]
+            item = record(index, 0, data)
+            item.update({"username": username, "password": password})
+            rows.append(item)
+
+        with patch.dict(os.environ, {"CONFIDENTIAL_PASSWORDS": "hidden-value"}, clear=False):
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = os.path.join(temp_dir, "report.xlsx")
+                write_xlsx(path, rows)
+                workbook = load_workbook(path)
+                expected = ["yes-visible", "yes-confidential", "no-visible", "no-confidential"]
+                for sheet_name in ("PCB+SMT券", "PCB+SMT顺序券"):
+                    sheet = workbook[sheet_name]
+                    self.assertEqual([sheet.cell(row, 2).value for row in range(2, 6)], expected)
+                    self.assertEqual(
+                        [sheet.cell(row, 3).value for row in range(2, 6)],
+                        ["visible-value", "保密", "visible-value", "保密"],
+                    )
+
+    def test_future_or_expired_pcb_smt_coupon_omits_status_sheet(self):
         data = account_data_with_amount()
         data["coupons"]["unused"] = [
             normalize_coupon(
@@ -437,16 +475,14 @@ class AccountDataTests(unittest.TestCase):
             path = os.path.join(temp_dir, "report.xlsx")
             write_xlsx(path, [record(1, 0, data)])
             workbook = load_workbook(path)
-            self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
-            self.assertEqual(workbook["PCB+SMT券"]["A2"].value, "当前未检测到可用的PCB+SMT券")
+            self.assertNotIn("PCB+SMT券", workbook.sheetnames)
 
-    def test_pcb_smt_sheet_is_always_created_when_coupon_list_is_empty(self):
+    def test_pcb_smt_sheet_is_omitted_when_coupon_list_is_empty(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "report.xlsx")
             write_xlsx(path, [record(1, 0, account_data_with_amount())])
             workbook = load_workbook(path)
-            self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
-            self.assertEqual(workbook["PCB+SMT券"]["A2"].value, "当前未检测到可用的PCB+SMT券")
+            self.assertNotIn("PCB+SMT券", workbook.sheetnames)
 
     def test_no_profile_keeps_invoice_amount_cells_empty(self):
         data = account_data_with_amount(10, 5)
