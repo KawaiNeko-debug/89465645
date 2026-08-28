@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import io
 import zipfile
+from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
@@ -27,6 +28,7 @@ from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
 from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
 from h3.retry_components import build_retry_matrix, component_status, retry_components
 from h3.runner_recovery import should_rerun
+from h3.schedule_guard import has_manual_run_today
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
 from h3.campaign_vote import (
     activity_config_payload,
@@ -614,6 +616,18 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_schedule_guard_blocks_only_when_manual_run_is_same_shanghai_date(self):
+        payload = {
+            "workflow_runs": [
+                {"event": "workflow_dispatch", "created_at": "2026-08-27T23:30:00Z"},
+                {"event": "schedule", "created_at": "2026-08-28T00:00:00Z"},
+            ]
+        }
+        now = datetime.fromisoformat("2026-08-28T07:00:00+08:00")
+        self.assertTrue(has_manual_run_today(payload, now))
+        tomorrow = datetime.fromisoformat("2026-08-29T07:00:00+08:00")
+        self.assertFalse(has_manual_run_today(payload, tomorrow))
+
     def test_chain_state_base64_round_trip(self):
         state = {
             "schema_version": 1,
