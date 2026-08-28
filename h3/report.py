@@ -922,6 +922,14 @@ def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
     return not (valid_from and valid_from > now) and not (expires_at and expires_at < now)
 
 
+def invoice_profile_status(record: dict) -> str:
+    return str((record.get("account_data") or {}).get("invoice_profile_status") or "数据不足")
+
+
+def style_invoice_profile_cell(cell):
+    cell.font = FONT_GREEN if cell.value == "有" else (FONT_RED if cell.value == "无" else FONT_BLUE)
+
+
 def write_pcb_smt_sheet(workbook, records: list[dict]):
     rows = []
     for record in sort_records(records):
@@ -929,21 +937,23 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
             if is_current_pcb_smt_coupon(coupon):
                 rows.append((
                     str(record.get("username") or ""),
-                    str(record.get("password") or ""),
+                    report_password(str(record.get("password") or "")),
+                    invoice_profile_status(record),
                     str(coupon.get("name") or "未命名优惠券"),
                     str(coupon.get("expires_at") or ""),
                 ))
     if not rows:
         return
     sheet = workbook.create_sheet("PCB+SMT券", 1)
-    sheet.append(["序号", "客编", "密码", "优惠券名称", "优惠券过期时间"])
+    sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="E2F0D9")
         cell.font = Font(bold=True)
     for index, row in enumerate(rows, start=1):
         sheet.append([index, *row])
+        style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
     sheet.freeze_panes = "A2"
-    for column, width in {"A": 8, "B": 24, "C": 20, "D": 36, "E": 24}.items():
+    for column, width in {"A": 8, "B": 24, "C": 20, "D": 14, "E": 36, "F": 24}.items():
         sheet.column_dimensions[column].width = width
 
 
@@ -951,26 +961,29 @@ def write_coupon_sheets(workbook, records: list[dict]):
     by_name = {}
     for record in sort_records(records):
         account = str(record.get("username") or "").strip()
-        password = str(record.get("password") or "")
+        password = report_password(str(record.get("password") or ""))
+        invoice_status = invoice_profile_status(record)
         for coupon in (record.get("account_data") or {}).get("coupons", {}).get("unused", []) or []:
             name = str(coupon.get("name") or "未命名优惠券").strip()
             by_name.setdefault(name, []).append(
-                (account, password, str(coupon.get("expires_at") or "").strip())
+                (account, password, invoice_status, str(coupon.get("expires_at") or "").strip())
             )
     used = set(workbook.sheetnames)
     for name, rows in sorted(by_name.items(), key=lambda item: item[0]):
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
-        sheet.append(["序号", "客编", "密码", "优惠券过期时间"])
+        sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
         for cell in sheet[1]:
             cell.fill = PatternFill("solid", fgColor="E2F0D9")
             cell.font = Font(bold=True)
-        for index, (account, password, expiry) in enumerate(rows, start=1):
-            sheet.append([index, account, password, expiry])
+        for index, (account, password, invoice_status, expiry) in enumerate(rows, start=1):
+            sheet.append([index, account, password, invoice_status, expiry])
+            style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
         sheet.freeze_panes = "A2"
         sheet.column_dimensions["A"].width = 8
         sheet.column_dimensions["B"].width = 24
         sheet.column_dimensions["C"].width = 20
-        sheet.column_dimensions["D"].width = 24
+        sheet.column_dimensions["D"].width = 14
+        sheet.column_dimensions["E"].width = 24
 
 
 def write_xlsx(path: str, records: list[dict]):
@@ -1101,7 +1114,7 @@ def write_xlsx(path: str, records: list[dict]):
             sheet.cell(row_index, header_index["签到情况"]).fill = status_fill
         sheet.cell(row_index, header_index["签到情况"]).font = font_for_status(label)
         invoice_cell = sheet.cell(row_index, header_index["开票资料"])
-        invoice_cell.font = FONT_GREEN if invoice_cell.value == "有" else (FONT_RED if invoice_cell.value == "无" else FONT_BLUE)
+        style_invoice_profile_cell(invoice_cell)
         prediction_cell = sheet.cell(row_index, header_index["PCB+SMT优惠券预测"])
         prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
         gift_cell = sheet.cell(row_index, header_index["上市礼包领取情况"])
