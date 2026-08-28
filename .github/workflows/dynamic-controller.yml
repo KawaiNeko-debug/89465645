@@ -101,12 +101,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Guard duplicate scheduled invocation
+        id: schedule-guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          python h3/schedule_guard.py | tee guard.log
+          skip="$(sed -n 's/^skip=//p' guard.log | tail -n 1)"
+          echo "skip=${skip:-false}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
+        if: steps.schedule-guard.outputs.skip != 'true'
         with:
           python-version: "3.10"
       - name: Install dispatcher dependency
+        if: steps.schedule-guard.outputs.skip != 'true'
         run: python -m pip install --timeout 60 --retries 3 requests
       - name: Dispatch first configured group
+        if: steps.schedule-guard.outputs.skip != 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
