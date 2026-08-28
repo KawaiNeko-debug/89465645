@@ -930,6 +930,16 @@ def style_invoice_profile_cell(cell):
     cell.font = FONT_GREEN if cell.value == "有" else (FONT_RED if cell.value == "无" else FONT_BLUE)
 
 
+def coupon_sheet_row_sort_key(row: tuple) -> tuple:
+    account, password, invoice_status, *details = row
+    return (
+        str(invoice_status).strip() != "有",
+        str(password).strip() == "保密",
+        str(account).strip(),
+        *(str(value or "") for value in details),
+    )
+
+
 def write_pcb_smt_sheet(workbook, records: list[dict]):
     rows = []
     for record in sort_records(records):
@@ -942,20 +952,17 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
                     str(coupon.get("name") or "未命名优惠券"),
                     str(coupon.get("expires_at") or ""),
                 ))
+    rows.sort(key=coupon_sheet_row_sort_key)
+    if not rows:
+        return
     sheet = workbook.create_sheet("PCB+SMT券", 1)
     sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="E2F0D9")
         cell.font = Font(bold=True)
-    if rows:
-        for index, row in enumerate(rows, start=1):
-            sheet.append([index, *row])
-            style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
-    else:
-        sheet.append(["当前未检测到可用的PCB+SMT券"])
-        sheet.merge_cells("A2:F2")
-        sheet["A2"].font = FONT_BLUE
-        sheet["A2"].alignment = Alignment(horizontal="center")
+    for index, row in enumerate(rows, start=1):
+        sheet.append([index, *row])
+        style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
     sheet.freeze_panes = "A2"
     for column, width in {"A": 8, "B": 24, "C": 20, "D": 14, "E": 36, "F": 24}.items():
         sheet.column_dimensions[column].width = width
@@ -974,6 +981,7 @@ def write_coupon_sheets(workbook, records: list[dict]):
             )
     used = set(workbook.sheetnames)
     for name, rows in sorted(by_name.items(), key=lambda item: item[0]):
+        rows.sort(key=coupon_sheet_row_sort_key)
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
         sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
         for cell in sheet[1]:
