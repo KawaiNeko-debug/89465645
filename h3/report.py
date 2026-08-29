@@ -592,6 +592,37 @@ def problem_reason(record: dict) -> str:
     return "；".join(dict.fromkeys(reason for reason in reasons if reason)) or "未知异常"
 
 
+def is_vote_conflict_record(record: dict) -> bool:
+    if not truthy(record.get("vote_required")) or truthy(record.get("vote_success")):
+        return False
+    text = f"{record.get('vote_status') or ''} {record.get('vote_detail') or ''}"
+    return "\u672c\u671f\u5df2\u9501\u5b9a\u5176\u4ed6\u5546\u54c1" in text
+
+
+def vote_conflict_label(record: dict) -> str:
+    text = f"{record.get('vote_status') or ''} {record.get('vote_detail') or ''}".strip()
+    marker = "\u672c\u671f\u5df2\u9501\u5b9a\u5176\u4ed6\u5546\u54c1"
+    index = text.find(marker)
+    if index >= 0:
+        suffix = text[index + len(marker):].strip(" ：:，,；;")
+        return f"{marker}{(' ' + suffix) if suffix else ''}"
+    return marker
+
+
+def append_vote_conflict_summary(lines: list[str], records: list[dict]) -> None:
+    grouped = {}
+    for record in records:
+        if is_vote_conflict_record(record):
+            label = vote_conflict_label(record)
+            grouped[label] = grouped.get(label, 0) + 1
+    for label, count in sorted(grouped.items()):
+        remaining = count
+        while remaining > 0:
+            batch = min(50, remaining)
+            lines.append(f"{batch}\u4e2a\u8d26\u53f7：投票失败：{label}❌")
+            remaining -= batch
+
+
 def status_sort_bucket(record: dict) -> int:
     label = status_label(record)
     if label in {"签到失败", "签到异常", "签到风控", "取数异常"}:
@@ -669,8 +700,11 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     sorted_records = sort_records(records)
     summary = build_summary(sorted_records, expected_total)
     problem_records = [record for record in sorted_records if is_problem_record(record)]
+    conflict_records = [record for record in problem_records if is_vote_conflict_record(record)]
     visible_problem_records = [
-        record for record in problem_records if not truthy(record.get("risk_controlled"))
+        record
+        for record in problem_records
+        if not truthy(record.get("risk_controlled")) and not is_vote_conflict_record(record)
     ]
     category_label = str(os.getenv("SUMMARY_CATEGORY_LABEL") or "").strip()
 
@@ -680,7 +714,10 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
         return "\n".join(lines), summary
 
     if problem_records and not visible_problem_records:
-        lines = ["NO❗今天出现问题了捏"]
+        lines = []
+        append_vote_conflict_summary(lines, conflict_records)
+        if not lines:
+            lines = ["NO❗今天出现问题了捏"]
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
@@ -688,6 +725,7 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
         lines = ["NO❗今天出现问题了捏"]
         for record in visible_problem_records:
             lines.append(f"{record['username']}：{problem_reason(record)}❌")
+        append_vote_conflict_summary(lines, conflict_records)
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
