@@ -15,10 +15,10 @@ except ImportError:
 
 try:
     from account_data import empty_account_data
-    from listing_gift import is_listing_gift_date
+    from listing_gift import should_claim_listing_gift
 except ImportError:
     from h3.account_data import empty_account_data
-    from h3.listing_gift import is_listing_gift_date
+    from h3.listing_gift import should_claim_listing_gift
 
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
@@ -124,10 +124,10 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "task_start_date": task_date,
         "sign_completed_at": "",
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
-        "listing_gift_required": is_listing_gift_date(task_date),
+        "listing_gift_required": should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "待领取" if is_listing_gift_date(task_date) else "非领取日期",
+        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")) else "非每月礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": False,
