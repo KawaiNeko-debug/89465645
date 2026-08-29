@@ -11,6 +11,10 @@ on:
       chain_state:
         required: true
         type: string
+      summary_category:
+        required: false
+        default: ""
+        type: string
 
 env:
   TZ: Asia/Shanghai
@@ -106,6 +110,7 @@ jobs:
     timeout-minutes: 30
     env:
       CHAIN_STATE: ${{ inputs.chain_state }}
+      SUMMARY_CATEGORY_FILTER: ${{ inputs.summary_category }}
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       CONFIDENTIAL_PASSWORDS: ${{ secrets.CONFIDENTIAL_PASSWORDS }}
