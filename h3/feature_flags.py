@@ -7,7 +7,7 @@ SECKILL_ENABLED = False
 # 活动日期仍由 campaign_vote.py 严格限制；非活动日不会请求投票接口。
 VOTE_ENABLED = True
 
-# 上市礼包仅在 listing_gift.py 指定日期内执行。
+# 每月礼包仅在每月 30 日、且仅 new 组执行。
 LISTING_GIFT_ENABLED = True
 
 # 动态组工作流会通过环境变量显式开启会员资料采集。
