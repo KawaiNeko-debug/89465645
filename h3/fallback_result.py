@@ -6,11 +6,11 @@ from datetime import datetime
 try:
     from campaign_vote import is_vote_date
     from feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
-    from listing_gift import is_listing_gift_date
+    from listing_gift import should_claim_listing_gift
 except ImportError:
     from h3.campaign_vote import is_vote_date
     from h3.feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
-    from h3.listing_gift import is_listing_gift_date
+    from h3.listing_gift import should_claim_listing_gift
 
 
 def truthy(value) -> bool:
@@ -27,7 +27,7 @@ def main() -> int:
     execution_mode = str(os.getenv("EXECUTION_MODE") or "full").strip()
     skipped = truthy(os.getenv("SKIP_SIGN"))
     task_date = os.getenv("SIGN_TASK_START_DATE", "")
-    gift_required = LISTING_GIFT_ENABLED and is_listing_gift_date(task_date)
+    gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(task_date, group_code)
     vote_required = VOTE_ENABLED and is_vote_date(task_date)
     row = {
         "account_index": account_index,
