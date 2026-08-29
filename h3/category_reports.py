@@ -32,8 +32,19 @@ def main() -> int:
         if category in counts:
             counts[category] += int(group.get("account_count") or 0)
 
+    requested = str(os.getenv("SUMMARY_CATEGORY_FILTER") or "").strip().lower()
+    if requested in {"peer", "同行不签到组", "同行", "ll_zh"}:
+        selected_categories = (CATEGORIES[2],)
+    elif requested:
+        selected_categories = tuple(
+            item for item in CATEGORIES
+            if requested in {str(item[0]).strip().lower(), str(item[1]).strip().lower()}
+        )
+    else:
+        selected_categories = CATEGORIES
+
     failures = []
-    for category, filename_label in CATEGORIES:
+    for category, filename_label in selected_categories:
         env = os.environ.copy()
         env.update(
             {
