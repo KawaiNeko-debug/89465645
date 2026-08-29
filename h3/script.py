@@ -66,13 +66,23 @@ try:
     from account_data import AccountDataCollector, empty_account_data
     from exchange_history import normalize_exchange_records
     from feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
-    from listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
+    from listing_gift import (
+        LISTING_GIFT_PATH,
+        inspect_listing_gift_response,
+        inspect_monthly_gift_page_text,
+        should_claim_listing_gift,
+    )
     from retry_components import COMPONENTS, component_status, needs_retry, retry_components
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
     from h3.exchange_history import normalize_exchange_records
     from h3.feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
-    from h3.listing_gift import LISTING_GIFT_DATES, LISTING_GIFT_PATH, inspect_listing_gift_response, is_listing_gift_date
+    from h3.listing_gift import (
+        LISTING_GIFT_PATH,
+        inspect_listing_gift_response,
+        inspect_monthly_gift_page_text,
+        should_claim_listing_gift,
+    )
     from h3.retry_components import COMPONENTS, component_status, needs_retry, retry_components
 
 # 统一东八区时间
@@ -1007,13 +1017,15 @@ class ApiClient:
         self.account_data = empty_account_data()
         self.account_data_required = ACCOUNT_DATA_ENABLED
         self.account_data_fetch_success = not ACCOUNT_DATA_ENABLED
-        self.listing_gift_required = LISTING_GIFT_ENABLED and is_listing_gift_date(current_date_text())
+        self.listing_gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(
+            current_date_text(), execution_context().get("group_code")
+        )
         self.listing_gift_success = False
         self.listing_gift_attempted = False
         self.listing_gift_status = (
             "待领取"
             if self.listing_gift_required
-            else f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）"
+            else "非每月礼包领取日期或当前组不适用"
         )
         self.listing_gift_time = ""
         self.listing_gift_detail = ""
@@ -1797,40 +1809,59 @@ class ApiClient:
         return self.account_data
 
     def execute_listing_gift(self, task_date="") -> bool:
-        self.listing_gift_required = LISTING_GIFT_ENABLED and is_listing_gift_date(task_date or current_date_text())
+        self.listing_gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(
+            task_date or current_date_text(), execution_context().get("group_code")
+        )
         if not self.listing_gift_required:
-            self.listing_gift_status = f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）"
+            self.listing_gift_status = "非每月礼包领取日期或当前组不适用"
             return True
 
         self.listing_gift_attempted = True
-        last_result = {"state": "error", "success": False, "message": "礼包接口尚未执行"}
+        last_result = {"state": "error", "success": False, "message": "每月礼包尚未执行"}
         for attempt in range(1, 4):
-            response = self._request_json_once(
-                "POST",
-                f"{self.base_url}{LISTING_GIFT_PATH}",
-                tag="上市礼包领取",
-                payload=None,
-                dump_body_on_error=True,
-                dump_json_on_success_false=True,
-            )
-            last_result = inspect_listing_gift_response(response)
+            try:
+                self.page.goto(
+                    f"{self.base_url}{LISTING_GIFT_PATH}",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                self.page.wait_for_timeout(1200)
+                claim_buttons = self.page.get_by_text(
+                    re.compile(r"立即领取|领取礼包|点击领取")
+                ).all()
+                for button in claim_buttons:
+                    try:
+                        if button.is_visible(timeout=1000) and button.is_enabled(timeout=1000):
+                            button.click(timeout=5000)
+                            self.page.wait_for_timeout(1200)
+                            break
+                    except Exception:
+                        continue
+                body_text = self.page.locator("body").inner_text(timeout=5000)
+                last_result = inspect_monthly_gift_page_text(body_text)
+            except Exception as exc:
+                last_result = {
+                    "state": "error",
+                    "success": False,
+                    "message": f"每月礼包页面请求异常：{type(exc).__name__}",
+                }
             if last_result.get("success"):
                 self.listing_gift_success = True
                 self.listing_gift_time = current_time_text()
                 self.listing_gift_detail = str(last_result.get("message") or "").strip()
                 self.listing_gift_status = (
-                    "上市礼包已领取"
+                    "每月礼包已领取"
                     if last_result.get("state") == "already"
-                    else "上市礼包领取成功"
+                    else "每月礼包领取成功"
                 )
                 log(f"账号{self.account_index} - ✅ {self.listing_gift_status}")
                 return True
             if attempt < 3:
-                log(f"账号{self.account_index} - 上市礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
+                log(f"账号{self.account_index} - 每月礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
                 time.sleep(0.8 * attempt)
 
-        self.listing_gift_detail = str(last_result.get("message") or "礼包接口未确认领取成功").strip()
-        self.listing_gift_status = f"上市礼包领取失败：{self.listing_gift_detail}"
+        self.listing_gift_detail = str(last_result.get("message") or "每月礼包未确认领取成功").strip()
+        self.listing_gift_status = f"每月礼包领取失败：{self.listing_gift_detail}"
         log(f"账号{self.account_index} - ❌ {self.listing_gift_status}")
         return False
 
@@ -2673,10 +2704,14 @@ def sign_in_account(
         'task_start_date': task_start_date,
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
-        'listing_gift_required': LISTING_GIFT_ENABLED and is_listing_gift_date(task_start_date),
+        'listing_gift_required': LISTING_GIFT_ENABLED and should_claim_listing_gift(
+            task_start_date, execution_context().get('group_code')
+        ),
         'listing_gift_success': False,
         'listing_gift_attempted': False,
-        'listing_gift_status': '待领取' if LISTING_GIFT_ENABLED and is_listing_gift_date(task_start_date) else f"非领取日期（仅 {', '.join(sorted(LISTING_GIFT_DATES))}）",
+        'listing_gift_status': '待领取' if LISTING_GIFT_ENABLED and should_claim_listing_gift(
+            task_start_date, execution_context().get('group_code')
+        ) else '非每月礼包领取日期或当前组不适用',
         'listing_gift_time': '',
         'listing_gift_detail': '',
         'vote_required': VOTE_ENABLED and is_vote_date(task_start_date),
@@ -3037,7 +3072,9 @@ def process_single_account(username, password, account_index, total_accounts):
         'task_start_date': normalize_task_start_date(),
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
-        'listing_gift_required': LISTING_GIFT_ENABLED and is_listing_gift_date(normalize_task_start_date()),
+        'listing_gift_required': LISTING_GIFT_ENABLED and should_claim_listing_gift(
+            normalize_task_start_date(), execution_context().get('group_code')
+        ),
         'listing_gift_success': False,
         'listing_gift_attempted': False,
         'listing_gift_status': '未执行',
