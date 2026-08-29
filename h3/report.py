@@ -6,7 +6,7 @@ import smtplib
 import ssl
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from email.header import Header
 from email.mime.text import MIMEText
 
@@ -900,12 +900,17 @@ def parse_coupon_datetime(value, end_of_day=False):
     text = str(value or "").strip()
     if not text:
         return None
-    normalized = text.replace("/", "-").replace("T", " ").replace("Z", "")
+    normalized = text.replace("/", "-").replace("T", " ")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
     if end_of_day and re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
         normalized += " 23:59:59"
     for candidate in (normalized, normalized[:19], normalized[:10]):
         try:
-            return datetime.fromisoformat(candidate)
+            parsed = datetime.fromisoformat(candidate)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+            return parsed.astimezone(timezone(timedelta(hours=8)))
         except ValueError:
             continue
     return None
@@ -916,7 +921,11 @@ def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
         return False
     if str(coupon.get("status_key") or "unused").lower() != "unused":
         return False
-    now = now or datetime.now()
+    now = now or datetime.now(timezone(timedelta(hours=8)))
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone(timedelta(hours=8)))
+    else:
+        now = now.astimezone(timezone(timedelta(hours=8)))
     valid_from = parse_coupon_datetime(coupon.get("valid_from"))
     expires_at = parse_coupon_datetime(coupon.get("expires_at"), end_of_day=True)
     return not (valid_from and valid_from > now) and not (expires_at and expires_at < now)
