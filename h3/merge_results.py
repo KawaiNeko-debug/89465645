@@ -288,7 +288,7 @@ def main():
             continue
         normalized_path = path.replace("\\", "/").lower()
         if "/retry-result-" in normalized_path:
-            retry_map[account_index] = row
+            retry_map.setdefault(account_index, []).append(row)
         elif "/initial-result-" in normalized_path or "/account-result-" in normalized_path:
             initial_map[account_index] = row
 
@@ -296,11 +296,20 @@ def main():
     account_indexes = sorted(set(initial_map.keys()) | set(retry_map.keys()))
     for account_index in account_indexes:
         initial = initial_map.get(account_index)
-        retry = retry_map.get(account_index)
-        if initial and retry:
-            merged.append(pick_result(initial, retry))
-        elif retry:
-            merged.append(retry)
+        retries = sorted(
+            retry_map.get(account_index, []),
+            key=lambda item: safe_int(item.get("retry_count"), 0),
+        )
+        if initial:
+            selected = initial
+            for retry in retries:
+                selected = pick_result(selected, retry)
+            merged.append(selected)
+        elif retries:
+            selected = retries[0]
+            for retry in retries[1:]:
+                selected = pick_result(selected, retry)
+            merged.append(selected)
         elif initial:
             merged.append(initial)
 
