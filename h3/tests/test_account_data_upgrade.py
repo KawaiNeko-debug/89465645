@@ -57,6 +57,7 @@ from h3.category_reports import main as category_reports_main
 from h3.report import (
     build_message,
     is_problem_record,
+    is_vote_conflict_record,
     load_account_lookup,
     load_credential_lookup,
     mask_account,
@@ -1191,6 +1192,30 @@ class DynamicGroupTests(unittest.TestCase):
             self.assertEqual(matrix[0]["account_index"], 1)
             self.assertEqual(matrix[0]["retry_components"], "vote")
             self.assertEqual(matrix[1]["account_index"], 2)
+
+    def test_vote_conflicts_are_aggregated_in_message(self):
+        rows = []
+        for index in range(1, 123):
+            rows.append(
+                {
+                    "account_index": index,
+                    "username": f"user{index}",
+                    "vote_required": True,
+                    "vote_success": False,
+                    "vote_status": "投票失败：本期已锁定其他商品 SKUJYE",
+                    "sign_success": True,
+                    "points_fetch_success": True,
+                    "activity_fetch_success": True,
+                    "data_fetch_completed": True,
+                    "account_data_required": False,
+                }
+            )
+        self.assertTrue(is_vote_conflict_record(rows[0]))
+        message, _ = build_message(rows, {}, len(rows))
+        self.assertIn("50个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
+        self.assertIn("22个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
+        self.assertEqual(message.count("投票失败：本期已锁定其他商品 SKUJYE❌"), 3)
+        self.assertNotIn("user1：", message)
 
     def test_component_merge_preserves_successful_vote_and_data(self):
         initial = {
