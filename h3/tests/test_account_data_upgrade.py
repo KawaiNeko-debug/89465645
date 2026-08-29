@@ -26,7 +26,13 @@ from h3.account_data import (
 )
 from h3.merge_results import pick_result
 from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
-from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
+from h3.report import (
+    is_current_pcb_smt_coupon,
+    max_lottery_count,
+    normalize_activity_records,
+    parse_coupon_datetime,
+    write_xlsx,
+)
 from h3.retry_components import build_retry_matrix, component_status, retry_components
 from h3.runner_recovery import should_rerun
 from h3.schedule_guard import has_controller_run_today, has_manual_run_today
@@ -420,6 +426,19 @@ class AccountDataTests(unittest.TestCase):
             self.assertEqual(pcb_headers[:6], ["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
             self.assertEqual(workbook["PCB+SMT券"][2][3].value, "有")
             self.assertEqual(workbook["PCB+SMT券"][2][3].font.color.rgb, "00008000")
+
+    def test_pcb_smt_coupon_date_comparison_normalizes_timezones(self):
+        self.assertIsNotNone(parse_coupon_datetime("2026-08-29T00:00:00+08:00"))
+        self.assertIsNotNone(parse_coupon_datetime("2026-08-28T16:00:00Z"))
+        coupon = normalize_coupon(
+            {
+                "couponName": "PCB+SMT券",
+                "validFrom": "2026-08-29T00:00:00+08:00",
+                "expirationTime": "2026-09-01T00:00:00+08:00",
+            },
+            "unused",
+        )
+        self.assertTrue(is_current_pcb_smt_coupon(coupon, datetime.fromisoformat("2026-08-29T12:00:00+08:00")))
 
     def test_coupon_detail_sheets_sort_profile_and_confidential_passwords(self):
         rows = []
