@@ -23,11 +23,11 @@ except ImportError:
 try:
     from account_data import empty_account_data, is_pcb_smt_coupon
     from campaign_vote import is_vote_date
-    from listing_gift import is_listing_gift_date
+    from listing_gift import should_claim_listing_gift
 except ImportError:
     from h3.account_data import empty_account_data, is_pcb_smt_coupon
     from h3.campaign_vote import is_vote_date
-    from h3.listing_gift import is_listing_gift_date
+    from h3.listing_gift import should_claim_listing_gift
 
 for stream_name in ("stdout", "stderr"):
     stream = getattr(sys, stream_name, None)
@@ -324,7 +324,7 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
     listing_gift_required = (
         truthy(record.get("listing_gift_required"))
         if "listing_gift_required" in record
-        else is_listing_gift_date(task_start_date)
+        else should_claim_listing_gift(task_start_date, group_code)
     )
     listing_gift_status = str(record.get("listing_gift_status") or "").strip()
     if listing_gift_required and not listing_gift_status:
@@ -457,10 +457,10 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         "account_data_required": truthy(os.getenv("ACCOUNT_DATA_ENABLED", "false")),
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),
-        "listing_gift_required": is_listing_gift_date(task_date),
+        "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "缺少礼包领取结果" if is_listing_gift_date(task_date) else "非领取日期",
+        "listing_gift_status": "缺少每月礼包领取结果" if should_claim_listing_gift(task_date, group_code) else "非每月礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": vote_required,
@@ -690,7 +690,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 次日成功: {summary['next_day']}",
         f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
-        f"  ├── 上市礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+        f"  ├── 每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
@@ -1081,7 +1081,7 @@ def write_xlsx(path: str, records: list[dict]):
         "已过期优惠券",
         "PCB+SMT优惠券预测",
         "预测依据",
-        "上市礼包领取情况",
+        "每月礼包领取情况",
         "投票状态",
         "投票时间",
         "投票商品",
@@ -1176,7 +1176,7 @@ def write_xlsx(path: str, records: list[dict]):
         style_invoice_profile_cell(invoice_cell)
         prediction_cell = sheet.cell(row_index, header_index["PCB+SMT优惠券预测"])
         prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
-        gift_cell = sheet.cell(row_index, header_index["上市礼包领取情况"])
+        gift_cell = sheet.cell(row_index, header_index["每月礼包领取情况"])
         gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
         vote_cell = sheet.cell(row_index, header_index["投票状态"])
         vote_cell.font = font_for_vote_status(record)
