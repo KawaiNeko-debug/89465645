@@ -29,7 +29,7 @@ from h3.listing_gift import inspect_listing_gift_response, is_listing_gift_date
 from h3.report import max_lottery_count, normalize_activity_records, write_xlsx
 from h3.retry_components import build_retry_matrix, component_status, retry_components
 from h3.runner_recovery import should_rerun
-from h3.schedule_guard import has_manual_run_today
+from h3.schedule_guard import has_controller_run_today, has_manual_run_today
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
 from h3.campaign_vote import (
     activity_config_payload,
@@ -689,7 +689,7 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
-    def test_schedule_guard_blocks_only_when_manual_run_is_same_shanghai_date(self):
+    def test_schedule_guard_blocks_manual_run_on_same_shanghai_date(self):
         payload = {
             "workflow_runs": [
                 {"event": "workflow_dispatch", "created_at": "2026-08-27T23:30:00Z"},
@@ -700,6 +700,31 @@ class DynamicGroupTests(unittest.TestCase):
         self.assertTrue(has_manual_run_today(payload, now))
         tomorrow = datetime.fromisoformat("2026-08-29T07:00:00+08:00")
         self.assertFalse(has_manual_run_today(payload, tomorrow))
+
+    def test_schedule_guard_blocks_any_other_controller_event_and_excludes_current_run(self):
+        payload = {
+            "workflow_runs": [
+                {"id": 101, "event": "workflow_dispatch", "created_at": "2026-08-29T06:00:00Z"},
+                {"id": 102, "event": "schedule", "created_at": "2026-08-29T07:00:00Z"},
+            ]
+        }
+        now = datetime.fromisoformat("2026-08-29T16:00:00+08:00")
+        self.assertTrue(has_controller_run_today(payload, now, current_run_id="999"))
+        self.assertTrue(has_controller_run_today(payload, now, current_run_id="102"))
+        self.assertFalse(
+            has_controller_run_today(
+                {"workflow_runs": [{"id": 101, "event": "workflow_dispatch", "created_at": "2026-08-28T06:00:00Z"}]},
+                now,
+                current_run_id="999",
+            )
+        )
+        self.assertFalse(
+            has_controller_run_today(
+                {"workflow_runs": [{"id": 101, "event": "workflow_dispatch", "created_at": "2026-08-29T06:00:00Z"}]},
+                now,
+                current_run_id="101",
+            )
+        )
 
     def test_chain_state_base64_round_trip(self):
         state = {
