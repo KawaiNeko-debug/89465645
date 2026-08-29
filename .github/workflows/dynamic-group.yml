@@ -361,12 +361,228 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-${{ matrix.account_index }}
+          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r1-${{ matrix.account_index }}
+          path: result.json
+          retention-days: 2
+
+  prepare_retry2:
+    needs: [prepare, retry]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.retry_matrix.outputs.matrix }}
+      has_failed: ${{ steps.retry_matrix.outputs.has_failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r1-*
+          path: retry1-results
+      - id: retry_matrix
+        env:
+          EXPECTED_COUNT: ${{ needs.prepare.outputs.count }}
+        run: python h3/retry_components.py matrix retry1-results "$EXPECTED_COUNT"
+
+  retry2:
+    needs: [prepare, prepare_retry2]
+    if: always() && needs.prepare_retry2.outputs.has_failed == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_retry2.outputs.matrix) }}
+    env:
+      BASE_URL: ${{ secrets.BASE_URL }}
+      PASSPORT_URL: ${{ secrets.PASSPORT_URL }}
+      REFERER: ${{ secrets.REFERER }}
+      SLIDER_ID: ${{ secrets.SLIDER_ID }}
+      WRAPPER_ID: ${{ secrets.WRAPPER_ID }}
+      HEADER_CLIENT_TYPE: ${{ secrets.HEADER_CLIENT_TYPE }}
+      HEADER_ACCESS_TOKEN: ${{ secrets.HEADER_ACCESS_TOKEN }}
+      HEADER_ACCESS_TOKEN_FALLBACKS: ${{ secrets.HEADER_ACCESS_TOKEN_FALLBACKS }}
+      HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
+      TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
+      TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
+      API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
+      BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
+      RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+      MEMBER_API_BASE: ${{ secrets.MEMBER_API_BASE }}
+      VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
+      VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
+      ACCOUNT_DATA_ENABLED: "true"
+      SIGN_TASK_START_DATE: ${{ inputs.task_start_date }}
+      GROUP_NAME: ${{ inputs.group_code }}
+      GROUP_CODE: ${{ inputs.group_code }}
+      ACCOUNT_CATEGORY: ${{ needs.prepare.outputs.account_category }}
+      EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
+      SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
+      ACCOUNT_INDEX: ${{ matrix.account_index }}
+      RETRY_COMPONENTS: ${{ matrix.retry_components }}
+      PREVIOUS_RESULT_PATH: previous-result/result.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: h3/requirements.txt
+      - name: Download previous result
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r1-${{ matrix.account_index }}
+          path: previous-result
+      - name: Install dependencies
+        timeout-minutes: 20
+        run: |
+          python -m pip install --timeout 60 --retries 3 -r h3/requirements.txt
+          timeout 900 python -m playwright install --with-deps chromium
+      - name: Select account
+        shell: bash
+        run: |
+          set +x
+          python - <<'PY'
+          import os
+          code = os.environ['GROUP_CODE'].strip().lower()
+          lines = [line.strip() for line in os.environ[code].splitlines() if line.strip() and ',' in line]
+          username, password = lines[int(os.environ['ACCOUNT_INDEX']) - 1].split(',', 1)
+          print(f"::add-mask::{username}")
+          print(f"::add-mask::{password}")
+          with open('.account-credentials', 'w', encoding='utf-8') as credentials:
+              credentials.write(username + '\n' + password + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write('ACCOUNT_CREDENTIAL_FILE=.account-credentials\n')
+          PY
+      - name: Retry incomplete components on fresh runner
+        timeout-minutes: 35
+        env:
+          RESULT_JSON_PATH: result.json
+        run: |
+          set +x
+          trap 'rm -f "$ACCOUNT_CREDENTIAL_FILE"' EXIT
+          python h3/script.py
+      - name: Ensure retry result
+        if: always()
+        run: python h3/fallback_result.py result.json
+      - name: Upload retry result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r2-${{ matrix.account_index }}
+          path: result.json
+          retention-days: 2
+
+  prepare_retry3:
+    needs: [prepare, retry2]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.retry_matrix.outputs.matrix }}
+      has_failed: ${{ steps.retry_matrix.outputs.has_failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r2-*
+          path: retry2-results
+      - id: retry_matrix
+        env:
+          EXPECTED_COUNT: ${{ needs.prepare.outputs.count }}
+        run: python h3/retry_components.py matrix retry2-results "$EXPECTED_COUNT"
+
+  retry3:
+    needs: [prepare, prepare_retry3]
+    if: always() && needs.prepare_retry3.outputs.has_failed == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_retry3.outputs.matrix) }}
+    env:
+      BASE_URL: ${{ secrets.BASE_URL }}
+      PASSPORT_URL: ${{ secrets.PASSPORT_URL }}
+      REFERER: ${{ secrets.REFERER }}
+      SLIDER_ID: ${{ secrets.SLIDER_ID }}
+      WRAPPER_ID: ${{ secrets.WRAPPER_ID }}
+      HEADER_CLIENT_TYPE: ${{ secrets.HEADER_CLIENT_TYPE }}
+      HEADER_ACCESS_TOKEN: ${{ secrets.HEADER_ACCESS_TOKEN }}
+      HEADER_ACCESS_TOKEN_FALLBACKS: ${{ secrets.HEADER_ACCESS_TOKEN_FALLBACKS }}
+      HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
+      TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
+      TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
+      API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
+      BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
+      RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+      MEMBER_API_BASE: ${{ secrets.MEMBER_API_BASE }}
+      VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
+      VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
+      ACCOUNT_DATA_ENABLED: "true"
+      SIGN_TASK_START_DATE: ${{ inputs.task_start_date }}
+      GROUP_NAME: ${{ inputs.group_code }}
+      GROUP_CODE: ${{ inputs.group_code }}
+      ACCOUNT_CATEGORY: ${{ needs.prepare.outputs.account_category }}
+      EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
+      SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
+      ACCOUNT_INDEX: ${{ matrix.account_index }}
+      RETRY_COMPONENTS: ${{ matrix.retry_components }}
+      PREVIOUS_RESULT_PATH: previous-result/result.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: h3/requirements.txt
+      - name: Download previous result
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r2-${{ matrix.account_index }}
+          path: previous-result
+      - name: Install dependencies
+        timeout-minutes: 20
+        run: |
+          python -m pip install --timeout 60 --retries 3 -r h3/requirements.txt
+          timeout 900 python -m playwright install --with-deps chromium
+      - name: Select account
+        shell: bash
+        run: |
+          set +x
+          python - <<'PY'
+          import os
+          code = os.environ['GROUP_CODE'].strip().lower()
+          lines = [line.strip() for line in os.environ[code].splitlines() if line.strip() and ',' in line]
+          username, password = lines[int(os.environ['ACCOUNT_INDEX']) - 1].split(',', 1)
+          print(f"::add-mask::{username}")
+          print(f"::add-mask::{password}")
+          with open('.account-credentials', 'w', encoding='utf-8') as credentials:
+              credentials.write(username + '\n' + password + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              output.write('ACCOUNT_CREDENTIAL_FILE=.account-credentials\n')
+          PY
+      - name: Retry incomplete components on fresh runner
+        timeout-minutes: 35
+        env:
+          RESULT_JSON_PATH: result.json
+        run: |
+          set +x
+          trap 'rm -f "$ACCOUNT_CREDENTIAL_FILE"' EXIT
+          python h3/script.py
+      - name: Ensure retry result
+        if: always()
+        run: python h3/fallback_result.py result.json
+      - name: Upload retry result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r3-${{ matrix.account_index }}
           path: result.json
           retention-days: 2
 
   finalize:
-    needs: [prepare, run, prepare_retry, retry]
+    needs: [prepare, run, prepare_retry, retry, prepare_retry2, retry2, prepare_retry3, retry3]
     if: always()
     runs-on: ubuntu-22.04
     steps:
@@ -384,7 +600,7 @@ jobs:
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          pattern: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-*
+          pattern: retry-result-${{ inputs.orchestration_id }}-${{ inputs.group_code }}-r*-*
           path: account-results
       - name: Merge group results
         if: always()
