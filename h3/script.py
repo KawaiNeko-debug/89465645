@@ -67,9 +67,12 @@ try:
     from exchange_history import normalize_exchange_records
     from feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from listing_gift import (
+        MONTHLY_GIFT_API_PATH,
+        MONTHLY_GIFT_ID,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
+        monthly_gift_origin,
         should_claim_listing_gift,
     )
     from retry_components import COMPONENTS, component_status, needs_retry, retry_components
@@ -78,9 +81,12 @@ except ImportError:
     from h3.exchange_history import normalize_exchange_records
     from h3.feature_flags import ACCOUNT_DATA_ENABLED, LISTING_GIFT_ENABLED, SECKILL_ENABLED, VOTE_ENABLED
     from h3.listing_gift import (
+        MONTHLY_GIFT_API_PATH,
+        MONTHLY_GIFT_ID,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
+        monthly_gift_origin,
         should_claim_listing_gift,
     )
     from h3.retry_components import COMPONENTS, component_status, needs_retry, retry_components
@@ -1820,25 +1826,34 @@ class ApiClient:
         last_result = {"state": "error", "success": False, "message": "每月礼包尚未执行"}
         for attempt in range(1, 4):
             try:
+                gift_origin = monthly_gift_origin(self.base_url)
                 self.page.goto(
-                    f"{self.base_url}{LISTING_GIFT_PATH}",
+                    f"{gift_origin}{LISTING_GIFT_PATH}",
                     wait_until="domcontentloaded",
                     timeout=60000,
                 )
-                self.page.wait_for_timeout(1200)
-                claim_buttons = self.page.get_by_text(
-                    re.compile(r"立即领取|领取礼包|点击领取")
-                ).all()
-                for button in claim_buttons:
-                    try:
-                        if button.is_visible(timeout=1000) and button.is_enabled(timeout=1000):
-                            button.click(timeout=5000)
-                            self.page.wait_for_timeout(1200)
-                            break
-                    except Exception:
-                        continue
-                body_text = self.page.locator("body").inner_text(timeout=5000)
-                last_result = inspect_monthly_gift_page_text(body_text)
+                # The page establishes the authenticated mobile SSO session;
+                # claiming itself is a JSON POST (the page's button is only a
+                # UI wrapper and is unreliable in headless runs).
+                # The actual claim is a JSON POST made by the mobile page.
+                # Use the same authenticated browser session captured in the
+                # HAR instead of relying on client-rendered button text.
+                api_result = inspect_listing_gift_response(
+                    self._browser_fetch_json_once(
+                        "POST",
+                        f"{gift_origin}{MONTHLY_GIFT_API_PATH}",
+                        payload={"id": MONTHLY_GIFT_ID},
+                        tag="每月礼包领取",
+                        dump_body_on_error=True,
+                    )
+                )
+                if api_result.get("success"):
+                    last_result = api_result
+                else:
+                    body_text = self.page.locator("body").inner_text(timeout=5000)
+                    page_result = inspect_monthly_gift_page_text(body_text)
+                    if page_result.get("success"):
+                        last_result = page_result
             except Exception as exc:
                 last_result = {
                     "state": "error",
@@ -2926,7 +2941,14 @@ def sign_in_account(
 
                 if not banned_account and "gift" in components:
                     client.execute_listing_gift(task_start_date)
-                client.fetch_account_data(components)
+                # A gift-only retry still needs a fresh coupon snapshot: the
+                # bundle may have issued new coupons, and the original result
+                # can predate the claim.  Keep all other component scoping
+                # intact so completed work is not repeated.
+                data_components = set(components or ())
+                if "gift" in data_components:
+                    data_components.add("coupons")
+                client.fetch_account_data(data_components)
                 client.fetch_activity_records(components)
                 if VOTE_ENABLED and "vote" in components:
                     vote_allowed = can_vote_after_sign(
