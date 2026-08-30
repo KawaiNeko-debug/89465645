@@ -99,9 +99,17 @@ def new_chain_state(
     groups = configured_groups()
     after = str(after_group or "").strip().lower()
     if after:
-        positions = {item["group_code"]: index for index, item in enumerate(groups)}
-        if after in positions:
-            groups = groups[positions[after] + 1 :]
+        # Filter by the frozen global order, not by the configured subset:
+        # this also works when the checkpoint group itself has no accounts.
+        try:
+            checkpoint = GROUP_CODES.index(after)
+        except ValueError:
+            raise ValueError(f"unsupported resume checkpoint: {after}")
+        groups = [
+            item
+            for item in groups
+            if GROUP_CODES.index(item["group_code"]) > checkpoint
+        ]
     return {
         "schema_version": 1,
         "orchestration_id": str(orchestration_id),
