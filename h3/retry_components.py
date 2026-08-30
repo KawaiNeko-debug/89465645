@@ -93,7 +93,36 @@ def load_result(path: str | Path) -> dict | None:
     return rows[0]
 
 
-def build_retry_matrix(results_dir: str | Path, expected_count: int) -> list[dict]:
+def _candidate_indexes_from_env() -> list[int] | None:
+    """Return only the accounts that entered the immediately previous retry round."""
+    raw = os.environ.get("RETRY_CANDIDATE_MATRIX", "").strip()
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    include = payload.get("include") if isinstance(payload, dict) else None
+    if not isinstance(include, list):
+        return []
+    indexes = []
+    for item in include:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("account_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if index > 0 and index not in indexes:
+            indexes.append(index)
+    return indexes
+
+
+def build_retry_matrix(
+    results_dir: str | Path,
+    expected_count: int,
+    candidate_indexes: list[int] | None = None,
+) -> list[dict]:
     rows = {}
     pattern = os.path.join(str(results_dir), "**", "result.json")
     for path in glob.glob(pattern, recursive=True):
@@ -108,7 +137,15 @@ def build_retry_matrix(results_dir: str | Path, expected_count: int) -> list[dic
             rows[account_index] = row
 
     matrix = []
-    all_indexes = range(1, max(0, expected_count) + 1) if expected_count else sorted(rows)
+    # The first retry round may use the full account count because a missing
+    # initial artifact means that account never completed. Later rounds must
+    # be restricted to the previous retry matrix; otherwise skipped accounts
+    # are incorrectly reintroduced as failures.
+    all_indexes = (
+        candidate_indexes
+        if candidate_indexes is not None
+        else (range(1, max(0, expected_count) + 1) if expected_count else sorted(rows))
+    )
     for account_index in all_indexes:
         row = rows.get(account_index)
         components = list(COMPONENTS) if row is None else retry_components(row)
@@ -127,7 +164,7 @@ def main() -> int:
         raise SystemExit("usage: retry_components.py matrix RESULTS_DIR [EXPECTED_COUNT]")
     results_dir = sys.argv[2] if len(sys.argv) > 2 else "initial-results"
     expected_count = int(sys.argv[3]) if len(sys.argv) > 3 else 0
-    matrix = build_retry_matrix(results_dir, expected_count)
+    matrix = build_retry_matrix(results_dir, expected_count, _candidate_indexes_from_env())
     output = os.environ.get("GITHUB_OUTPUT")
     values = {
         "matrix": json.dumps({"include": matrix}, ensure_ascii=False, separators=(",", ":")),
