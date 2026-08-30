@@ -11,6 +11,10 @@ on:
       chain_state:
         required: true
         type: string
+      chain_mode:
+        required: false
+        default: "groups"
+        type: string
       summary_category:
         required: false
         default: ""
@@ -124,11 +128,16 @@ jobs:
           cache-dependency-path: h3/requirements.txt
       - name: Install report dependencies
         run: python -m pip install --timeout 60 --retries 3 requests openpyxl
-      - name: Download exact group artifacts
+      - name: Download exact chain artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
-        run: python h3/dynamic_groups.py download --chain-state-env CHAIN_STATE --output-dir results
+        run: |
+          if [ "${{ inputs.chain_mode }}" = "mixed_batches" ]; then
+            python h3/mixed_batches.py download --chain-state-env CHAIN_STATE --output-dir results
+          else
+            python h3/dynamic_groups.py download --chain-state-env CHAIN_STATE --output-dir results
+          fi
       - name: Generate and send category reports
         run: python h3/category_reports.py results
       - name: Upload category reports

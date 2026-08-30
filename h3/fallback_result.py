@@ -27,14 +27,18 @@ def main() -> int:
     execution_mode = str(os.getenv("EXECUTION_MODE") or "full").strip()
     skipped = truthy(os.getenv("SKIP_SIGN"))
     task_date = os.getenv("SIGN_TASK_START_DATE", "")
+    batch_id = str(os.getenv("BATCH_ID") or "").strip()
+    execution_order = int(os.getenv("EXECUTION_ORDER") or account_index)
     gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(task_date, group_code)
     vote_required = VOTE_ENABLED and is_vote_date(task_date)
     row = {
         "account_index": account_index,
-        "execution_order": account_index,
+        "execution_order": execution_order,
         "group_name": group_code,
         "group_number": 0,
         "group_code": group_code,
+        "source_group": group_code,
+        "batch_id": batch_id,
         "group_position": f"{group_code}账号{account_index}",
         "account_category": category,
         "execution_mode": execution_mode,
@@ -85,6 +89,8 @@ def main() -> int:
         "generated_at": datetime.now().isoformat(),
         "group_name": group_code,
         "group_code": group_code,
+        "source_group": group_code,
+        "batch_id": batch_id,
         "account_category": category,
         "execution_mode": execution_mode,
         "total_accounts": 1,

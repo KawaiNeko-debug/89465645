@@ -1,0 +1,328 @@
+name: dynamic-batch
+
+run-name: mixed-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      orchestration_id:
+        required: true
+        type: string
+      batch_id:
+        required: true
+        type: string
+      task_start_date:
+        required: true
+        type: string
+      continue_chain:
+        required: false
+        default: "false"
+        type: string
+      chain_state:
+        required: true
+        type: string
+
+env:
+  TZ: Asia/Shanghai
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  old1: ${{ secrets.old1 }}
+  old2: ${{ secrets.old2 }}
+  old3: ${{ secrets.old3 }}
+  old4: ${{ secrets.old4 }}
+  old5: ${{ secrets.old5 }}
+  old6: ${{ secrets.old6 }}
+  old7: ${{ secrets.old7 }}
+  old8: ${{ secrets.old8 }}
+  old9: ${{ secrets.old9 }}
+  old10: ${{ secrets.old10 }}
+  old11: ${{ secrets.old11 }}
+  old12: ${{ secrets.old12 }}
+  old13: ${{ secrets.old13 }}
+  old14: ${{ secrets.old14 }}
+  old15: ${{ secrets.old15 }}
+  old16: ${{ secrets.old16 }}
+  old17: ${{ secrets.old17 }}
+  old18: ${{ secrets.old18 }}
+  old19: ${{ secrets.old19 }}
+  old20: ${{ secrets.old20 }}
+  new1: ${{ secrets.new1 }}
+  new2: ${{ secrets.new2 }}
+  new3: ${{ secrets.new3 }}
+  new4: ${{ secrets.new4 }}
+  new5: ${{ secrets.new5 }}
+  new6: ${{ secrets.new6 }}
+  new7: ${{ secrets.new7 }}
+  new8: ${{ secrets.new8 }}
+  new9: ${{ secrets.new9 }}
+  new10: ${{ secrets.new10 }}
+  new11: ${{ secrets.new11 }}
+  new12: ${{ secrets.new12 }}
+  new13: ${{ secrets.new13 }}
+  new14: ${{ secrets.new14 }}
+  new15: ${{ secrets.new15 }}
+  new16: ${{ secrets.new16 }}
+  new17: ${{ secrets.new17 }}
+  new18: ${{ secrets.new18 }}
+  new19: ${{ secrets.new19 }}
+  new20: ${{ secrets.new20 }}
+  ll1: ${{ secrets.ll1 }}
+  ll2: ${{ secrets.ll2 }}
+  ll3: ${{ secrets.ll3 }}
+  ll4: ${{ secrets.ll4 }}
+  ll5: ${{ secrets.ll5 }}
+  ll6: ${{ secrets.ll6 }}
+  ll7: ${{ secrets.ll7 }}
+  ll8: ${{ secrets.ll8 }}
+  ll9: ${{ secrets.ll9 }}
+  ll10: ${{ secrets.ll10 }}
+  ll11: ${{ secrets.ll11 }}
+  ll12: ${{ secrets.ll12 }}
+  ll13: ${{ secrets.ll13 }}
+  ll14: ${{ secrets.ll14 }}
+  ll15: ${{ secrets.ll15 }}
+  ll16: ${{ secrets.ll16 }}
+  ll17: ${{ secrets.ll17 }}
+  ll18: ${{ secrets.ll18 }}
+  ll19: ${{ secrets.ll19 }}
+  ll20: ${{ secrets.ll20 }}
+  zh1: ${{ secrets.zh1 }}
+  zh2: ${{ secrets.zh2 }}
+  zh3: ${{ secrets.zh3 }}
+  zh4: ${{ secrets.zh4 }}
+  zh5: ${{ secrets.zh5 }}
+  zh6: ${{ secrets.zh6 }}
+  zh7: ${{ secrets.zh7 }}
+  zh8: ${{ secrets.zh8 }}
+  zh9: ${{ secrets.zh9 }}
+  zh10: ${{ secrets.zh10 }}
+  zh11: ${{ secrets.zh11 }}
+  zh12: ${{ secrets.zh12 }}
+  zh13: ${{ secrets.zh13 }}
+  zh14: ${{ secrets.zh14 }}
+  zh15: ${{ secrets.zh15 }}
+  zh16: ${{ secrets.zh16 }}
+  zh17: ${{ secrets.zh17 }}
+  zh18: ${{ secrets.zh18 }}
+  zh19: ${{ secrets.zh19 }}
+  zh20: ${{ secrets.zh20 }}
+  BASE_URL: ${{ secrets.BASE_URL }}
+  PASSPORT_URL: ${{ secrets.PASSPORT_URL }}
+  REFERER: ${{ secrets.REFERER }}
+  SLIDER_ID: ${{ secrets.SLIDER_ID }}
+  WRAPPER_ID: ${{ secrets.WRAPPER_ID }}
+  HEADER_CLIENT_TYPE: ${{ secrets.HEADER_CLIENT_TYPE }}
+  HEADER_ACCESS_TOKEN: ${{ secrets.HEADER_ACCESS_TOKEN }}
+  HEADER_ACCESS_TOKEN_FALLBACKS: ${{ secrets.HEADER_ACCESS_TOKEN_FALLBACKS }}
+  HEADER_SECRET_KEY: ${{ secrets.HEADER_SECRET_KEY }}
+  TOKEN_KEY: ${{ secrets.TOKEN_KEY }}
+  TOKEN_ALTERNATIVE_KEYS: ${{ secrets.TOKEN_ALTERNATIVE_KEYS }}
+  API_SIGN_PATH: ${{ secrets.API_SIGN_PATH }}
+  BANNED_ACCOUNTS: ${{ secrets.BANNED_ACCOUNTS }}
+  RISK_CONTROL_MESSAGE: ${{ secrets.RISK_CONTROL_MESSAGE }}
+  MEMBER_API_BASE: ${{ secrets.MEMBER_API_BASE }}
+  VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
+  VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
+  ACCOUNT_DATA_ENABLED: "true"
+  SIGN_TASK_START_DATE: ${{ inputs.task_start_date }}
+  BATCH_ID: ${{ inputs.batch_id }}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      count: ${{ steps.matrix.outputs.count }}
+    env:
+      CHAIN_STATE: ${{ inputs.chain_state }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        run: >-
+          python h3/mixed_batches.py matrix
+          --chain-state-env CHAIN_STATE
+          --batch-id "${{ inputs.batch_id }}"
+
+  run:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env: &account_env
+      SOURCE_GROUP: ${{ matrix.source_group }}
+      GROUP_CODE: ${{ matrix.source_group }}
+      GROUP_NAME: ${{ matrix.source_group }}
+      ACCOUNT_INDEX: ${{ matrix.account_index }}
+      EXECUTION_ORDER: ${{ matrix.execution_order }}
+      ACCOUNT_CATEGORY: ${{ matrix.account_category }}
+      EXECUTION_MODE: ${{ matrix.execution_mode }}
+      SKIP_SIGN: ${{ matrix.skip_sign }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-mixed-account
+        with:
+          artifact-name: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r0
+
+  prepare_retry:
+    needs: [prepare, run]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.retry.outputs.matrix }}
+      has_failed: ${{ steps.retry.outputs.has_failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-*-r0
+          path: retry-input
+      - id: retry
+        env:
+          BATCH_MATRIX: ${{ needs.prepare.outputs.matrix }}
+        run: >-
+          python h3/mixed_results.py retry-matrix retry-input
+          --task-date "${{ inputs.task_start_date }}"
+
+  retry:
+    needs: [prepare, prepare_retry]
+    if: always() && needs.prepare_retry.outputs.has_failed == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_retry.outputs.matrix) }}
+    env: *account_env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-mixed-account
+        with:
+          previous-artifact: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r0
+          retry-components: ${{ matrix.retry_components }}
+          artifact-name: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r1
+
+  prepare_retry2:
+    needs: [prepare, prepare_retry, retry]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.retry.outputs.matrix }}
+      has_failed: ${{ steps.retry.outputs.has_failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-*-r1
+          path: retry-input
+      - id: retry
+        env:
+          BATCH_MATRIX: ${{ needs.prepare.outputs.matrix }}
+          RETRY_CANDIDATE_MATRIX: ${{ needs.prepare_retry.outputs.matrix }}
+        run: >-
+          python h3/mixed_results.py retry-matrix retry-input
+          --candidate-matrix-env RETRY_CANDIDATE_MATRIX
+          --task-date "${{ inputs.task_start_date }}"
+
+  retry2:
+    needs: [prepare, prepare_retry2]
+    if: always() && needs.prepare_retry2.outputs.has_failed == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_retry2.outputs.matrix) }}
+    env: *account_env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-mixed-account
+        with:
+          previous-artifact: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r1
+          retry-components: ${{ matrix.retry_components }}
+          artifact-name: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r2
+
+  prepare_retry3:
+    needs: [prepare, prepare_retry2, retry2]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.retry.outputs.matrix }}
+      has_failed: ${{ steps.retry.outputs.has_failed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-*-r2
+          path: retry-input
+      - id: retry
+        env:
+          BATCH_MATRIX: ${{ needs.prepare.outputs.matrix }}
+          RETRY_CANDIDATE_MATRIX: ${{ needs.prepare_retry2.outputs.matrix }}
+        run: >-
+          python h3/mixed_results.py retry-matrix retry-input
+          --candidate-matrix-env RETRY_CANDIDATE_MATRIX
+          --task-date "${{ inputs.task_start_date }}"
+
+  retry3:
+    needs: [prepare, prepare_retry3]
+    if: always() && needs.prepare_retry3.outputs.has_failed == 'true'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.prepare_retry3.outputs.matrix) }}
+    env: *account_env
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/run-mixed-account
+        with:
+          previous-artifact: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r2
+          retry-components: ${{ matrix.retry_components }}
+          artifact-name: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r3
+
+  finalize:
+    needs: [prepare, run, prepare_retry, retry, prepare_retry2, retry2, prepare_retry3, retry3]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install --timeout 60 --retries 3 requests
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-*
+          path: account-results
+      - name: Merge batch results by source identity
+        env:
+          BATCH_MATRIX: ${{ needs.prepare.outputs.matrix }}
+        run: >-
+          python h3/mixed_results.py merge account-results merged/result.json
+          --task-date "${{ inputs.task_start_date }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: batch-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}
+          path: merged/result.json
+          if-no-files-found: warn
+          retention-days: 2
+      - name: Continue mixed batch chain
+        if: ${{ always() && inputs.continue_chain == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          CHAIN_STATE: ${{ inputs.chain_state }}
+        run: >-
+          python h3/mixed_batches.py advance
+          --chain-state-env CHAIN_STATE
+          --current-batch "${{ inputs.batch_id }}"
+          --current-run-id "${{ github.run_id }}"
+          --output chain-state.json

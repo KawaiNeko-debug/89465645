@@ -332,6 +332,8 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
+        "source_group": str(record.get("source_group") or group_code).strip().lower(),
+        "batch_id": str(record.get("batch_id") or payload.get("batch_id") or "").strip(),
         "username": username,
         "password": "",
         "group_name": group_name,
@@ -1018,6 +1020,26 @@ def coupon_sheet_row_sort_key(row: tuple) -> tuple:
     )
 
 
+def stable_account_order(records: list[dict]) -> list[dict]:
+    prefix_order = {"old": 0, "new": 1, "ll": 2, "zh": 3, "test": 4}
+
+    def group_key(item: dict) -> tuple:
+        code = str(item.get("group_code") or item.get("source_group") or "").lower()
+        match = re.fullmatch(r"(old|new|ll|zh)(\d+)", code)
+        if match:
+            return prefix_order[match.group(1)], safe_int(match.group(2), 999999)
+        return prefix_order.get(code, 999999), 999999
+
+    return sorted(
+        records,
+        key=lambda item: (
+            group_key(item),
+            safe_int(item.get("account_index"), 999999),
+            str(item.get("username") or ""),
+        ),
+    )
+
+
 def write_pcb_smt_sheet(workbook, records: list[dict]):
     rows = []
     for record in sort_records(records):
@@ -1144,7 +1166,7 @@ def write_xlsx(path: str, records: list[dict]):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    for index, record in enumerate(sort_records(records), start=1):
+    for index, record in enumerate(stable_account_order(records), start=1):
         label = status_label(record)
         row = [
             index,

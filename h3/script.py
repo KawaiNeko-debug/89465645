@@ -229,7 +229,9 @@ def execution_context() -> dict:
         default_category = ''
     skip_sign = truthy(os.getenv('SKIP_SIGN')) or group_code.startswith(('ll', 'zh'))
     return {
+        'source_group': group_code,
         'group_code': group_code,
+        'batch_id': (os.getenv('BATCH_ID') or '').strip(),
         'account_category': (os.getenv('ACCOUNT_CATEGORY') or default_category).strip(),
         'execution_mode': (os.getenv('EXECUTION_MODE') or ('skip_sign' if skip_sign else 'full')).strip(),
         'sign_skipped': skip_sign,
@@ -3508,6 +3510,8 @@ def write_results_json(path, all_results, total_accounts):
                 "vote_detail": r.get("vote_detail"),
                 "component_status": component_status(r),
                 "group_code": r.get("group_code") or execution["group_code"],
+                "source_group": r.get("source_group") or execution["source_group"],
+                "batch_id": r.get("batch_id") or execution["batch_id"],
                 "account_category": r.get("account_category") or execution["account_category"],
                 "execution_mode": r.get("execution_mode") or execution["execution_mode"],
                 "sign_skipped": truthy(r.get("sign_skipped", execution["sign_skipped"])),
@@ -3519,6 +3523,8 @@ def write_results_json(path, all_results, total_accounts):
             "group_name": group_name,
             "group_number": group_number,
             "group_code": execution["group_code"],
+            "source_group": execution["source_group"],
+            "batch_id": execution["batch_id"],
             "account_category": execution["account_category"],
             "execution_mode": execution["execution_mode"],
             "task_start_date": normalize_task_start_date(),
