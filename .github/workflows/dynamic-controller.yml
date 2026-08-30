@@ -6,6 +6,17 @@ on:
   schedule:
     - cron: "22 23 * * *"
   workflow_dispatch:
+    inputs:
+      resume_after:
+        description: "仅从指定组之后继续已中断的链路"
+        required: false
+        default: ""
+        type: string
+      task_start_date:
+        description: "任务日期（恢复时使用原任务日期）"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: dynamic-controller-daily
@@ -111,8 +122,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
         run: |
-          python h3/schedule_guard.py | tee guard.log
-          skip="$(sed -n 's/^skip=//p' guard.log | tail -n 1)"
+          if [ -n "${{ inputs.resume_after }}" ]; then
+            echo "恢复模式：从 ${{ inputs.resume_after }} 之后继续"
+            skip=false
+          else
+            python h3/schedule_guard.py | tee guard.log
+            skip="$(sed -n 's/^skip=//p' guard.log | tail -n 1)"
+          fi
           echo "skip=${skip:-false}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         if: steps.schedule-guard.outputs.skip != 'true'
@@ -130,4 +146,6 @@ jobs:
           python h3/dynamic_groups.py start
           --orchestration-id "${{ github.run_id }}"
           --ref "${{ github.ref_name }}"
+          --task-start-date "${{ inputs.task_start_date }}"
+          --after-group "${{ inputs.resume_after }}"
           --output chain-state.json
