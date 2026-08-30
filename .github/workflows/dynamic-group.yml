@@ -275,7 +275,7 @@ jobs:
 
   prepare_retry:
     needs: [prepare, run]
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && inputs.components == ''
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.retry_matrix.outputs.matrix }}
@@ -294,7 +294,7 @@ jobs:
 
   retry:
     needs: [prepare, prepare_retry]
-    if: always() && needs.prepare_retry.outputs.has_failed == 'true'
+    if: always() && inputs.components == '' && needs.prepare_retry.outputs.has_failed == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -386,7 +386,7 @@ jobs:
 
   prepare_retry2:
     needs: [prepare, retry]
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && inputs.components == ''
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.retry_matrix.outputs.matrix }}
@@ -406,7 +406,7 @@ jobs:
 
   retry2:
     needs: [prepare, prepare_retry2]
-    if: always() && needs.prepare_retry2.outputs.has_failed == 'true'
+    if: always() && inputs.components == '' && needs.prepare_retry2.outputs.has_failed == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -496,7 +496,7 @@ jobs:
 
   prepare_retry3:
     needs: [prepare, retry2]
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && inputs.components == ''
     runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.retry_matrix.outputs.matrix }}
@@ -516,7 +516,7 @@ jobs:
 
   retry3:
     needs: [prepare, prepare_retry3]
-    if: always() && needs.prepare_retry3.outputs.has_failed == 'true'
+    if: always() && inputs.components == '' && needs.prepare_retry3.outputs.has_failed == 'true'
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
