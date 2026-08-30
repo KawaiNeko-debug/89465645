@@ -20,7 +20,20 @@ except ImportError:
     from h3.retry_components import COMPONENTS, component_status, retry_components
 
 
-SENSITIVE_RESULT_KEYS = {"username", "password", "masked_username", "credentials"}
+SENSITIVE_RESULT_KEYS = {
+    "access_token",
+    "authorization",
+    "cookie",
+    "cookies",
+    "credential",
+    "credentials",
+    "masked_username",
+    "password",
+    "refresh_token",
+    "secret",
+    "token",
+    "username",
+}
 
 
 def truthy(value) -> bool:

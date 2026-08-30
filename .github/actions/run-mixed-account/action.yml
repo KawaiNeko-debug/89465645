@@ -75,14 +75,15 @@ runs:
         trap 'rm -f "$ACCOUNT_CREDENTIAL_FILE"' EXIT
         timeout 2100 python h3/script.py
     - name: Ensure sanitized result
+      id: sanitize
       if: always()
       shell: bash
       run: |
+        trap 'rm -f .account-credentials' EXIT
         python h3/fallback_result.py result.json
         python h3/mixed_results.py stamp result.json
-        rm -f .account-credentials
     - name: Upload account result
-      if: always()
+      if: always() && steps.sanitize.outcome == 'success'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}

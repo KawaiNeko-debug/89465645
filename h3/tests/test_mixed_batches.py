@@ -243,6 +243,9 @@ def test_stamp_removes_account_and_password_fields(tmp_path):
                         "username": "credential-user-value",
                         "masked_username": "***ount",
                         "password": "credential-pass-value",
+                        "cookie": "credential-cookie-value",
+                        "access_token": "credential-token-value",
+                        "authorization": "credential-authorization-value",
                     }
                 ],
             },
@@ -268,6 +271,9 @@ def test_stamp_removes_account_and_password_fields(tmp_path):
     text = path.read_text(encoding="utf-8")
     payload = json.loads(text)
     assert "credential-user-value" not in text
+    assert "credential-cookie-value" not in text
+    assert "credential-token-value" not in text
+    assert "credential-authorization-value" not in text
     assert "credential-pass-value" not in text
     assert payload["results"][0]["execution_order"] == 9
     assert payload["results"][0]["source_group"] == "old1"
@@ -277,6 +283,9 @@ def test_workflow_uses_mixed_batches_and_three_scoped_retries():
     root = Path(__file__).resolve().parents[2]
     controller = (root / ".github/workflows/dynamic-controller.yml").read_text(encoding="utf-8")
     workflow = (root / ".github/workflows/dynamic-batch.yml").read_text(encoding="utf-8")
+    account_action = (root / ".github/actions/run-mixed-account/action.yml").read_text(
+        encoding="utf-8"
+    )
     assert "python h3/mixed_batches.py start" in controller
     assert "python h3/dynamic_groups.py start" not in controller
     assert workflow.count("max-parallel: 20") == 4
@@ -284,6 +293,8 @@ def test_workflow_uses_mixed_batches_and_three_scoped_retries():
     assert "needs: [prepare, prepare_retry2, retry2]" in workflow
     assert "--candidate-matrix-env RETRY_CANDIDATE_MATRIX" in workflow
     assert "secrets.TEST" not in workflow
+    assert "trap 'rm -f .account-credentials' EXIT" in account_action
+    assert "if: always() && steps.sanitize.outcome == 'success'" in account_action
 
 
 def test_summary_downloads_exact_batch_run_artifact(tmp_path):
