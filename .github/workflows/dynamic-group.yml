@@ -22,6 +22,10 @@ on:
         required: false
         default: ""
         type: string
+      components:
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       orchestration_id:
@@ -38,6 +42,10 @@ on:
         default: "false"
         type: string
       chain_state:
+        required: false
+        default: ""
+        type: string
+      components:
         required: false
         default: ""
         type: string
@@ -215,6 +223,7 @@ jobs:
       SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
       EXECUTION_ORDER: ${{ matrix.execution_order }}
+      RETRY_COMPONENTS: ${{ inputs.components }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
