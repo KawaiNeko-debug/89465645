@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from h3.retry_components import build_retry_matrix
 
@@ -30,3 +31,12 @@ def test_later_retry_round_only_considers_previous_matrix(tmp_path):
 
     # Account 2 completed; missing account 5 is the only candidate to retry.
     assert [item["account_index"] for item in matrix] == [5]
+
+
+def test_retry_preparation_jobs_receive_previous_matrix_output():
+    workflow = (
+        Path(__file__).resolve().parents[2] / ".github" / "workflows" / "dynamic-group.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "needs: [prepare, prepare_retry, retry]" in workflow
+    assert "needs: [prepare, prepare_retry2, retry2]" in workflow

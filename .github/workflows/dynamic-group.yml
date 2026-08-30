@@ -385,7 +385,7 @@ jobs:
           retention-days: 2
 
   prepare_retry2:
-    needs: [prepare, retry]
+    needs: [prepare, prepare_retry, retry]
     if: always() && needs.prepare.result == 'success' && inputs.components == ''
     runs-on: ubuntu-22.04
     outputs:
@@ -495,7 +495,7 @@ jobs:
           retention-days: 2
 
   prepare_retry3:
-    needs: [prepare, retry2]
+    needs: [prepare, prepare_retry2, retry2]
     if: always() && needs.prepare.result == 'success' && inputs.components == ''
     runs-on: ubuntu-22.04
     outputs:

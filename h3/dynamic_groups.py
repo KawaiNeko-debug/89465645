@@ -1,5 +1,6 @@
 import argparse
 import base64
+from copy import deepcopy
 import io
 import json
 import os
@@ -80,12 +81,18 @@ def load_chain_state(raw: str) -> dict:
     groups = state.get("groups")
     if not isinstance(groups, list):
         raise ValueError("chain_state groups must be a list")
-    seen = set()
-    for group in groups:
-        code = str(group.get("group_code") or "").strip().lower() if isinstance(group, dict) else ""
-        if code not in GROUP_CODES or code in seen:
-            raise ValueError(f"invalid or duplicate group code: {code}")
-        seen.add(code)
+    for field_name in ("groups", "all_groups"):
+        value = state.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            raise ValueError(f"chain_state {field_name} must be a list")
+        seen = set()
+        for group in value:
+            code = str(group.get("group_code") or "").strip().lower() if isinstance(group, dict) else ""
+            if code not in GROUP_CODES or code in seen:
+                raise ValueError(f"invalid or duplicate group code in {field_name}: {code}")
+            seen.add(code)
     return state
 
 
@@ -96,8 +103,10 @@ def new_chain_state(
     after_group: str = "",
 ) -> dict:
     task_date = task_start_date or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
-    groups = configured_groups()
+    all_groups = configured_groups()
+    groups = deepcopy(all_groups)
     after = str(after_group or "").strip().lower()
+    excluded_codes = []
     if after:
         # Filter by the frozen global order, not by the configured subset:
         # this also works when the checkpoint group itself has no accounts.
@@ -110,12 +119,24 @@ def new_chain_state(
             for item in groups
             if GROUP_CODES.index(item["group_code"]) > checkpoint
         ]
+        selected_codes = {item["group_code"] for item in groups}
+        excluded_codes = [
+            item["group_code"] for item in all_groups if item["group_code"] not in selected_codes
+        ]
+        for item in all_groups:
+            if item["group_code"] in excluded_codes:
+                item["handoff_status"] = "excluded_by_resume"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "orchestration_id": str(orchestration_id),
         "task_start_date": task_date,
         "ref": ref or "main",
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "resume_after": after,
+        "excluded_groups": excluded_codes,
+        # all_groups freezes the complete configured account scope for reports.
+        # groups contains only the runs this chain will actually dispatch.
+        "all_groups": all_groups,
         "groups": groups,
     }
 
@@ -281,6 +302,10 @@ def advance_chain(args) -> int:
             print(f"::warning::could not read current group account count: {exc}", flush=True)
     state["groups"][current_index]["handoff_status"] = "finalized"
     state["groups"][current_index]["finalized_at"] = datetime.now(timezone.utc).isoformat()
+    for group in state.get("all_groups") or []:
+        if group.get("group_code") == current_code:
+            group.update(deepcopy(state["groups"][current_index]))
+            break
     write_json(args.output, state)
 
     if current_index + 1 < len(state["groups"]):

@@ -588,8 +588,9 @@ def problem_reason(record: dict) -> str:
     if not truthy(record.get("data_fetch_completed")):
         reasons.append("账号数据获取未完成")
     if truthy(record.get("vote_required")) and not truthy(record.get("vote_success")):
-        reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
-    return "；".join(dict.fromkeys(reason for reason in reasons if reason)) or "未知异常"
+        if not is_vote_conflict_record(record):
+            reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
+    return "；".join(dict.fromkeys(reason for reason in reasons if reason))
 
 
 def is_vote_conflict_record(record: dict) -> bool:
@@ -600,11 +601,16 @@ def is_vote_conflict_record(record: dict) -> bool:
 
 
 def vote_conflict_label(record: dict) -> str:
-    text = f"{record.get('vote_status') or ''} {record.get('vote_detail') or ''}".strip()
     marker = "\u672c\u671f\u5df2\u9501\u5b9a\u5176\u4ed6\u5546\u54c1"
-    index = text.find(marker)
-    if index >= 0:
+    for value in (record.get("vote_status"), record.get("vote_detail")):
+        text = str(value or "").strip()
+        index = text.find(marker)
+        if index < 0:
+            continue
         suffix = text[index + len(marker):].strip(" ：:，,；;")
+        # status and detail often contain the same sentence.  Only retain the
+        # first product code instead of repeating the entire conflict reason.
+        suffix = suffix.split(marker, 1)[0].strip(" ：:，,；;")
         return f"{marker}{(' ' + suffix) if suffix else ''}"
     return marker
 
@@ -616,11 +622,17 @@ def append_vote_conflict_summary(lines: list[str], records: list[dict]) -> None:
             label = vote_conflict_label(record)
             grouped[label] = grouped.get(label, 0) + 1
     for label, count in sorted(grouped.items()):
-        remaining = count
-        while remaining > 0:
-            batch = min(50, remaining)
-            lines.append(f"{batch}\u4e2a\u8d26\u53f7：投票失败：{label}❌")
-            remaining -= batch
+        lines.append(f"{count}\u4e2a\u8d26\u53f7：投票失败：{label}❌")
+
+
+def append_compact_problem_summary(lines: list[str], records: list[dict]) -> None:
+    grouped = {}
+    for record in records:
+        reason = problem_reason(record).strip()
+        if reason:
+            grouped[reason] = grouped.get(reason, 0) + 1
+    for reason, count in sorted(grouped.items(), key=lambda item: (-item[1], item[0])):
+        lines.append(f"{count}个账号：{reason}❌")
 
 
 def status_sort_bucket(record: dict) -> int:
@@ -704,12 +716,28 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     visible_problem_records = [
         record
         for record in problem_records
-        if not truthy(record.get("risk_controlled")) and not is_vote_conflict_record(record)
+        if not truthy(record.get("risk_controlled")) and problem_reason(record)
     ]
     category_label = str(os.getenv("SUMMARY_CATEGORY_LABEL") or "").strip()
+    recovery_excluded = [
+        item.strip()
+        for item in str(os.getenv("SUMMARY_RECOVERY_EXCLUDED_GROUPS") or "").split(",")
+        if item.strip()
+    ]
+    recovery_notice = ""
+    if recovery_excluded:
+        recovery_notice = (
+            f"{category_label or '本类别'}：本次为中断恢复链，未包含前序组 "
+            f"{','.join(recovery_excluded)}，因此无法取得这些组的本次结果"
+        )
 
     if category_label and not sorted_records and expected_total == 0:
         lines = [f"{category_label}：本次未配置账号"]
+        lines.extend(build_stats_lines(summary))
+        return "\n".join(lines), summary
+
+    if recovery_notice and not sorted_records:
+        lines = [recovery_notice]
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
 
@@ -723,8 +751,9 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
 
     if visible_problem_records:
         lines = ["NO❗今天出现问题了捏"]
-        for record in visible_problem_records:
-            lines.append(f"{record['username']}：{problem_reason(record)}❌")
+        if recovery_notice:
+            lines.append(recovery_notice)
+        append_compact_problem_summary(lines, visible_problem_records)
         append_vote_conflict_summary(lines, conflict_records)
         lines.extend(build_stats_lines(summary))
         return "\n".join(lines), summary
@@ -735,6 +764,8 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
         return "\n".join(lines), summary
 
     lines = ["喵喵~今天一切正常捏"]
+    if recovery_notice:
+        lines.insert(0, recovery_notice)
     lines.extend(build_stats_lines(summary))
     return "\n".join(lines), summary
 

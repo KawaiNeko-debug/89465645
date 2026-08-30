@@ -16,21 +16,35 @@ def main() -> int:
     results_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
     manifest = json.loads((results_dir / "manifest.json").read_text(encoding="utf-8"))
     task_date = str(manifest.get("task_start_date") or "").strip()
+    active_groups = manifest.get("groups", [])
+    configured_groups = manifest.get("all_groups") or active_groups
     group_codes = ",".join(
         str(group.get("group_code") or "").strip().lower()
-        for group in manifest.get("groups", [])
+        for group in active_groups
         if str(group.get("group_code") or "").strip()
     )
     group_limits = {
         str(group.get("group_code") or "").strip().lower(): int(group.get("account_count") or 0)
-        for group in manifest.get("groups", [])
+        for group in active_groups
         if str(group.get("group_code") or "").strip()
     }
     counts = {category: 0 for category, _ in CATEGORIES}
-    for group in manifest.get("groups", []):
+    for group in configured_groups:
         category = str(group.get("account_category") or "")
         if category in counts:
             counts[category] += int(group.get("account_count") or 0)
+
+    active_codes = {
+        str(group.get("group_code") or "").strip().lower()
+        for group in active_groups
+        if str(group.get("group_code") or "").strip()
+    }
+    excluded_by_category = {category: [] for category, _ in CATEGORIES}
+    for group in configured_groups:
+        category = str(group.get("account_category") or "")
+        code = str(group.get("group_code") or "").strip().lower()
+        if category in excluded_by_category and code and code not in active_codes:
+            excluded_by_category[category].append(code)
 
     requested = str(os.getenv("SUMMARY_CATEGORY_FILTER") or "").strip().lower()
     if requested in {"peer", "同行不签到组", "同行", "ll_zh"}:
@@ -58,6 +72,7 @@ def main() -> int:
                 "REPORT_GROUP_CODES": group_codes,
                 "REPORT_GROUP_FILTER_ACTIVE": "true",
                 "REPORT_GROUP_LIMITS": json.dumps(group_limits, ensure_ascii=False),
+                "SUMMARY_RECOVERY_EXCLUDED_GROUPS": ",".join(excluded_by_category[category]),
             }
         )
         completed = subprocess.run(

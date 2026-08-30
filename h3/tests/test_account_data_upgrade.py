@@ -1182,10 +1182,11 @@ class DynamicGroupTests(unittest.TestCase):
             {("test", 1): "1234567890A"},
         )
         message, _ = build_message([record], {}, 1)
-        self.assertIn("1234567890A", message)
+        self.assertIn("1个账号：网络超时；账号数据获取未完成❌", message)
+        self.assertNotIn("1234567890A", message)
         logged = redact_accounts_for_log(message, [record])
         self.assertNotIn("1234567890A", logged)
-        self.assertIn("******7890A", logged)
+        self.assertNotIn("******7890A", logged)
 
     def test_retry_matrix_only_contains_unfinished_components(self):
         complete_vote = {
@@ -1242,6 +1243,7 @@ class DynamicGroupTests(unittest.TestCase):
                     "vote_required": True,
                     "vote_success": False,
                     "vote_status": "投票失败：本期已锁定其他商品 SKUJYE",
+                    "vote_detail": "本期已锁定其他商品 SKUJYE",
                     "sign_success": True,
                     "points_fetch_success": True,
                     "activity_fetch_success": True,
@@ -1251,10 +1253,73 @@ class DynamicGroupTests(unittest.TestCase):
             )
         self.assertTrue(is_vote_conflict_record(rows[0]))
         message, _ = build_message(rows, {}, len(rows))
-        self.assertIn("50个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
-        self.assertIn("22个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
-        self.assertEqual(message.count("投票失败：本期已锁定其他商品 SKUJYE❌"), 3)
+        self.assertIn("122个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
+        self.assertEqual(message.count("投票失败：本期已锁定其他商品 SKUJYE❌"), 1)
         self.assertNotIn("user1：", message)
+
+    def test_vote_conflict_does_not_hide_another_account_failure(self):
+        record = {
+            "account_index": 1,
+            "username": "user1",
+            "vote_required": True,
+            "vote_success": False,
+            "vote_status": "投票失败：本期已锁定其他商品 SKUJYE",
+            "data_fetch_completed": False,
+            "account_data_required": True,
+            "sign_success": True,
+        }
+        message, _ = build_message([record], {}, 1)
+        self.assertIn("1个账号：账号数据获取未完成❌", message)
+        self.assertIn("1个账号：投票失败：本期已锁定其他商品 SKUJYE❌", message)
+
+    def test_all_identical_problem_reasons_are_aggregated(self):
+        records = []
+        for index in range(1, 4):
+            records.append(
+                {
+                    "account_index": index,
+                    "username": f"account-{index}",
+                    "sign_success": False,
+                    "sign_status": "密码错误",
+                    "password_error": True,
+                    "detail_reason": "密码错误",
+                    "data_fetch_completed": False,
+                    "vote_required": False,
+                }
+            )
+        message, _ = build_message(records, {}, len(records))
+        self.assertIn("3个账号：密码错误；账号数据获取未完成❌", message)
+        self.assertNotIn("account-1", message)
+        self.assertEqual(message.count("密码错误；账号数据获取未完成❌"), 1)
+
+    def test_recovery_manifest_keeps_excluded_category_visible(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "new", "ll", "zh")
+            for index in range(1, 21)
+        }
+        values.update({"old1": "account,password", "new1": "new,password"})
+        with patch.dict(os.environ, values, clear=False):
+            state = new_chain_state("123", "main", "2026-08-30", "old1")
+        self.assertEqual([item["group_code"] for item in state["groups"]], ["new1"])
+        self.assertEqual([item["group_code"] for item in state["all_groups"]], ["old1", "new1"])
+        self.assertEqual(state["excluded_groups"], ["old1"])
+        self.assertEqual(state["all_groups"][0]["handoff_status"], "excluded_by_resume")
+
+    def test_recovery_message_does_not_claim_category_was_unconfigured(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SUMMARY_CATEGORY_LABEL": "老号全干组",
+                "SUMMARY_RECOVERY_EXCLUDED_GROUPS": "old1",
+            },
+            clear=False,
+        ):
+            message, summary = build_message([], {}, 1)
+        self.assertIn("中断恢复链", message)
+        self.assertIn("old1", message)
+        self.assertNotIn("本次未配置账号", message)
+        self.assertEqual(summary["total"], 1)
 
     def test_component_merge_preserves_successful_vote_and_data(self):
         initial = {
