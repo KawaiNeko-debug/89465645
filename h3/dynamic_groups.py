@@ -89,15 +89,26 @@ def load_chain_state(raw: str) -> dict:
     return state
 
 
-def new_chain_state(orchestration_id: str, ref: str, task_start_date: str = "") -> dict:
+def new_chain_state(
+    orchestration_id: str,
+    ref: str,
+    task_start_date: str = "",
+    after_group: str = "",
+) -> dict:
     task_date = task_start_date or datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    groups = configured_groups()
+    after = str(after_group or "").strip().lower()
+    if after:
+        positions = {item["group_code"]: index for index, item in enumerate(groups)}
+        if after in positions:
+            groups = groups[positions[after] + 1 :]
     return {
         "schema_version": 1,
         "orchestration_id": str(orchestration_id),
         "task_start_date": task_date,
         "ref": ref or "main",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "groups": configured_groups(),
+        "groups": groups,
     }
 
 
@@ -226,7 +237,12 @@ def dispatch_summary(state: dict) -> dict:
 
 
 def start_chain(args) -> int:
-    state = new_chain_state(args.orchestration_id, args.ref, args.task_start_date)
+    state = new_chain_state(
+        args.orchestration_id,
+        args.ref,
+        args.task_start_date,
+        getattr(args, "after_group", ""),
+    )
     write_json(args.output, state)
     groups = state["groups"]
     if groups:
@@ -327,6 +343,7 @@ def main() -> int:
     start.add_argument("--ref", default=os.getenv("GITHUB_REF_NAME") or "main")
     start.add_argument("--orchestration-id", required=True)
     start.add_argument("--task-start-date", default="")
+    start.add_argument("--after-group", default="")
     start.add_argument("--output", default="chain-state.json")
 
     advance = subparsers.add_parser("advance")
