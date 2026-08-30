@@ -29,6 +29,7 @@ from h3.listing_gift import (
     inspect_listing_gift_response,
     inspect_monthly_gift_page_text,
     is_listing_gift_date,
+    monthly_gift_origin,
     should_claim_listing_gift,
 )
 from h3.report import (
@@ -580,9 +581,32 @@ class ListingGiftTests(unittest.TestCase):
         self.assertEqual(success["order_code"], "test")
         self.assertFalse(inspect_listing_gift_response({"success": True, "data": {}})["success"])
 
+    def test_mobile_receive_endpoint_returns_coupon_ids(self):
+        result = inspect_listing_gift_response(
+            {"success": True, "code": 200, "data": ["616908075456708609", "616908075360239617"]}
+        )
+        self.assertEqual(result["state"], "received")
+        self.assertEqual(result["coupon_ids"], ["616908075456708609", "616908075360239617"])
+
+    def test_empty_coupon_id_list_is_idempotent_success(self):
+        result = inspect_listing_gift_response({"success": True, "code": 200, "data": []})
+        self.assertEqual(result["state"], "already")
+        self.assertTrue(result["success"])
+
+    def test_mobile_gift_origin_is_derived_from_config(self):
+        self.assertEqual(monthly_gift_origin("https://www.example.test/api"), "https://m.example.test")
+        self.assertEqual(monthly_gift_origin("https://m.example.test"), "https://m.example.test")
+
     def test_already_received_is_idempotent_success(self):
         result = inspect_listing_gift_response(
             {"success": False, "message": "今日已经领取，请勿重复领取"}
+        )
+        self.assertEqual(result["state"], "already")
+        self.assertTrue(result["success"])
+
+    def test_period_limit_message_is_idempotent_success(self):
+        result = inspect_listing_gift_response(
+            {"success": False, "message": "您已领取过优惠券，在限制周期内无法再次参与，请稍后再试"}
         )
         self.assertEqual(result["state"], "already")
         self.assertTrue(result["success"])
