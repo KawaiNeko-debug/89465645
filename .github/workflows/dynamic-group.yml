@@ -142,12 +142,13 @@ jobs:
       skip_sign: ${{ steps.matrix.outputs.skip_sign }}
     env:
       GROUP_CODE: ${{ inputs.group_code }}
+      ORCHESTRATION_ID: ${{ inputs.orchestration_id }}
     steps:
       - id: matrix
         shell: bash
         run: |
           python - <<'PY'
-          import json, os, re
+          import json, os, random, re
           code = os.environ['GROUP_CODE'].strip().lower()
           if code != 'test' and not re.fullmatch(r'(old|new|ll|zh)([1-9]|1[0-9]|20)', code):
               raise SystemExit(f'unsupported group code: {code}')
@@ -164,7 +165,14 @@ jobs:
               category, skip = '同行不签到组', True
           else:
               category, skip = '测试组', False
-          matrix = {'include': [{'account_index': index} for index in range(1, len(lines) + 1)]}
+          indexes = list(range(1, len(lines) + 1))
+          random.Random(os.environ.get('ORCHESTRATION_ID', '')).shuffle(indexes)
+          matrix = {
+              'include': [
+                  {'account_index': index, 'execution_order': order}
+                  for order, index in enumerate(indexes, start=1)
+              ]
+          }
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f"matrix={json.dumps(matrix, ensure_ascii=False)}\n")
               output.write(f"count={len(lines)}\n")
@@ -206,6 +214,7 @@ jobs:
       EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
       SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
+      EXECUTION_ORDER: ${{ matrix.execution_order }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -308,6 +317,7 @@ jobs:
       EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
       SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
+      EXECUTION_ORDER: ${{ matrix.execution_order }}
       RETRY_COMPONENTS: ${{ matrix.retry_components }}
       PREVIOUS_RESULT_PATH: previous-result/result.json
     steps:
@@ -382,6 +392,7 @@ jobs:
       - id: retry_matrix
         env:
           EXPECTED_COUNT: ${{ needs.prepare.outputs.count }}
+          RETRY_CANDIDATE_MATRIX: ${{ needs.prepare_retry.outputs.matrix }}
         run: python h3/retry_components.py matrix retry1-results "$EXPECTED_COUNT"
 
   retry2:
@@ -418,6 +429,7 @@ jobs:
       EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
       SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
+      EXECUTION_ORDER: ${{ matrix.execution_order }}
       RETRY_COMPONENTS: ${{ matrix.retry_components }}
       PREVIOUS_RESULT_PATH: previous-result/result.json
     steps:
@@ -490,6 +502,7 @@ jobs:
       - id: retry_matrix
         env:
           EXPECTED_COUNT: ${{ needs.prepare.outputs.count }}
+          RETRY_CANDIDATE_MATRIX: ${{ needs.prepare_retry2.outputs.matrix }}
         run: python h3/retry_components.py matrix retry2-results "$EXPECTED_COUNT"
 
   retry3:
@@ -526,6 +539,7 @@ jobs:
       EXECUTION_MODE: ${{ needs.prepare.outputs.execution_mode }}
       SKIP_SIGN: ${{ needs.prepare.outputs.skip_sign }}
       ACCOUNT_INDEX: ${{ matrix.account_index }}
+      EXECUTION_ORDER: ${{ matrix.execution_order }}
       RETRY_COMPONENTS: ${{ matrix.retry_components }}
       PREVIOUS_RESULT_PATH: previous-result/result.json
     steps:
