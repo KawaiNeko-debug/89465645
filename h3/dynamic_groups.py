@@ -201,6 +201,11 @@ def dispatch_group(state: dict, group_code: str) -> dict:
             "task_start_date": str(state.get("task_start_date") or ""),
             "continue_chain": "true",
             "chain_state": encode_chain_state(state),
+            **(
+                {"components": str(state.get("components") or "").strip()}
+                if str(state.get("components") or "").strip()
+                else {}
+            ),
         },
     )
 
