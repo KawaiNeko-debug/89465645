@@ -33,6 +33,12 @@ def vote_is_terminal_conflict(row: dict) -> bool:
     return "本期已锁定其他商品" in text
 
 
+def vote_is_terminal_insufficient_points(row: dict) -> bool:
+    """Treat an insufficient-points response as a terminal business result."""
+    text = f"{row.get('vote_status', '')} {row.get('vote_detail', '')}"
+    return "\u91d1\u8c46\u4e0d\u8db3" in text
+
+
 def component_status(row: dict | None) -> dict[str, bool]:
     row = row if isinstance(row, dict) else {}
     stored = row.get("component_status") if isinstance(row.get("component_status"), dict) else {}
@@ -47,6 +53,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
         not truthy(row.get("vote_required"))
         or truthy(row.get("vote_success"))
         or vote_is_terminal_conflict(row)
+        or vote_is_terminal_insufficient_points(row)
     )
     gift_complete = not truthy(row.get("listing_gift_required")) or truthy(
         row.get("listing_gift_success")

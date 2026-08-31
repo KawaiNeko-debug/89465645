@@ -39,7 +39,11 @@ from h3.report import (
     parse_coupon_datetime,
     write_xlsx,
 )
-from h3.retry_components import build_retry_matrix, component_status, retry_components
+from h3.retry_components import (
+    build_retry_matrix,
+    retry_components,
+    vote_is_terminal_insufficient_points,
+)
 from h3.runner_recovery import should_rerun
 from h3.schedule_guard import has_controller_run_today, has_manual_run_today
 from h3.exchange_history import exchange_status_text, normalize_exchange_records
@@ -1211,6 +1215,13 @@ class DynamicGroupTests(unittest.TestCase):
             "vote_detail": "本期已锁定其他商品 fixture-sku",
         }
         self.assertEqual(retry_components(conflict), [])
+        insufficient_points = {
+            **vote_failure,
+            "vote_status": "\u6295\u7968\u5931\u8d25\uff1a\u91d1\u8c46\u4e0d\u8db3",
+            "vote_detail": "\u91d1\u8c46\u4e0d\u8db3",
+        }
+        self.assertTrue(vote_is_terminal_insufficient_points(insufficient_points))
+        self.assertEqual(retry_components(insufficient_points), [])
         password_error = {**vote_failure, "password_error": True}
         self.assertEqual(retry_components(password_error), [])
         partial_activity = {

@@ -75,7 +75,13 @@ try:
         monthly_gift_origin,
         should_claim_listing_gift,
     )
-    from retry_components import COMPONENTS, component_status, needs_retry, retry_components
+    from retry_components import (
+        COMPONENTS,
+        component_status,
+        needs_retry,
+        retry_components,
+        vote_is_terminal_insufficient_points,
+    )
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
     from h3.exchange_history import normalize_exchange_records
@@ -89,7 +95,13 @@ except ImportError:
         monthly_gift_origin,
         should_claim_listing_gift,
     )
-    from h3.retry_components import COMPONENTS, component_status, needs_retry, retry_components
+    from h3.retry_components import (
+        COMPONENTS,
+        component_status,
+        needs_retry,
+        retry_components,
+        vote_is_terminal_insufficient_points,
+    )
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -3028,6 +3040,12 @@ def sign_in_account(
                         'vote': (
                             not client.vote_required
                             or client.vote_success
+                            or vote_is_terminal_insufficient_points(
+                                {
+                                    'vote_status': client.vote_status,
+                                    'vote_detail': client.vote_detail,
+                                }
+                            )
                             or '本期已锁定其他商品' in f"{client.vote_status} {client.vote_detail}"
                         ),
                     },
