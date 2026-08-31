@@ -22,7 +22,7 @@ from h3.mixed_results import (
     merge_results,
     stamp_result,
 )
-from h3.report import stable_account_order
+from h3.report import signin_sheet_order, stable_account_order
 
 
 def env_slots(**configured):
@@ -375,4 +375,22 @@ def test_report_order_ignores_random_execution_order():
         ("old10", 1),
         ("new1", 2),
         ("ll1", 1),
+    ]
+
+
+def test_signin_sheet_puts_risk_then_normal_and_points_descending():
+    records = [
+        {"group_number": 1, "account_index": 1, "username": "normal-low", "sign_success": True, "final_points": 100},
+        {"group_number": 1, "account_index": 2, "username": "risk-high", "risk_controlled": True, "sign_success": False, "final_points": 900},
+        {"group_number": 1, "account_index": 3, "username": "risk-low", "risk_controlled": True, "sign_success": False, "final_points": 200},
+        {"group_number": 1, "account_index": 4, "username": "normal-high", "sign_success": True, "final_points": 800},
+        {"group_number": 1, "account_index": 5, "username": "failed", "sign_success": False, "final_points": 999},
+    ]
+    ordered = signin_sheet_order(records)
+    assert [row["username"] for row in ordered] == [
+        "risk-high",
+        "risk-low",
+        "normal-high",
+        "normal-low",
+        "failed",
     ]

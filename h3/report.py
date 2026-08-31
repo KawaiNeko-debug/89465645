@@ -1040,6 +1040,28 @@ def stable_account_order(records: list[dict]) -> list[dict]:
     )
 
 
+def signin_sheet_order(records: list[dict]) -> list[dict]:
+    """Put risk-controlled accounts first, then normal sign-ins, by points."""
+
+    def status_bucket(item: dict) -> int:
+        if truthy(item.get("risk_controlled")):
+            return 0
+        if truthy(item.get("sign_success")) and not truthy(item.get("sign_skipped")):
+            return 1
+        return 2
+
+    return sorted(
+        records,
+        key=lambda item: (
+            status_bucket(item),
+            -safe_float(item.get("final_points"), 0.0),
+            safe_int(item.get("group_number"), 999999),
+            safe_int(item.get("account_index"), 999999),
+            str(item.get("username") or ""),
+        ),
+    )
+
+
 def write_pcb_smt_sheet(workbook, records: list[dict]):
     rows = []
     for record in sort_records(records):
@@ -1166,7 +1188,7 @@ def write_xlsx(path: str, records: list[dict]):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    for index, record in enumerate(stable_account_order(records), start=1):
+    for index, record in enumerate(signin_sheet_order(records), start=1):
         label = status_label(record)
         row = [
             index,
