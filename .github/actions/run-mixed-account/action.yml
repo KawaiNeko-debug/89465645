@@ -40,9 +40,9 @@ runs:
         set +x
         python - <<'PY'
         import os
-        from h3.mixed_batches import GROUP_CODES
+        from h3.mixed_batches import ALL_SOURCE_GROUP_CODES
         code = os.environ['SOURCE_GROUP'].strip().lower()
-        if code not in GROUP_CODES:
+        if code not in ALL_SOURCE_GROUP_CODES:
             raise SystemExit(f'unsupported frozen source group: {code}')
         lines = [
             line.strip()

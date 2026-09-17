@@ -16,11 +16,39 @@ on:
         type: string
       continue_chain:
         required: false
-        default: "false"
-        type: string
+        default: false
+        type: boolean
       chain_state:
+        required: false
+        default: ""
+        type: string
+      test_mode:
+        required: false
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      orchestration_id:
         required: true
         type: string
+      batch_id:
+        required: true
+        type: string
+      task_start_date:
+        required: true
+        type: string
+      continue_chain:
+        required: false
+        default: false
+        type: boolean
+      chain_state:
+        required: false
+        default: ""
+        type: string
+      test_mode:
+        required: false
+        default: false
+        type: boolean
 
 env:
   TZ: Asia/Shanghai
@@ -138,13 +166,22 @@ jobs:
       count: ${{ steps.matrix.outputs.count }}
     env:
       CHAIN_STATE: ${{ inputs.chain_state }}
+      TEST_MODE: ${{ inputs.test_mode }}
+      test: ${{ inputs.test_mode && secrets.TEST || '' }}
     steps:
       - uses: actions/checkout@v4
       - id: matrix
-        run: >-
-          python h3/mixed_batches.py matrix
-          --chain-state-env CHAIN_STATE
-          --batch-id "${{ inputs.batch_id }}"
+        shell: bash
+        run: |
+          if [ "$TEST_MODE" = "true" ]; then
+            python h3/mixed_batches.py test-matrix \
+              --batch-id "${{ inputs.batch_id }}" \
+              --task-start-date "${{ inputs.task_start_date }}"
+          else
+            python h3/mixed_batches.py matrix \
+              --chain-state-env CHAIN_STATE \
+              --batch-id "${{ inputs.batch_id }}"
+          fi
 
   run:
     needs: prepare
@@ -154,6 +191,7 @@ jobs:
       max-parallel: 20
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env: &account_env
+      test: ${{ inputs.test_mode && secrets.TEST || '' }}
       SOURCE_GROUP: ${{ matrix.source_group }}
       GROUP_CODE: ${{ matrix.source_group }}
       GROUP_NAME: ${{ matrix.source_group }}
@@ -315,7 +353,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 2
       - name: Continue mixed batch chain
-        if: ${{ always() && inputs.continue_chain == 'true' }}
+        if: ${{ always() && inputs.continue_chain && !inputs.test_mode }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}

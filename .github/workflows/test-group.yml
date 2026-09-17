@@ -15,16 +15,39 @@ permissions:
   actions: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      task_start_date: ${{ steps.date.outputs.task_start_date }}
+    steps:
+      - id: date
+        env:
+          REQUESTED_DATE: ${{ inputs.task_start_date }}
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          value = os.environ.get('REQUESTED_DATE', '').strip()
+          if not value:
+              value = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'task_start_date={value}\n')
+          PY
+
   test:
-    uses: ./.github/workflows/dynamic-group.yml
+    needs: prepare
+    uses: ./.github/workflows/dynamic-batch.yml
     with:
       orchestration_id: ${{ github.run_id }}
-      group_code: test
-      task_start_date: ${{ inputs.task_start_date }}
+      batch_id: test
+      task_start_date: ${{ needs.prepare.outputs.task_start_date }}
+      continue_chain: false
+      chain_state: ""
+      test_mode: true
     secrets: inherit
 
   summary:
-    needs: test
+    needs: [prepare, test]
     if: always()
     runs-on: ubuntu-22.04
     env:
@@ -42,12 +65,12 @@ jobs:
           cache-dependency-path: h3/requirements.txt
       - uses: actions/download-artifact@v4
         with:
-          name: group-result-${{ github.run_id }}-test
+          name: batch-result-${{ github.run_id }}-test
           path: results/test
       - name: Install report dependencies
         run: python -m pip install --timeout 60 --retries 3 requests openpyxl
       - name: Generate and send test report
-        run: python h3/test_report.py results "${{ github.run_id }}" "${{ inputs.task_start_date }}"
+        run: python h3/test_report.py results "${{ github.run_id }}" "${{ needs.prepare.outputs.task_start_date }}"
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v4

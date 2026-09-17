@@ -28,6 +28,8 @@ GROUP_PREFIXES = ("old", "new", "ll", "zh")
 GROUP_CODES = tuple(
     f"{prefix}{index}" for prefix in GROUP_PREFIXES for index in range(1, 21)
 )
+TEST_GROUP_CODE = "test"
+ALL_SOURCE_GROUP_CODES = GROUP_CODES + (TEST_GROUP_CODE,)
 BATCH_SIZE = 220
 BATCH_WORKFLOW_FILE = "dynamic-batch.yml"
 SUMMARY_WORKFLOW_FILE = "dynamic-summary.yml"
@@ -51,6 +53,8 @@ def category_for(source_group: str) -> str:
         return "新号全干组"
     if source_group.startswith(("ll", "zh")):
         return "同行不签到组"
+    if source_group == TEST_GROUP_CODE:
+        return "测试组"
     raise ValueError(f"unsupported source group: {source_group}")
 
 
@@ -88,6 +92,24 @@ def configured_group_counts() -> dict[str, int]:
         for source_group in GROUP_CODES
         if (count := account_count(os.getenv(source_group, ""))) > 0
     }
+
+
+def manual_test_batch_accounts(
+    task_date: str, batch_id: str = TEST_GROUP_CODE
+) -> list[dict]:
+    count = account_count(os.getenv("test") or os.getenv("TEST") or "")
+    if count <= 0:
+        raise ValueError("TEST is empty")
+    if count > BATCH_SIZE:
+        raise ValueError(f"TEST supports at most {BATCH_SIZE} accounts per run")
+    resolved_date = str(task_date or "").strip() or datetime.now(
+        timezone(timedelta(hours=8))
+    ).strftime("%Y-%m-%d")
+    accounts = [account_metadata(TEST_GROUP_CODE, index) for index in range(1, count + 1)]
+    accounts = deterministic_order(accounts, resolved_date)
+    for account in accounts:
+        account["batch_id"] = str(batch_id or TEST_GROUP_CODE)
+    return accounts
 
 
 def accounts_from_group_counts(counts: dict[str, int]) -> list[dict]:
@@ -387,6 +409,24 @@ def output_batch_matrix(args) -> int:
     return 0
 
 
+def output_test_matrix(args) -> int:
+    accounts = manual_test_batch_accounts(args.task_start_date, args.batch_id)
+    values = {
+        "matrix": json.dumps(
+            {"include": accounts}, ensure_ascii=False, separators=(",", ":")
+        ),
+        "count": str(len(accounts)),
+    }
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as file:
+            for key, value in values.items():
+                file.write(f"{key}={value}\n")
+    else:
+        print(json.dumps(values, ensure_ascii=False))
+    return 0
+
+
 def download_batches(args) -> int:
     repo, token = github_context()
     raw = os.environ.get(args.chain_state_env, "") if args.chain_state_env else args.chain_state
@@ -465,6 +505,10 @@ def main() -> int:
     matrix.add_argument("--chain-state-env", default="")
     matrix.add_argument("--batch-id", required=True)
 
+    test_matrix = commands.add_parser("test-matrix")
+    test_matrix.add_argument("--batch-id", default=TEST_GROUP_CODE)
+    test_matrix.add_argument("--task-start-date", required=True)
+
     download = commands.add_parser("download")
     download.add_argument("--chain-state", default="")
     download.add_argument("--chain-state-env", default="")
@@ -477,6 +521,8 @@ def main() -> int:
         return advance_chain(args)
     if args.command == "matrix":
         return output_batch_matrix(args)
+    if args.command == "test-matrix":
+        return output_test_matrix(args)
     return download_batches(args)
 
 

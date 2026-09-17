@@ -16,6 +16,7 @@ from h3.mixed_batches import (
     load_chain_state,
     new_chain_state,
     split_batches,
+    manual_test_batch_accounts,
 )
 from h3.mixed_results import (
     build_retry_matrix,
@@ -292,23 +293,46 @@ def test_workflow_uses_mixed_batches_and_three_scoped_retries():
     assert "needs: [prepare, prepare_retry, retry]" in workflow
     assert "needs: [prepare, prepare_retry2, retry2]" in workflow
     assert "--candidate-matrix-env RETRY_CANDIDATE_MATRIX" in workflow
-    assert "secrets.TEST" not in workflow
+    assert "test: ${{ inputs.test_mode && secrets.TEST || '' }}" in workflow
     assert "trap 'rm -f .account-credentials' EXIT" in account_action
     assert "if: always() && steps.sanitize.outcome == 'success'" in account_action
 
 
 def test_manual_test_group_uses_every_configured_account():
     root = Path(__file__).resolve().parents[2]
-    group_workflow = (root / ".github/workflows/dynamic-group.yml").read_text(
+    batch_workflow = (root / ".github/workflows/dynamic-batch.yml").read_text(
         encoding="utf-8"
     )
     test_workflow = (root / ".github/workflows/test-group.yml").read_text(
         encoding="utf-8"
     )
-    assert "lines = lines[:1]" not in group_workflow
+    assert "uses: ./.github/workflows/dynamic-batch.yml" in test_workflow
+    assert "test_mode: true" in test_workflow
+    assert "batch-result-${{ github.run_id }}-test" in test_workflow
+    assert "needs: prepare" in test_workflow
+    assert "needs: [prepare, test]" in test_workflow
+    assert "timezone(timedelta(hours=8))" in test_workflow
     assert "TEST_ACCOUNT_LIMIT" not in test_workflow
-    assert "max-parallel: 20" in group_workflow
+    assert "workflow_call:" in batch_workflow
+    assert "python h3/mixed_batches.py test-matrix" in batch_workflow
+    assert "max-parallel: 20" in batch_workflow
     assert "workflow_dispatch:" in test_workflow
+
+
+def test_manual_test_accounts_use_normal_batch_metadata_and_all_rows():
+    with patch.dict(
+        os.environ,
+        {"test": "first,password\nsecond,password\nthird,password"},
+        clear=False,
+    ):
+        accounts = manual_test_batch_accounts("2026-09-17", "test")
+    assert len(accounts) == 3
+    assert {row["account_index"] for row in accounts} == {1, 2, 3}
+    assert all(row["source_group"] == "test" for row in accounts)
+    assert all(row["account_category"] == "测试组" for row in accounts)
+    assert all(row["execution_mode"] == "full" for row in accounts)
+    assert all(row["skip_sign"] is False for row in accounts)
+    assert all(row["batch_id"] == "test" for row in accounts)
 
 
 def test_summary_downloads_exact_batch_run_artifact(tmp_path):
