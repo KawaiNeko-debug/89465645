@@ -82,6 +82,7 @@ try:
         retry_components,
         vote_is_terminal_insufficient_points,
     )
+    from login_page import fill_password_login
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
     from h3.exchange_history import normalize_exchange_records
@@ -102,6 +103,7 @@ except ImportError:
         retry_components,
         vote_is_terminal_insufficient_points,
     )
+    from h3.login_page import fill_password_login
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -117,7 +119,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-08-27-activity-config-v2"
+SCRIPT_VERSION = "2026-09-17-login-selector-v3"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -2821,41 +2823,7 @@ def sign_in_account(
             # ---------- 登录流程 ----------
             log(f"账号{account_index} - 打开移动登录页...")
             page.goto(PASSPORT_URL, timeout=60000)
-            page.wait_for_selector('input[placeholder*="手机号码"], input[placeholder*="邮箱"]', timeout=30000)
-            log("✅ 登录页加载完成")
-
-            page.locator('input[placeholder*="手机号码"], input[placeholder*="邮箱"]').first.fill(username)
-            log("✅ 已填写账号")
-
-            agree_selector = "#__layout > div > div > div > div > div:nth-child(3) > form > div.mt-30.mb-32 > div.consent-agreement > div > img:nth-child(2)"
-            try:
-                page.locator(agree_selector).click(timeout=5000)
-                log("✅ 已点击同意协议")
-            except Exception as e:
-                log(f"⚠️ 点击同意协议失败（可能已默认同意）: {e}")
-
-            first_login_btn = "#__layout > div > div > div > div > div:nth-child(3) > form > button"
-            try:
-                page.locator(first_login_btn).click(timeout=5000)
-                log("✅ 已点击第一步登录按钮")
-            except Exception as e:
-                log(f"⚠️ 点击第一步登录按钮失败: {e}")
-
-            time.sleep(1)
-
-            password_xpath = "/html/body/div[1]/div/div/div/div/div/div[2]/div[2]/form/div[2]/div/div[1]/div[1]/input"
-            page.wait_for_selector(f"xpath={password_xpath}", timeout=10000)
-            log("✅ 密码框已出现")
-            page.locator(f"xpath={password_xpath}").fill(password)
-            log("✅ 已填写密码")
-
-            second_login_btn = "#__layout > div > div > div > div > div:nth-child(2) > div:nth-child(2) > form > button"
-            try:
-                page.locator(second_login_btn).click(timeout=5000)
-                log("✅ 已点击最终登录按钮")
-            except Exception as e:
-                log(f"⚠️ 点击最终登录按钮失败: {e}")
-                page.locator('form button[type="submit"]').click()
+            fill_password_login(page, username, password, log)
 
             # ===== 执行滑块破解 =====
             slider_ok = solve_slider_with_bezier(page)
