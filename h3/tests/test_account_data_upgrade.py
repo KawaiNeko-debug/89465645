@@ -990,19 +990,18 @@ class DynamicGroupTests(unittest.TestCase):
         self.assertNotIn("7890A", message)
         self.assertNotIn("疑似违反签到规则", message)
 
-    def test_test_group_lookup_is_limited_to_one_account(self):
+    def test_test_group_lookup_includes_all_accounts(self):
         with patch.dict(
             os.environ,
             {
                 "TEST": "first,password\nsecond,password",
-                "TEST_ACCOUNT_LIMIT": "1",
             },
             clear=False,
         ):
             lookup, total = load_account_lookup()
         self.assertEqual(lookup[("test", 1)], "first")
-        self.assertNotIn(("test", 2), lookup)
-        self.assertGreaterEqual(total, 1)
+        self.assertEqual(lookup[("test", 2)], "second")
+        self.assertGreaterEqual(total, 2)
 
     def test_empty_frozen_group_list_does_not_read_later_secrets(self):
         with patch.dict(

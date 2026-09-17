@@ -161,8 +161,6 @@ jobs:
           if code != 'test' and not re.fullmatch(r'(old|new|ll|zh)([1-9]|1[0-9]|20)', code):
               raise SystemExit(f'unsupported group code: {code}')
           lines = [line.strip() for line in os.environ.get(code, '').splitlines() if line.strip() and ',' in line]
-          if code == 'test':
-              lines = lines[:1]
           if not lines:
               raise SystemExit(f'{code} is empty')
           if code.startswith('old'):
@@ -244,8 +242,6 @@ jobs:
           import os
           code = os.environ['GROUP_CODE'].strip().lower()
           lines = [line.strip() for line in os.environ[code].splitlines() if line.strip() and ',' in line]
-          if code == 'test':
-              lines = lines[:1]
           username, password = lines[int(os.environ['ACCOUNT_INDEX']) - 1].split(',', 1)
           print(f"::add-mask::{username}")
           print(f"::add-mask::{password}")
@@ -355,8 +351,6 @@ jobs:
           import os
           code = os.environ['GROUP_CODE'].strip().lower()
           lines = [line.strip() for line in os.environ[code].splitlines() if line.strip() and ',' in line]
-          if code == 'test':
-              lines = lines[:1]
           username, password = lines[int(os.environ['ACCOUNT_INDEX']) - 1].split(',', 1)
           print(f"::add-mask::{username}")
           print(f"::add-mask::{password}")

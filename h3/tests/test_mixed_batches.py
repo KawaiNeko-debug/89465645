@@ -297,6 +297,20 @@ def test_workflow_uses_mixed_batches_and_three_scoped_retries():
     assert "if: always() && steps.sanitize.outcome == 'success'" in account_action
 
 
+def test_manual_test_group_uses_every_configured_account():
+    root = Path(__file__).resolve().parents[2]
+    group_workflow = (root / ".github/workflows/dynamic-group.yml").read_text(
+        encoding="utf-8"
+    )
+    test_workflow = (root / ".github/workflows/test-group.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "lines = lines[:1]" not in group_workflow
+    assert "TEST_ACCOUNT_LIMIT" not in test_workflow
+    assert "max-parallel: 20" in group_workflow
+    assert "workflow_dispatch:" in test_workflow
+
+
 def test_summary_downloads_exact_batch_run_artifact(tmp_path):
     state = {
         "schema_version": 3,

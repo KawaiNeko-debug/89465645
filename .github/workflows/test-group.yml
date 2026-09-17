@@ -33,7 +33,6 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       CONFIDENTIAL_PASSWORDS: ${{ secrets.CONFIDENTIAL_PASSWORDS }}
       NOTIFY_CHANNELS: telegram
-      TEST_ACCOUNT_LIMIT: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -143,9 +143,6 @@ def load_credential_lookup() -> tuple[dict[tuple[object, int], dict[str, str]], 
                     total += 1
     raw_test = os.getenv("test") or os.getenv("TEST") or ""
     test_lines = [line.strip() for line in raw_test.splitlines() if line.strip() and "," in line]
-    test_limit = max(0, safe_int(os.getenv("TEST_ACCOUNT_LIMIT"), 0))
-    if test_limit:
-        test_lines = test_lines[:test_limit]
     for account_index, line in enumerate(test_lines, start=1):
         username, password = line.split(",", 1)
         lookup[("test", account_index)] = {
