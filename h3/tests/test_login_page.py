@@ -109,6 +109,26 @@ def test_single_page_login_does_not_click_intermediate_submit():
     assert (password, "secret") in page.filled
 
 
+def test_switches_from_default_login_mode_before_submitting_account():
+    account = 'input[placeholder*="手机号"]'
+    switch = 'text=/账号密码登录|密码登录/'
+    final_submit = 'input[type="password"]::button[type="submit"]'
+    page = FakePage(
+        {
+            account: [True],
+            switch: [True],
+            final_submit: [True],
+        }
+    )
+    page.reveal_password_on_click.add(switch)
+
+    fill_password_login(page, "account", "secret", lambda _message: None)
+
+    assert switch in page.clicked
+    assert final_submit in page.clicked
+    assert ('input[type="password"]', "secret") in page.filled
+
+
 def test_login_fails_with_clear_error_when_password_field_never_appears():
     account = 'input[name="account"]'
     submit = f'{account}::button[type="submit"]'

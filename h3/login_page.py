@@ -112,6 +112,17 @@ def _accept_agreement(page) -> bool:
         return False
 
 
+def _switch_to_password_login(page):
+    switch, selector = _first_visible(page, PASSWORD_LOGIN_SWITCH_SELECTORS)
+    if switch is None:
+        return ""
+    try:
+        switch.click(timeout=5000)
+        return selector
+    except Exception:
+        return ""
+
+
 def fill_password_login(
     page,
     username: str,
@@ -128,9 +139,7 @@ def fill_password_login(
     password_field, password_selector = _first_visible(page, PASSWORD_INPUT_SELECTORS)
 
     if account is None and password_field is None:
-        switch, _ = _first_visible(page, PASSWORD_LOGIN_SWITCH_SELECTORS)
-        if switch is not None:
-            switch.click(timeout=5000)
+        if _switch_to_password_login(page):
             account, account_selector = wait_for_visible(
                 page, ACCOUNT_INPUT_SELECTORS, 5000
             )
@@ -145,6 +154,14 @@ def fill_password_login(
     account.fill(username)
     log("✅ 已填写账号")
 
+    if password_field is None:
+        switch_selector = _switch_to_password_login(page)
+        if switch_selector:
+            log(f"✅ 已切换密码登录模式（控件: {switch_selector}）")
+            password_field, password_selector = wait_for_visible(
+                page, PASSWORD_INPUT_SELECTORS, 5000
+            )
+
     if _accept_agreement(page):
         log("✅ 已确认登录协议")
     else:
@@ -158,9 +175,7 @@ def fill_password_login(
         )
 
     if password_field is None:
-        switch, _ = _first_visible(page, PASSWORD_LOGIN_SWITCH_SELECTORS)
-        if switch is not None:
-            switch.click(timeout=5000)
+        if _switch_to_password_login(page):
             password_field, password_selector = wait_for_visible(
                 page, PASSWORD_INPUT_SELECTORS, 5000
             )
