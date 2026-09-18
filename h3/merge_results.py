@@ -138,6 +138,7 @@ def merge_component_fields(picked: dict, fallback: dict | None):
             "pcb_total_amount", "pcb_amount_shortfall", "pcb_order_count",
         ),
         "coupons": ("coupon_fetch_success", "coupons", "coupon_prediction", "prediction_reason"),
+        "balance": ("balance_fetch_success", "prepayment_balance", "prepayment_balance_status"),
     }
     for component, keys in account_groups.items():
         if not picked_status[component] and fallback_status[component]:
@@ -158,6 +159,24 @@ def merge_component_fields(picked: dict, fallback: dict | None):
         "lottery": picked_activity.get("lottery") or [],
         "exchange": picked_activity.get("exchange") or [],
     }
+    picked_box = picked.get("box_lottery") if isinstance(picked.get("box_lottery"), list) else []
+    fallback_box = fallback.get("box_lottery") if isinstance(fallback.get("box_lottery"), list) else []
+    merged_box = []
+    for index in range(max(len(picked_box), len(fallback_box))):
+        current = picked_box[index] if index < len(picked_box) and isinstance(picked_box[index], dict) else {}
+        candidate = fallback_box[index] if index < len(fallback_box) and isinstance(fallback_box[index], dict) else {}
+        current_complete = truthy(current.get("terminal")) or (
+            truthy(current.get("draw_success")) and truthy(current.get("claim_success"))
+        )
+        candidate_complete = truthy(candidate.get("terminal")) or (
+            truthy(candidate.get("draw_success")) and truthy(candidate.get("claim_success"))
+        )
+        merged_box.append(candidate if candidate_complete and not current_complete else current or candidate)
+    picked["box_lottery"] = merged_box
+    picked["box_lottery_required"] = truthy(picked.get("box_lottery_required")) or truthy(
+        fallback.get("box_lottery_required")
+    )
+    picked_status["box_lottery"] = component_status(picked).get("box_lottery", False)
     picked["component_status"] = {
         key: bool(picked_status.get(key) or fallback_status.get(key))
         for key in set(picked_status) | set(fallback_status)

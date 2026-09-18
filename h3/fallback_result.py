@@ -4,10 +4,12 @@ import sys
 from datetime import datetime
 
 try:
+    from box_lottery import is_box_lottery_required
     from campaign_vote import is_vote_date
     from feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
     from listing_gift import should_claim_listing_gift
 except ImportError:
+    from h3.box_lottery import is_box_lottery_required
     from h3.campaign_vote import is_vote_date
     from h3.feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
     from h3.listing_gift import should_claim_listing_gift
@@ -31,6 +33,7 @@ def main() -> int:
     execution_order = int(os.getenv("EXECUTION_ORDER") or account_index)
     gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(task_date, group_code)
     vote_required = VOTE_ENABLED and is_vote_date(task_date)
+    box_required = is_box_lottery_required(task_date, group_code)
     row = {
         "account_index": account_index,
         "execution_order": execution_order,
@@ -50,6 +53,8 @@ def main() -> int:
         "points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
+        "account_format_error": False,
+        "account_format_reason": "",
         "risk_controlled": False,
         "banned_account": False,
         "points_fetch_success": False,
@@ -61,9 +66,11 @@ def main() -> int:
         "is_final_retry": False,
         "detail_reason": "result.json missing",
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
+        "box_lottery_required": box_required,
+        "box_lottery": [],
         "account_data_required": True,
         "account_data_fetch_success": False,
-        "account_data": {},
+        "account_data": {"balance_fetch_success": False},
         "listing_gift_required": gift_required,
         "listing_gift_success": False,
         "listing_gift_attempted": False,
@@ -83,6 +90,8 @@ def main() -> int:
             "exchange": False,
             "gift": not gift_required,
             "vote": not vote_required,
+            "balance": False,
+            "box_lottery": not box_required,
         },
     }
     payload = {

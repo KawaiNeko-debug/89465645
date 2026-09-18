@@ -1,4 +1,11 @@
-from h3.login_page import fill_password_login
+from h3.login_page import fill_password_login, is_mobile_account
+
+
+def test_mobile_account_detection_only_matches_mainland_mobile_shape():
+    assert is_mobile_account("13800138000")
+    assert is_mobile_account(" 13800138000 ")
+    assert not is_mobile_account("ABC12345")
+    assert not is_mobile_account("23800138000")
 
 
 class FakeLocator:

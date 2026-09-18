@@ -17,6 +17,8 @@ INVOICE_PROFILE_PATHS = (
 )
 COUPON_PATH = "/api/integrated/customerOrderCenter/getEffectiveCouponsList"
 LEGACY_COUPON_PATH = "/api/integrated/customerOrderCenter/LCCoupons"
+WALLET_ENTRY_PATH = "/wallet/"
+WALLET_BALANCE_PATH = "/api/walletplatform/account/v2/queryCustomerAccountHomeInfo"
 PCB_ORDER_TYPES = {1, 2}
 PCB_SPEND_THRESHOLD = 50.0
 
@@ -43,6 +45,9 @@ def empty_account_data() -> dict:
         "pcb_total_amount": None,
         "pcb_amount_shortfall": None,
         "pcb_order_count": 0,
+        "balance_fetch_success": False,
+        "prepayment_balance": None,
+        "prepayment_balance_status": "数据不足",
         "coupons": {"unused": [], "used": [], "expired": []},
         "coupon_prediction": "数据不足",
         "prediction_reason": "会员资料接口未完成",
@@ -73,6 +78,21 @@ def safe_int(value, default=0) -> int:
         return int(float(str(value).strip()))
     except Exception:
         return default
+
+
+def parse_prepayment_balance(response) -> dict:
+    """Parse only a readable balance; never persist the encrypted payload."""
+    data = unwrap_data(response)
+    raw = data.get("cleartextOverage") if isinstance(data, dict) else None
+    if raw in (None, ""):
+        return {"success": False, "value": None, "status": "余额接口未返回"}
+    text = str(raw).strip()
+    if text.startswith("{secret}"):
+        return {"success": False, "value": None, "status": "余额无法解密"}
+    value = safe_float(text, None)
+    if value is None:
+        return {"success": False, "value": None, "status": "余额格式不可读"}
+    return {"success": True, "value": value, "status": "余额获取成功"}
 
 
 def response_succeeded(response) -> bool:
@@ -475,6 +495,29 @@ class AccountDataCollector:
             self.log(f"账号{self.account_index} - 会员中心 SSO 页面打开失败: {type(exc).__name__}")
             return False
 
+    def _fetch_balance(self) -> dict:
+        try:
+            self.page.goto(f"{self.base}{WALLET_ENTRY_PATH}", wait_until="domcontentloaded", timeout=60000)
+            self.page.wait_for_timeout(1800)
+        except Exception as exc:
+            self.log(f"账号{self.account_index} - 钱包页面打开失败: {type(exc).__name__}")
+        response = self._request_with_retry("GET", WALLET_BALANCE_PATH, None, "预付款余额")
+        parsed = parse_prepayment_balance(response)
+        if parsed["success"]:
+            return parsed
+        # The member page may render a decrypted value even when the API field is
+        # encrypted. Read only visible text and never log or return the ciphertext.
+        try:
+            text = self.page.locator("body").inner_text(timeout=3000)
+            match = re.search(r"(?:账户余额|可用余额|预付款余额)[^\d]{0,30}([\d,]+(?:\.\d{1,2})?)", text)
+            if match:
+                value = safe_float(match.group(1), None)
+                if value is not None:
+                    return {"success": True, "value": value, "status": "余额获取成功"}
+        except Exception:
+            pass
+        return parsed
+
     def _fetch_pcb_orders(self, profile_responses: list[dict]) -> tuple[bool, float, float, int]:
         company_name = find_first_value(profile_responses, {"vatCompanyName", "companyName", "invoiceTitle"})
         organization = find_first_value(profile_responses, {"invoiceOrganization"})
@@ -521,7 +564,7 @@ class AccountDataCollector:
 
     def collect(self, previous=None, components=None) -> dict:
         previous = previous if isinstance(previous, dict) else {}
-        requested = set(components or ("invoice", "pcb_orders", "coupons"))
+        requested = set(components or ("invoice", "pcb_orders", "coupons", "balance"))
         result = empty_account_data()
         result.update(deepcopy(previous))
         environment_error = member_environment_error(self.base)
@@ -531,6 +574,12 @@ class AccountDataCollector:
         if not self._open_member_session():
             result["error"] = "会员中心 SSO 未建立"
             return result
+
+        if "balance" in requested:
+            balance = self._fetch_balance()
+            result["balance_fetch_success"] = bool(balance.get("success"))
+            result["prepayment_balance"] = balance.get("value") if balance.get("success") else None
+            result["prepayment_balance_status"] = str(balance.get("status") or "数据不足")
 
         statistics = None
         profile_responses = []

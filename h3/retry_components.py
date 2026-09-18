@@ -4,6 +4,11 @@ import os
 import sys
 from pathlib import Path
 
+try:
+    from box_lottery import box_lottery_complete
+except ImportError:
+    from h3.box_lottery import box_lottery_complete
+
 
 COMPONENTS = (
     "sign",
@@ -11,10 +16,12 @@ COMPONENTS = (
     "invoice",
     "pcb_orders",
     "coupons",
+    "balance",
     "lottery",
     "exchange",
     "gift",
     "vote",
+    "box_lottery",
 )
 
 
@@ -55,6 +62,12 @@ def component_status(row: dict | None) -> dict[str, bool]:
         or vote_is_terminal_conflict(row)
         or vote_is_terminal_insufficient_points(row)
     )
+    box_required = truthy(row.get("box_lottery_required"))
+    box_complete = (
+        truthy(row.get("risk_controlled"))
+        or truthy(row.get("banned_account"))
+        or box_lottery_complete(box_required, row.get("box_lottery"))
+    )
     gift_complete = not truthy(row.get("listing_gift_required")) or truthy(
         row.get("listing_gift_success")
     )
@@ -66,10 +79,16 @@ def component_status(row: dict | None) -> dict[str, bool]:
         "invoice": truthy(account_data.get("invoice_fetch_success")),
         "pcb_orders": truthy(account_data.get("pcb_order_fetch_success")),
         "coupons": truthy(account_data.get("coupon_fetch_success")),
+        "balance": (
+            truthy(account_data.get("balance_fetch_success"))
+            if "balance_fetch_success" in account_data
+            else True
+        ),
         "lottery": activity_success,
         "exchange": activity_success,
         "gift": gift_complete,
         "vote": vote_complete,
+        "box_lottery": box_complete,
     }
     for key in result:
         if key in stored:
@@ -79,7 +98,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
 
 def retry_components(row: dict | None) -> list[str]:
     row = row if isinstance(row, dict) else {}
-    if truthy(row.get("password_error")):
+    if truthy(row.get("password_error")) or truthy(row.get("account_format_error")):
         return []
     status = component_status(row)
     return [name for name in COMPONENTS if not status.get(name, False)]

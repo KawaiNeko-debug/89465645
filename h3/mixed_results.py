@@ -7,12 +7,14 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from box_lottery import is_box_lottery_required
     from account_data import empty_account_data
     from campaign_vote import is_vote_date
     from listing_gift import should_claim_listing_gift
     from merge_results import pick_result
     from retry_components import COMPONENTS, component_status, retry_components
 except ImportError:
+    from h3.box_lottery import is_box_lottery_required
     from h3.account_data import empty_account_data
     from h3.campaign_vote import is_vote_date
     from h3.listing_gift import should_claim_listing_gift
@@ -231,6 +233,7 @@ def missing_result(account: dict, task_date: str) -> dict:
     skip_sign = truthy(account.get("skip_sign"))
     gift_required = should_claim_listing_gift(task_date, source_group)
     vote_required = is_vote_date(task_date)
+    box_required = is_box_lottery_required(task_date, source_group)
     row = {
         **deepcopy(account),
         "group_code": source_group,
@@ -244,6 +247,8 @@ def missing_result(account: dict, task_date: str) -> dict:
         "points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
+        "account_format_error": False,
+        "account_format_reason": "",
         "risk_controlled": False,
         "banned_account": False,
         "points_fetch_success": False,
@@ -257,6 +262,8 @@ def missing_result(account: dict, task_date: str) -> dict:
         "sign_time": "",
         "sign_ip": "",
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
+        "box_lottery_required": box_required,
+        "box_lottery": [],
         "account_data_required": True,
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),

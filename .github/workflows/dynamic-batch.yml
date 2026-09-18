@@ -150,6 +150,7 @@ env:
   MEMBER_API_BASE: ${{ secrets.MEMBER_API_BASE }}
   VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
   VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
+  BOX_LOTTERY_ACTIVITY_CODE: ${{ vars.BOX_LOTTERY_ACTIVITY_CODE }}
   ACCOUNT_DATA_ENABLED: "true"
   SIGN_TASK_START_DATE: ${{ inputs.task_start_date }}
   BATCH_ID: ${{ inputs.batch_id }}

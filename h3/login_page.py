@@ -1,3 +1,4 @@
+import re
 import time
 from collections.abc import Callable, Iterable
 
@@ -44,6 +45,10 @@ SUBMIT_BUTTON_SELECTORS = (
     '[role="button"]:has-text("下一步")',
     '[role="button"]:has-text("登录")',
 )
+
+
+def is_mobile_account(username: str) -> bool:
+    return bool(re.fullmatch(r"1\d{10}", str(username or "").strip()))
 
 
 def _first_visible(page, selectors: Iterable[str]):

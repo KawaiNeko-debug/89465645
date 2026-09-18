@@ -21,6 +21,7 @@ from h3.account_data import (
     parse_invoice_profile_exists,
     parse_invoice_statistics,
     parse_invoice_order_page,
+    parse_prepayment_balance,
     predict_pcb_smt,
     sum_pcb_invoice_orders,
 )
@@ -32,6 +33,7 @@ from h3.listing_gift import (
     monthly_gift_origin,
     should_claim_listing_gift,
 )
+from h3.box_lottery import box_lottery_complete, is_box_lottery_required
 from h3.report import (
     is_current_pcb_smt_coupon,
     max_lottery_count,
@@ -135,6 +137,52 @@ def record(index: int, lottery_count: int, account_data=None) -> dict:
 
 
 class DynamicLotteryTests(unittest.TestCase):
+    def test_mobile_account_warning_is_visible_in_telegram_summary(self):
+        row = record(1, 0)
+        row.update({
+            "username": "13800000000",
+            "account_format_error": True,
+            "account_format_reason": "账号错误：检测到11位手机号，请改用客编",
+            "sign_status": "账号错误",
+            "sign_success": False,
+            "data_fetch_completed": False,
+        })
+        message, _summary = build_message([row], {}, 1)
+        self.assertIn("账号错误：检测到11位手机号，请改用客编", message)
+
+    def test_box_lottery_schedule_and_group_scope(self):
+        self.assertTrue(is_box_lottery_required("2026-09-19", "old1"))
+        self.assertTrue(is_box_lottery_required("2026-09-19", "new2"))
+        self.assertTrue(is_box_lottery_required("2026-09-19", "test"))
+        self.assertFalse(is_box_lottery_required("2026-09-19", "ll1"))
+        self.assertFalse(is_box_lottery_required("2026-09-18", "old1"))
+        self.assertTrue(box_lottery_complete(True, [{"terminal": True}, {"terminal": True}]))
+
+    def test_account_format_error_is_terminal_for_retry(self):
+        self.assertEqual(
+            retry_components({"account_format_error": True, "sign_status": "账号错误"}),
+            [],
+        )
+
+    def test_box_lottery_terminal_result_does_not_retry(self):
+        row = record(1, 0)
+        row.update({
+            "token_extracted": True,
+            "points_fetch_success": True,
+            "account_data_fetch_success": True,
+            "box_lottery_required": True,
+            "box_lottery": [{"terminal": True}, {"terminal": True}],
+            "vote_required": False,
+            "listing_gift_required": False,
+        })
+        row["account_data"].update({
+            "balance_fetch_success": True,
+            "invoice_fetch_success": True,
+            "pcb_order_fetch_success": True,
+            "coupon_fetch_success": True,
+        })
+        self.assertNotIn("box_lottery", retry_components(row))
+
     def test_activity_config_request_never_uses_an_empty_payload(self):
         self.assertEqual(
             activity_config_payload(" campaign-id "),
@@ -165,6 +213,24 @@ class DynamicLotteryTests(unittest.TestCase):
                     [value for value in headers if str(value or "").startswith("领取情况")],
                     [f"领取情况{index}" for index in range(1, count + 1)],
                 )
+
+    def test_xlsx_contains_balance_and_two_box_lottery_slots(self):
+        row = record(1, 0)
+        row["account_data"]["prepayment_balance"] = 88.5
+        row["box_lottery_required"] = True
+        row["box_lottery"] = [
+            {"attempt": 1, "draw_status": "抽奖成功", "claim_status": "领取成功", "prizes": [{"name": "奖励一"}]},
+            {"attempt": 2, "draw_status": "抽奖成功", "claim_status": "领取成功", "prizes": [{"name": "奖励二"}]},
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "report.xlsx")
+            write_xlsx(path, [row])
+            sheet = load_workbook(path)["签到汇总"]
+            headers = [cell.value for cell in sheet[1]]
+            values = [cell.value for cell in sheet[2]]
+            self.assertEqual(values[headers.index("账户余额")], "88.5")
+            self.assertEqual(values[headers.index("纸盒抽奖1奖励")], "奖励一")
+            self.assertIn("领取成功", values[headers.index("纸盒抽奖2领取情况")])
 
     def test_accounts_are_padded_to_the_daily_maximum(self):
         rows = [record(1, 2), record(2, 6), record(3, 8)]
@@ -262,6 +328,19 @@ class ExchangeHistoryTests(unittest.TestCase):
 
 
 class AccountDataTests(unittest.TestCase):
+    def test_prepayment_balance_parser_never_returns_ciphertext(self):
+        encrypted = parse_prepayment_balance(
+            {"success": True, "data": {"cleartextOverage": "{secret}abcdef"}}
+        )
+        self.assertFalse(encrypted["success"])
+        self.assertIsNone(encrypted["value"])
+        self.assertEqual(encrypted["status"], "余额无法解密")
+        readable = parse_prepayment_balance(
+            {"success": True, "data": {"cleartextOverage": "123.45"}}
+        )
+        self.assertTrue(readable["success"])
+        self.assertEqual(readable["value"], 123.45)
+
     def test_har_invoice_fields_profile_signal_and_bodyless_post(self):
         response = {
             "success": True,

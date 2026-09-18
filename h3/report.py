@@ -21,10 +21,12 @@ except ImportError:
     from h3.feature_flags import SECKILL_ENABLED
 
 try:
+    from box_lottery import box_lottery_complete as box_lottery_is_complete, is_box_lottery_required
     from account_data import empty_account_data, is_pcb_smt_coupon
     from campaign_vote import is_vote_date
     from listing_gift import should_claim_listing_gift
 except ImportError:
+    from h3.box_lottery import box_lottery_complete as box_lottery_is_complete, is_box_lottery_required
     from h3.account_data import empty_account_data, is_pcb_smt_coupon
     from h3.campaign_vote import is_vote_date
     from h3.listing_gift import should_claim_listing_gift
@@ -347,6 +349,8 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
         "points_reward": safe_float(record.get("points_reward"), 0.0),
         "has_reward": truthy(record.get("has_reward")),
         "password_error": truthy(record.get("password_error")),
+        "account_format_error": truthy(record.get("account_format_error")),
+        "account_format_reason": str(record.get("account_format_reason") or "").strip(),
         "risk_controlled": risk_controlled,
         "banned_account": banned_account,
         "points_fetch_success": points_fetch_success,
@@ -378,6 +382,8 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
         "vote_product_sku": str(record.get("vote_product_sku") or "").strip(),
         "vote_product_name": str(record.get("vote_product_name") or "").strip(),
         "vote_detail": str(record.get("vote_detail") or "").strip(),
+        "box_lottery_required": truthy(record.get("box_lottery_required")),
+        "box_lottery": record.get("box_lottery") if isinstance(record.get("box_lottery"), list) else [],
     }
 
 
@@ -420,6 +426,7 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         category = ""
     sign_skipped = group_code.startswith(("ll", "zh"))
     vote_required = is_vote_date(task_date)
+    box_required = is_box_lottery_required(task_date, group_code)
     return {
         "account_index": account_index,
         "execution_order": account_index,
@@ -439,6 +446,8 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         "points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
+        "account_format_error": False,
+        "account_format_reason": "",
         "risk_controlled": False,
         "banned_account": False,
         "points_fetch_success": False,
@@ -453,6 +462,8 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         "sign_time": "",
         "sign_ip": "",
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
+        "box_lottery_required": box_required,
+        "box_lottery": [],
         "account_data_required": truthy(os.getenv("ACCOUNT_DATA_ENABLED", "false")),
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),
@@ -514,6 +525,8 @@ def merge_records_with_expected(
 
 def status_label(record: dict) -> str:
     raw_status = str(record.get("sign_status") or "")
+    if truthy(record.get("account_format_error")):
+        return "账号错误"
     if truthy(record.get("banned_account")):
         if not truthy(record.get("data_fetch_completed")):
             return "签到异常"
@@ -571,15 +584,20 @@ def detail_text(record: dict) -> str:
 
 def is_problem_record(record: dict) -> bool:
     return (
+        truthy(record.get("account_format_error"))
+        or
         status_sort_bucket(record) == 0
         or not truthy(record.get("data_fetch_completed"))
         or (truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")))
         or (truthy(record.get("vote_required")) and not truthy(record.get("vote_success")))
+        or not box_lottery_complete(record)
     )
 
 
 def problem_reason(record: dict) -> str:
     reasons = []
+    if truthy(record.get("account_format_error")):
+        reasons.append(str(record.get("account_format_reason") or "账号错误：检测到11位手机号，请改用客编").strip())
     if status_sort_bucket(record) == 0:
         reasons.append(detail_reason(record))
     if truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")):
@@ -589,6 +607,8 @@ def problem_reason(record: dict) -> str:
     if truthy(record.get("vote_required")) and not truthy(record.get("vote_success")):
         if not is_vote_conflict_record(record):
             reasons.append(str(record.get("vote_status") or record.get("vote_detail") or "投票未完成").strip())
+    if not box_lottery_complete(record):
+        reasons.append("纸盒抽奖未完成")
     return "；".join(dict.fromkeys(reason for reason in reasons if reason))
 
 
@@ -636,7 +656,7 @@ def append_compact_problem_summary(lines: list[str], records: list[dict]) -> Non
 
 def status_sort_bucket(record: dict) -> int:
     label = status_label(record)
-    if label in {"签到失败", "签到异常", "签到风控", "取数异常"}:
+    if label in {"账号错误", "签到失败", "签到异常", "签到风控", "取数异常"}:
         return 0
     if label == "签到成功但次日":
         return 1
@@ -798,7 +818,7 @@ def color_for_points(points: float):
 
 
 def font_for_status(label: str) -> Font:
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"账号错误", "签到失败", "签到异常", "签到风控"}:
         return Font(color="FFFFFF", bold=True)
     if label == "签到成功但次日":
         return Font(color="9C6500", bold=True)
@@ -810,7 +830,7 @@ def font_for_status(label: str) -> Font:
 
 
 def fill_for_status(label: str):
-    if label in {"签到失败", "签到异常", "签到风控"}:
+    if label in {"账号错误", "签到失败", "签到异常", "签到风控"}:
         return STATUS_RED_FILL
     if label == "签到成功但次日":
         return STATUS_YELLOW_FILL
@@ -829,9 +849,9 @@ def font_for_vote_status(record: dict) -> Font:
 
 def font_for_claim_status(value: str) -> Font:
     text = str(value or "")
-    if "已经领取" in text:
+    if "已经领取" in text or "领取成功" in text or "无奖励" in text:
         return FONT_GREEN
-    if "未领取" in text or "暂未领取" in text or "已过期" in text:
+    if "未领取" in text or "暂未领取" in text or "已过期" in text or "失败" in text or "结果未知" in text:
         return FONT_RED
     return FONT_DARK
 
@@ -867,6 +887,33 @@ def activity_columns(record: dict) -> list[str]:
             else:
                 values.extend(["", ""])
     return values
+
+
+def box_lottery_columns(record: dict) -> list[str]:
+    rows = record.get("box_lottery") if isinstance(record.get("box_lottery"), list) else []
+    values = []
+    for index in range(2):
+        item = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
+        prizes = item.get("prizes") if isinstance(item.get("prizes"), list) else []
+        prize_text = "\n".join(
+            str(prize.get("name") or prize.get("prizeTitle") or "").strip()
+            for prize in prizes if isinstance(prize, dict)
+        )
+        status = "；".join(
+            value for value in (
+                str(item.get("draw_status") or "").strip(),
+                str(item.get("claim_status") or "").strip(),
+                str(item.get("claim_detail") or "").strip(),
+            ) if value
+        )
+        values.extend([prize_text, status])
+    return values
+
+
+def box_lottery_complete(record: dict) -> bool:
+    return box_lottery_is_complete(
+        truthy(record.get("box_lottery_required")), record.get("box_lottery")
+    )
 
 
 def max_lottery_count(records: list[dict]) -> int:
@@ -1141,6 +1188,7 @@ def write_xlsx(path: str, records: list[dict]):
         "详细原因",
         "签到时间",
         "签到IP",
+        "账户余额",
         "开票资料",
         f"不超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "不超过接口月份阈值可开金额",
         f"超过{threshold_text}个月可开金额" if threshold_text != "接口阈值" else "超过接口月份阈值可开金额",
@@ -1158,6 +1206,10 @@ def write_xlsx(path: str, records: list[dict]):
         "投票时间",
         "投票商品",
         "投票详情",
+        "纸盒抽奖1奖励",
+        "纸盒抽奖1领取情况",
+        "纸盒抽奖2奖励",
+        "纸盒抽奖2领取情况",
     ]
     for title in exchange_titles:
         headers.extend([f"兑换物品：{title}", f"兑换状态：{title}"])
@@ -1199,6 +1251,7 @@ def write_xlsx(path: str, records: list[dict]):
             detail_text(record),
             str(record.get("sign_time") or ""),
             str(record.get("sign_ip") or ""),
+            invoice_amount_text((record.get("account_data") or {}).get("prepayment_balance")),
             str((record.get("account_data") or {}).get("invoice_profile_status") or "数据不足"),
             invoice_amount_text((record.get("account_data") or {}).get("invoice_within_months_amount")),
             invoice_amount_text((record.get("account_data") or {}).get("invoice_over_months_amount")),
@@ -1223,7 +1276,7 @@ def write_xlsx(path: str, records: list[dict]):
             str(record.get("vote_time") or ""),
             str(record.get("vote_product_name") or record.get("vote_product_sku") or ""),
             str(record.get("vote_detail") or ""),
-        ] + exchange_columns(record, exchange_titles) + activity_columns(record)
+        ] + box_lottery_columns(record) + exchange_columns(record, exchange_titles) + activity_columns(record)
         sheet.append(row)
         row_index = sheet.max_row
         for cell in sheet[row_index]:
@@ -1252,6 +1305,13 @@ def write_xlsx(path: str, records: list[dict]):
         gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
         vote_cell = sheet.cell(row_index, header_index["投票状态"])
         vote_cell.font = font_for_vote_status(record)
+        for attempt in (1, 2):
+            prize_cell = sheet.cell(row_index, header_index[f"纸盒抽奖{attempt}奖励"])
+            prize_fill = fill_for_prize(prize_cell.value)
+            if prize_fill:
+                prize_cell.fill = prize_fill
+            claim_cell = sheet.cell(row_index, header_index[f"纸盒抽奖{attempt}领取情况"])
+            claim_cell.font = font_for_claim_status(claim_cell.value)
         for title in exchange_titles:
             status_column = header_index[f"兑换状态：{title}"]
             exchange_fill = fill_for_exchange_status(sheet.cell(row_index, status_column).value)
@@ -1280,6 +1340,8 @@ def write_xlsx(path: str, records: list[dict]):
             width = 30
         elif name.startswith("兑换状态："):
             width = 20
+        elif name.startswith("纸盒抽奖"):
+            width = 28 if name.endswith("奖励") else 22
         widths[get_column_letter(column_index)] = width
     for column_index in range(activity_start_column, len(headers) + 1):
         widths[get_column_letter(column_index)] = 28 if (column_index - activity_start_column) % 2 == 0 else 18

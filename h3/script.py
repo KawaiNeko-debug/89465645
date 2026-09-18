@@ -82,7 +82,15 @@ try:
         retry_components,
         vote_is_terminal_insufficient_points,
     )
-    from login_page import fill_password_login
+    from login_page import fill_password_login, is_mobile_account
+    from box_lottery import (
+        ACTIVITY_CODE as BOX_LOTTERY_ACTIVITY_CODE,
+        CLAIM_PATH as BOX_LOTTERY_CLAIM_PATH,
+        TURN_PATH as BOX_LOTTERY_TURN_PATH,
+        box_lottery_complete,
+        empty_box_lottery,
+        is_box_lottery_required,
+    )
 except ImportError:
     from h3.account_data import AccountDataCollector, empty_account_data
     from h3.exchange_history import normalize_exchange_records
@@ -103,7 +111,15 @@ except ImportError:
         retry_components,
         vote_is_terminal_insufficient_points,
     )
-    from h3.login_page import fill_password_login
+    from h3.login_page import fill_password_login, is_mobile_account
+    from h3.box_lottery import (
+        ACTIVITY_CODE as BOX_LOTTERY_ACTIVITY_CODE,
+        CLAIM_PATH as BOX_LOTTERY_CLAIM_PATH,
+        TURN_PATH as BOX_LOTTERY_TURN_PATH,
+        box_lottery_complete,
+        empty_box_lottery,
+        is_box_lottery_required,
+    )
 
 # 统一东八区时间
 os.environ.setdefault("TZ", "Asia/Shanghai")
@@ -119,7 +135,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-09-17-login-selector-v3"
+SCRIPT_VERSION = "2026-09-18-box-lottery-balance-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -153,6 +169,10 @@ LISTING_GIFT_RESULT_FIELDS = (
     'listing_gift_status',
     'listing_gift_time',
     'listing_gift_detail',
+)
+BOX_LOTTERY_RESULT_FIELDS = (
+    "box_lottery_required",
+    "box_lottery",
 )
 EXECUTION_RESULT_FIELDS = (
     'group_code',
@@ -256,6 +276,7 @@ def initial_vote_status(task_date: str) -> str:
     if not VOTE_ENABLED:
         return '投票功能已关闭'
     return '待执行' if is_vote_date(task_date) else '非投票日期'
+
 
 def safe_int(v, default=0) -> int:
     try:
@@ -1063,6 +1084,10 @@ class ApiClient:
         self.vote_product_sku = VOTE_PRODUCT_SKU
         self.vote_product_name = VOTE_PRODUCT_NAME
         self.vote_detail = ""
+        self.box_lottery_required = is_box_lottery_required(
+            current_date_text(), execution_context().get("group_code")
+        )
+        self.box_lottery = empty_box_lottery()
         self._campaign_sso_wait_logged = False
         self._campaign_request_channel_logged = False
         self._campaign_cdp_session = None
@@ -1095,6 +1120,13 @@ class ApiClient:
         for key in VOTE_RESULT_FIELDS:
             if key in previous:
                 setattr(self, key, previous.get(key))
+        if isinstance(previous.get("box_lottery"), list):
+            prior = previous.get("box_lottery")
+            self.box_lottery = [deepcopy(item) for item in prior[:2]]
+            while len(self.box_lottery) < 2:
+                self.box_lottery.append(empty_box_lottery()[len(self.box_lottery)])
+        if "box_lottery_required" in previous:
+            self.box_lottery_required = truthy(previous.get("box_lottery_required"))
 
     def _mark_failure(self, status, raw=None, detail=""):
         reason = detail or build_detail_reason(raw, default=status)
@@ -1806,8 +1838,8 @@ class ApiClient:
     def fetch_account_data(self, components=None) -> dict:
         if not self.account_data_required:
             return self.account_data
-        requested = set(components or ("invoice", "pcb_orders", "coupons"))
-        if not requested.intersection({"invoice", "pcb_orders", "coupons"}):
+        requested = set(components or ("invoice", "pcb_orders", "coupons", "balance"))
+        if not requested.intersection({"invoice", "pcb_orders", "coupons", "balance"}):
             return self.account_data
         self.account_data = AccountDataCollector(
             self.page,
@@ -2340,6 +2372,106 @@ class ApiClient:
         self._campaign_session_established = True
         return True
 
+    def _claim_box_prizes(self, record: dict) -> None:
+        prizes = record.get("prizes") if isinstance(record.get("prizes"), list) else []
+        if not prizes:
+            record["claim_success"] = True
+            record["claim_status"] = "无奖励"
+            return
+        failures = []
+        for prize in prizes:
+            win_code = str(prize.get("winCode") or prize.get("win_code") or "").strip()
+            if not win_code:
+                continue
+            try:
+                response = self._browser_fetch_json_once(
+                    "POST",
+                    f"{self.base_url}{BOX_LOTTERY_CLAIM_PATH}",
+                    payload={"winCode": win_code},
+                    tag="纸盒抽奖领取",
+                    dump_body_on_error=False,
+                    dump_json_on_success_false=False,
+                )
+                if isinstance(response, dict) and response.get("success") is True:
+                    prize["claim_status"] = "已领取"
+                else:
+                    failures.append(build_detail_reason(response, "奖励领取未成功"))
+            except Exception as exc:
+                failures.append(type(exc).__name__)
+        record["claim_success"] = not failures
+        record["claim_status"] = "领取成功" if not failures else "部分领取失败"
+        record["claim_detail"] = "；".join(dict.fromkeys(failures))
+
+    def execute_box_lottery(self, task_date="") -> bool:
+        self.box_lottery_required = is_box_lottery_required(
+            task_date or current_date_text(), execution_context().get("group_code")
+        )
+        if not self.box_lottery_required:
+            self.box_lottery = empty_box_lottery()
+            for item in self.box_lottery:
+                item["draw_status"] = "非周六或当前组不适用"
+                item["claim_status"] = "不适用"
+            return True
+        self.box_lottery = (self.box_lottery or empty_box_lottery())[:2]
+        while len(self.box_lottery) < 2:
+            self.box_lottery.append(empty_box_lottery()[len(self.box_lottery)])
+        for index, record in enumerate(self.box_lottery, start=1):
+            if truthy(record.get("terminal")):
+                continue
+            if truthy(record.get("draw_success")):
+                if not truthy(record.get("claim_success")):
+                    self._claim_box_prizes(record)
+                continue
+            if index == 1:
+                time.sleep(10)
+            else:
+                time.sleep(random.uniform(8, 15))
+            record["attempt"] = index
+            record["draw_time"] = current_time_text()
+            try:
+                response = self._browser_fetch_json_once(
+                    "POST",
+                    f"{self.base_url}{BOX_LOTTERY_TURN_PATH}",
+                    payload={"clientType": "MP-WEIXIN", "activityCode": BOX_LOTTERY_ACTIVITY_CODE},
+                    tag=f"纸盒抽奖第{index}次",
+                    dump_body_on_error=False,
+                    dump_json_on_success_false=False,
+                )
+                if not isinstance(response, dict) or response.get("success") is not True:
+                    reason = build_detail_reason(response, "抽奖未成功")
+                    record["draw_status"] = reason
+                    record["claim_status"] = "未执行"
+                    if any(marker in reason for marker in ("次数不足", "已达上限", "没有抽奖次数", "已抽完")):
+                        record["terminal"] = True
+                        record["claim_success"] = True
+                        record["claim_status"] = "业务终态"
+                        if index == 1:
+                            remaining = self.box_lottery[1]
+                            remaining.update({
+                                "terminal": True,
+                                "draw_status": reason,
+                                "claim_success": True,
+                                "claim_status": "业务终态",
+                            })
+                            break
+                    continue
+                data = response.get("data") if isinstance(response.get("data"), dict) else {}
+                prizes = data.get("prizeList") if isinstance(data.get("prizeList"), list) else []
+                record["prizes"] = [
+                    {"name": str(item.get("prizeTitle") or "未命名奖励"), "winCode": str(item.get("winCode") or ""), "claim_status": "待领取"}
+                    for item in prizes if isinstance(item, dict)
+                ]
+                record["draw_success"] = True
+                record["draw_status"] = "抽奖成功" if prizes else "抽奖成功但无奖励"
+                self._claim_box_prizes(record)
+            except Exception as exc:
+                record["draw_status"] = "结果未知"
+                record["terminal"] = True
+                record["claim_status"] = "未执行"
+                record["claim_detail"] = type(exc).__name__
+                log(f"账号{self.account_index} - 纸盒抽奖第{index}次结果未知，不自动重复抽奖")
+        return box_lottery_complete(True, self.box_lottery)
+
     def execute_campaign_vote(self) -> bool:
         if not self.vote_required:
             log(f"账号{self.account_index} - {self.vote_status}")
@@ -2720,6 +2852,8 @@ def sign_in_account(
         'retry_count': retry_count,
         'is_final_retry': is_final_retry,
         'password_error': False,
+        'account_format_error': False,
+        'account_format_reason': '',
         'risk_controlled': previous_risk_controlled if data_only_retry else False,
         'detail_reason': RISK_CONTROL_MESSAGE if previous_risk_controlled else ('补数据重试，跳过签到接口' if data_only_retry else ''),
         'sign_time': '',
@@ -2753,6 +2887,8 @@ def sign_in_account(
         'vote_product_sku': VOTE_PRODUCT_SKU,
         'vote_product_name': VOTE_PRODUCT_NAME,
         'vote_detail': '',
+        'box_lottery_required': is_box_lottery_required(task_start_date, execution.get('group_code')),
+        'box_lottery': empty_box_lottery(),
         **execution,
     }
     if previous_result:
@@ -2766,6 +2902,18 @@ def sign_in_account(
             **execution,
         })
         log(f"账号{account_index} - 仅补偿未完成组件: {', '.join(sorted(components)) or '无'}")
+
+    if is_mobile_account(username):
+        result.update({
+            'account_format_error': True,
+            'account_format_reason': '账号错误：检测到11位手机号，请改用客编',
+            'sign_status': '账号错误',
+            'detail_reason': '账号错误：检测到11位手机号，请改用客编',
+            'sign_success': False,
+            'token_extracted': False,
+        })
+        log(f"账号{account_index}（{mask_account(username)}）- ⚠️ 账号错误：检测到11位手机号，请改用客编")
+        return result
 
     ua_string = get_random_mobile_ua()
 
@@ -2873,6 +3021,9 @@ def sign_in_account(
             if access_token:
                 client = ApiClient(access_token, secretkey, account_index, page, user_agent=ua_string)
                 client.hydrate_from_previous(previous_result)
+                client.box_lottery_required = is_box_lottery_required(
+                    task_start_date, execution.get('group_code')
+                )
                 if banned_account:
                     client.listing_gift_required = False
                     client.listing_gift_status = "账号封禁，已跳过礼包领取"
@@ -2921,6 +3072,15 @@ def sign_in_account(
                             client.final_points = latest_points
                             client.points_reward = client.final_points - client.initial_points
 
+                if (
+                    "box_lottery" in components
+                    and client.box_lottery_required
+                    and (truthy(success) or truthy(previous_result.get("sign_success")))
+                    and not banned_account
+                    and not client.risk_controlled
+                ):
+                    client.execute_box_lottery(task_start_date)
+
                 if not banned_account and "gift" in components:
                     client.execute_listing_gift(task_start_date)
                 # A gift-only retry still needs a fresh coupon snapshot: the
@@ -2930,6 +3090,8 @@ def sign_in_account(
                 data_components = set(components or ())
                 if "gift" in data_components:
                     data_components.add("coupons")
+                if "box_lottery" in components:
+                    data_components.add("balance")
                 client.fetch_account_data(data_components)
                 client.fetch_activity_records(components)
                 if VOTE_ENABLED and "vote" in components:
@@ -2987,6 +3149,8 @@ def sign_in_account(
                     'vote_product_sku': client.vote_product_sku,
                     'vote_product_name': client.vote_product_name,
                     'vote_detail': client.vote_detail,
+                    'box_lottery_required': client.box_lottery_required,
+                    'box_lottery': client.box_lottery,
                     'component_status': {
                         'login': True,
                         'sign': (
@@ -2999,6 +3163,7 @@ def sign_in_account(
                         'invoice': truthy(client.account_data.get('invoice_fetch_success')),
                         'pcb_orders': truthy(client.account_data.get('pcb_order_fetch_success')),
                         'coupons': truthy(client.account_data.get('coupon_fetch_success')),
+                        'balance': truthy(client.account_data.get('balance_fetch_success')),
                         'lottery': client.lottery_fetch_success,
                         'exchange': client.voucher_fetch_success,
                         'gift': (
@@ -3015,6 +3180,9 @@ def sign_in_account(
                                 }
                             )
                             or '本期已锁定其他商品' in f"{client.vote_status} {client.vote_detail}"
+                        ),
+                        'box_lottery': (
+                            box_lottery_complete(client.box_lottery_required, client.box_lottery)
                         ),
                     },
                     **execution,
@@ -3098,6 +3266,8 @@ def process_single_account(username, password, account_index, total_accounts):
         'vote_product_sku': VOTE_PRODUCT_SKU,
         'vote_product_name': VOTE_PRODUCT_NAME,
         'vote_detail': '',
+        'box_lottery_required': is_box_lottery_required(normalize_task_start_date(), execution_context().get('group_code')),
+        'box_lottery': empty_box_lottery(),
         **execution_context(),
     }
     seed = load_previous_result()
@@ -3215,6 +3385,11 @@ def process_single_account(username, password, account_index, total_accounts):
         }
 
         merged['retry_count'] = res['retry_count']
+        for key in ('account_format_error', 'account_format_reason', 'box_lottery_required'):
+            if key in res:
+                merged[key] = res.get(key)
+        if isinstance(res.get('box_lottery'), list):
+            merged['box_lottery'] = res.get('box_lottery')
 
         if not should_retry(merged) or attempt >= max_retries:
             break
@@ -3341,6 +3516,9 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             'username': f['username'],
             'masked_username': mask_account(f['username'])
         })
+        for key in ('account_format_error', 'account_format_reason', 'box_lottery_required', 'box_lottery'):
+            if key in final:
+                orig[key] = final.get(key)
 
         if f != failed[-1]:
             time.sleep(random.uniform(4, 8))
@@ -3463,6 +3641,8 @@ def write_results_json(path, all_results, total_accounts):
                 "token_extracted": r.get("token_extracted"),
                 "secretkey_extracted": r.get("secretkey_extracted"),
                 "password_error": r.get("password_error"),
+                "account_format_error": r.get("account_format_error"),
+                "account_format_reason": r.get("account_format_reason"),
                 "risk_controlled": r.get("risk_controlled"),
                 "banned_account": r.get("banned_account"),
                 "points_fetch_success": r.get("points_fetch_success"),
@@ -3494,6 +3674,8 @@ def write_results_json(path, all_results, total_accounts):
                 "vote_product_sku": r.get("vote_product_sku"),
                 "vote_product_name": r.get("vote_product_name"),
                 "vote_detail": r.get("vote_detail"),
+                "box_lottery_required": r.get("box_lottery_required"),
+                "box_lottery": r.get("box_lottery") or empty_box_lottery(),
                 "component_status": component_status(r),
                 "group_code": r.get("group_code") or execution["group_code"],
                 "source_group": r.get("source_group") or execution["source_group"],
