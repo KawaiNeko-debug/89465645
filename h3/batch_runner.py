@@ -131,7 +131,7 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "listing_gift_required": should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")) else "非每月礼包领取日期或当前组不适用",
+        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")) else "非星火会礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": False,

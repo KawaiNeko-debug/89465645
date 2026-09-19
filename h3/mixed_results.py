@@ -270,7 +270,7 @@ def missing_result(account: dict, task_date: str) -> dict:
         "listing_gift_required": gift_required,
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "缺少每月礼包领取结果" if gift_required else "非每月礼包领取日期或当前组不适用",
+        "listing_gift_status": "缺少星火会礼包领取结果" if gift_required else "非星火会礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": vote_required,

@@ -485,7 +485,7 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "缺少每月礼包领取结果" if should_claim_listing_gift(task_date, group_code) else "非每月礼包领取日期或当前组不适用",
+        "listing_gift_status": "缺少星火会礼包领取结果" if should_claim_listing_gift(task_date, group_code) else "非星火会礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": vote_required,
@@ -736,7 +736,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 次日成功: {summary['next_day']}",
         f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
-        f"  ├── 每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+        f"  ├── 星火会礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
     ]
@@ -1225,7 +1225,7 @@ def write_xlsx(path: str, records: list[dict]):
         "已过期优惠券",
         "PCB+SMT优惠券预测",
         "预测依据",
-        "每月礼包领取情况",
+        "星火会礼包领取情况",
         "投票状态",
         "投票时间",
         "投票商品",
@@ -1325,7 +1325,7 @@ def write_xlsx(path: str, records: list[dict]):
         style_invoice_profile_cell(invoice_cell)
         prediction_cell = sheet.cell(row_index, header_index["PCB+SMT优惠券预测"])
         prediction_cell.font = FONT_RED if prediction_cell.value in {"不可能", "很小可能"} else (FONT_GREEN if prediction_cell.value in {"很大可能", "100%可能"} else FONT_BLUE)
-        gift_cell = sheet.cell(row_index, header_index["每月礼包领取情况"])
+        gift_cell = sheet.cell(row_index, header_index["星火会礼包领取情况"])
         gift_cell.font = FONT_GREEN if truthy(record.get("listing_gift_success")) else (FONT_RED if truthy(record.get("listing_gift_required")) else FONT_DARK)
         vote_cell = sheet.cell(row_index, header_index["投票状态"])
         vote_cell.font = font_for_vote_status(record)

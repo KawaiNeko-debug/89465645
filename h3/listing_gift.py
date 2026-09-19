@@ -2,18 +2,22 @@ import re
 from urllib.parse import urlsplit, urlunsplit
 
 
-MONTHLY_GIFT_DAY = 30
-MONTHLY_GIFT_PAGE_PATH = "/pages/coupon-page/index?id=43"
-MONTHLY_GIFT_API_PATH = "/api/appPlatform/couponPage/receiveCoupon"
-MONTHLY_GIFT_ID = 43
+SPARK_GIFT_DATES = {"2026-09-19", "2026-09-20"}
+SPARK_GIFT_PAGE_PATH = "/pages/coupon-page/index?id=72"
+SPARK_GIFT_API_PATH = "/api/appPlatform/couponPage/receiveCoupon"
+SPARK_GIFT_ID = 72
+SPARK_GIFT_GROUP_PREFIXES = ("wudi", "ld", "new")
 # Legacy names are retained so existing result fields and imports remain compatible.
-LISTING_GIFT_DATES = set()
-LISTING_GIFT_PATH = MONTHLY_GIFT_PAGE_PATH
-MONTHLY_GIFT_GROUP_PREFIXES = ("wudi", "ld", "yyy", "new")
+MONTHLY_GIFT_PAGE_PATH = SPARK_GIFT_PAGE_PATH
+MONTHLY_GIFT_API_PATH = SPARK_GIFT_API_PATH
+MONTHLY_GIFT_ID = SPARK_GIFT_ID
+MONTHLY_GIFT_GROUP_PREFIXES = SPARK_GIFT_GROUP_PREFIXES
+LISTING_GIFT_DATES = SPARK_GIFT_DATES
+LISTING_GIFT_PATH = SPARK_GIFT_PAGE_PATH
 
 
 def monthly_gift_origin(base_url: str) -> str:
-    """Derive the mobile origin for the monthly gift page.
+    """Derive the mobile origin for the campaign gift page.
 
     The configured application URL may use a desktop host.  Gift claiming is
     served by its sibling mobile host, so derive that host from configuration
@@ -52,8 +56,7 @@ def date_part(value="") -> str:
 
 
 def is_listing_gift_date(value) -> bool:
-    match = re.search(r"\d{4}-\d{2}-(\d{2})", str(value or ""))
-    return bool(match and int(match.group(1)) == MONTHLY_GIFT_DAY)
+    return date_part(value) in SPARK_GIFT_DATES
 
 
 def is_monthly_gift_group(group_code: str) -> bool:
@@ -81,7 +84,7 @@ def _message(response) -> str:
 def inspect_listing_gift_response(response) -> dict:
     message = _message(response)
     if any(hint in message for hint in ALREADY_RECEIVED_HINTS):
-        return {"state": "already", "success": True, "message": message or "今日已领取每月礼包"}
+        return {"state": "already", "success": True, "message": message or "星火会礼包已领取"}
     if not isinstance(response, dict) or response.get("success") is not True:
         return {"state": "error", "success": False, "message": message or "礼包接口请求失败"}
     data = response.get("data")
@@ -91,14 +94,14 @@ def inspect_listing_gift_response(response) -> dict:
         return {
             "state": "received" if data else "already",
             "success": True,
-            "message": "每月礼包领取成功" if data else "每月礼包已处理",
+            "message": "星火会礼包领取成功" if data else "星火会礼包已处理",
             "coupon_ids": [str(item).strip() for item in data if str(item).strip()],
         }
     if isinstance(data, dict) and data.get("success") is True:
         return {
             "state": "received",
             "success": True,
-            "message": "每月礼包领取成功",
+            "message": "星火会礼包领取成功",
             "order_code": str(data.get("orderCode") or "").strip(),
         }
     code = response.get("code")
@@ -119,10 +122,10 @@ def inspect_listing_gift_response(response) -> dict:
 
 
 def inspect_monthly_gift_page_text(text: str) -> dict:
-    """Interpret the visible result after visiting the monthly gift page."""
+    """Interpret the visible result after visiting the campaign gift page."""
     value = str(text or "").strip()
     if any(hint in value for hint in ALREADY_RECEIVED_HINTS):
         return {"state": "already", "success": True, "message": value}
     if any(hint in value for hint in ("领取成功", "领取完成", "已领取")):
         return {"state": "received", "success": True, "message": value}
-    return {"state": "error", "success": False, "message": value or "每月礼包页面未确认领取成功"}
+    return {"state": "error", "success": False, "message": value or "星火会礼包页面未确认领取成功"}

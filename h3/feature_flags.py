@@ -7,7 +7,7 @@ SECKILL_ENABLED = False
 # 活动日期仍由 campaign_vote.py 严格限制；非活动日不会请求投票接口。
 VOTE_ENABLED = True
 
-# 每月礼包仅在每月 30 日、且仅 wudi/ld/yyy 新号组执行。
+# 星火会礼包仅在 2026-09-19、2026-09-20，且仅 wudi/ld 组执行。
 LISTING_GIFT_ENABLED = True
 
 # 动态组工作流会通过环境变量显式开启会员资料采集。

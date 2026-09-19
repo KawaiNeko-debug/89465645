@@ -20,6 +20,7 @@ from h3.mixed_batches import (
     category_for,
 )
 from h3.mixed_results import (
+    applicable_components,
     build_retry_matrix,
     merge_results,
     stamp_result,
@@ -153,6 +154,21 @@ def test_wudi_secret_wins_over_legacy_new_secret():
     with patch.dict(os.environ, values, clear=False):
         state = new_chain_state("123", "main", "2026-08-31")
     assert state["group_counts"] == {"wudi1": 1}
+
+
+def test_campaign_gift_component_is_limited_to_dates_and_groups():
+    assert "gift" in applicable_components(
+        {"source_group": "wudi1", "skip_sign": False}, "2026-09-19"
+    )
+    assert "gift" in applicable_components(
+        {"source_group": "ld1", "skip_sign": False}, "2026-09-20"
+    )
+    assert "gift" not in applicable_components(
+        {"source_group": "yyy1", "skip_sign": False}, "2026-09-19"
+    )
+    assert "gift" not in applicable_components(
+        {"source_group": "wudi1", "skip_sign": False}, "2026-09-21"
+    )
 
 
 def test_compact_state_scales_without_embedding_every_account():

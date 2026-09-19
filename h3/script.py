@@ -1072,7 +1072,7 @@ class ApiClient:
         self.listing_gift_status = (
             "待领取"
             if self.listing_gift_required
-            else "非每月礼包领取日期或当前组不适用"
+            else "非星火会礼包领取日期或当前组不适用"
         )
         self.listing_gift_time = ""
         self.listing_gift_detail = ""
@@ -1871,11 +1871,11 @@ class ApiClient:
             task_date or current_date_text(), execution_context().get("group_code")
         )
         if not self.listing_gift_required:
-            self.listing_gift_status = "非每月礼包领取日期或当前组不适用"
+            self.listing_gift_status = "非星火会礼包领取日期或当前组不适用"
             return True
 
         self.listing_gift_attempted = True
-        last_result = {"state": "error", "success": False, "message": "每月礼包尚未执行"}
+        last_result = {"state": "error", "success": False, "message": "星火会礼包尚未执行"}
         for attempt in range(1, 4):
             try:
                 gift_origin = monthly_gift_origin(self.base_url)
@@ -1895,7 +1895,7 @@ class ApiClient:
                         "POST",
                         f"{gift_origin}{MONTHLY_GIFT_API_PATH}",
                         payload={"id": MONTHLY_GIFT_ID},
-                        tag="每月礼包领取",
+                        tag="星火会礼包领取",
                         dump_body_on_error=True,
                     )
                 )
@@ -1910,25 +1910,25 @@ class ApiClient:
                 last_result = {
                     "state": "error",
                     "success": False,
-                    "message": f"每月礼包页面请求异常：{type(exc).__name__}",
+                    "message": f"星火会礼包页面请求异常：{type(exc).__name__}",
                 }
             if last_result.get("success"):
                 self.listing_gift_success = True
                 self.listing_gift_time = current_time_text()
                 self.listing_gift_detail = str(last_result.get("message") or "").strip()
                 self.listing_gift_status = (
-                    "每月礼包已领取"
+                    "星火会礼包已领取"
                     if last_result.get("state") == "already"
-                    else "每月礼包领取成功"
+                    else "星火会礼包领取成功"
                 )
                 log(f"账号{self.account_index} - ✅ {self.listing_gift_status}")
                 return True
             if attempt < 3:
-                log(f"账号{self.account_index} - 每月礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
+                log(f"账号{self.account_index} - 星火会礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
                 time.sleep(0.8 * attempt)
 
-        self.listing_gift_detail = str(last_result.get("message") or "每月礼包未确认领取成功").strip()
-        self.listing_gift_status = f"每月礼包领取失败：{self.listing_gift_detail}"
+        self.listing_gift_detail = str(last_result.get("message") or "星火会礼包未确认领取成功").strip()
+        self.listing_gift_status = f"星火会礼包领取失败：{self.listing_gift_detail}"
         log(f"账号{self.account_index} - ❌ {self.listing_gift_status}")
         return False
 
@@ -2880,7 +2880,7 @@ def sign_in_account(
         'listing_gift_attempted': False,
         'listing_gift_status': '待领取' if LISTING_GIFT_ENABLED and should_claim_listing_gift(
             task_start_date, execution_context().get('group_code')
-        ) else '非每月礼包领取日期或当前组不适用',
+        ) else '非星火会礼包领取日期或当前组不适用',
         'listing_gift_time': '',
         'listing_gift_detail': '',
         'vote_required': VOTE_ENABLED and is_vote_date(task_start_date),
