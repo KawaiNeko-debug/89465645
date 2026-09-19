@@ -63,6 +63,66 @@ env:
   new18: ${{ secrets.new18 }}
   new19: ${{ secrets.new19 }}
   new20: ${{ secrets.new20 }}
+  wudi1: ${{ secrets.wudi1 }}
+  wudi2: ${{ secrets.wudi2 }}
+  wudi3: ${{ secrets.wudi3 }}
+  wudi4: ${{ secrets.wudi4 }}
+  wudi5: ${{ secrets.wudi5 }}
+  wudi6: ${{ secrets.wudi6 }}
+  wudi7: ${{ secrets.wudi7 }}
+  wudi8: ${{ secrets.wudi8 }}
+  wudi9: ${{ secrets.wudi9 }}
+  wudi10: ${{ secrets.wudi10 }}
+  wudi11: ${{ secrets.wudi11 }}
+  wudi12: ${{ secrets.wudi12 }}
+  wudi13: ${{ secrets.wudi13 }}
+  wudi14: ${{ secrets.wudi14 }}
+  wudi15: ${{ secrets.wudi15 }}
+  wudi16: ${{ secrets.wudi16 }}
+  wudi17: ${{ secrets.wudi17 }}
+  wudi18: ${{ secrets.wudi18 }}
+  wudi19: ${{ secrets.wudi19 }}
+  wudi20: ${{ secrets.wudi20 }}
+  ld1: ${{ secrets.ld1 }}
+  ld2: ${{ secrets.ld2 }}
+  ld3: ${{ secrets.ld3 }}
+  ld4: ${{ secrets.ld4 }}
+  ld5: ${{ secrets.ld5 }}
+  ld6: ${{ secrets.ld6 }}
+  ld7: ${{ secrets.ld7 }}
+  ld8: ${{ secrets.ld8 }}
+  ld9: ${{ secrets.ld9 }}
+  ld10: ${{ secrets.ld10 }}
+  ld11: ${{ secrets.ld11 }}
+  ld12: ${{ secrets.ld12 }}
+  ld13: ${{ secrets.ld13 }}
+  ld14: ${{ secrets.ld14 }}
+  ld15: ${{ secrets.ld15 }}
+  ld16: ${{ secrets.ld16 }}
+  ld17: ${{ secrets.ld17 }}
+  ld18: ${{ secrets.ld18 }}
+  ld19: ${{ secrets.ld19 }}
+  ld20: ${{ secrets.ld20 }}
+  yyy1: ${{ secrets.yyy1 }}
+  yyy2: ${{ secrets.yyy2 }}
+  yyy3: ${{ secrets.yyy3 }}
+  yyy4: ${{ secrets.yyy4 }}
+  yyy5: ${{ secrets.yyy5 }}
+  yyy6: ${{ secrets.yyy6 }}
+  yyy7: ${{ secrets.yyy7 }}
+  yyy8: ${{ secrets.yyy8 }}
+  yyy9: ${{ secrets.yyy9 }}
+  yyy10: ${{ secrets.yyy10 }}
+  yyy11: ${{ secrets.yyy11 }}
+  yyy12: ${{ secrets.yyy12 }}
+  yyy13: ${{ secrets.yyy13 }}
+  yyy14: ${{ secrets.yyy14 }}
+  yyy15: ${{ secrets.yyy15 }}
+  yyy16: ${{ secrets.yyy16 }}
+  yyy17: ${{ secrets.yyy17 }}
+  yyy18: ${{ secrets.yyy18 }}
+  yyy19: ${{ secrets.yyy19 }}
+  yyy20: ${{ secrets.yyy20 }}
   ll1: ${{ secrets.ll1 }}
   ll2: ${{ secrets.ll2 }}
   ll3: ${{ secrets.ll3 }}

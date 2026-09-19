@@ -152,6 +152,9 @@ class DynamicLotteryTests(unittest.TestCase):
 
     def test_box_lottery_schedule_and_group_scope(self):
         self.assertTrue(is_box_lottery_required("2026-09-19", "old1"))
+        self.assertTrue(is_box_lottery_required("2026-09-19", "wudi2"))
+        self.assertTrue(is_box_lottery_required("2026-09-19", "ld2"))
+        self.assertTrue(is_box_lottery_required("2026-09-19", "yyy2"))
         self.assertTrue(is_box_lottery_required("2026-09-19", "new2"))
         self.assertTrue(is_box_lottery_required("2026-09-19", "test"))
         self.assertFalse(is_box_lottery_required("2026-09-19", "ll1"))
@@ -651,6 +654,9 @@ class ListingGiftTests(unittest.TestCase):
         self.assertTrue(is_listing_gift_date("2026-08-30 23:59:59"))
         self.assertFalse(is_listing_gift_date("2027-02-28"))
         self.assertTrue(is_listing_gift_date("2027-01-30"))
+        self.assertTrue(should_claim_listing_gift("2026-08-30", "wudi1"))
+        self.assertTrue(should_claim_listing_gift("2026-08-30", "ld1"))
+        self.assertTrue(should_claim_listing_gift("2026-08-30", "yyy1"))
         self.assertTrue(should_claim_listing_gift("2026-08-30", "new1"))
         self.assertFalse(should_claim_listing_gift("2026-08-30", "old1"))
         self.assertFalse(should_claim_listing_gift("2026-08-29", "new1"))
@@ -698,7 +704,7 @@ class ListingGiftTests(unittest.TestCase):
         self.assertTrue(inspect_monthly_gift_page_text("领取成功")['success'])
         self.assertEqual(inspect_monthly_gift_page_text("本月已领取")['state'], "already")
         self.assertFalse(inspect_monthly_gift_page_text("活动尚未开始")['success'])
-        self.assertTrue(should_claim_listing_gift("2026-08-30", "new20"))
+        self.assertTrue(should_claim_listing_gift("2026-08-30", "wudi20"))
         self.assertFalse(should_claim_listing_gift("2026-08-30", "ll1"))
 
     def test_bodyless_repeat_response_is_idempotent_success(self):
@@ -831,6 +837,18 @@ class VoteTests(unittest.TestCase):
 
 
 class DynamicGroupTests(unittest.TestCase):
+    def test_legacy_new_result_is_normalized_to_wudi_category(self):
+        normalized = normalize_record(
+            {
+                "account_index": 1,
+                "group_code": "new1",
+                "account_category": "新号全干组",
+            },
+            {},
+            {},
+        )
+        self.assertEqual(normalized["account_category"], "无敌全干组")
+
     def test_schedule_guard_blocks_manual_run_on_same_shanghai_date(self):
         payload = {
             "workflow_runs": [
@@ -883,7 +901,7 @@ class DynamicGroupTests(unittest.TestCase):
     def test_start_chain_dispatches_only_first_group_or_summary_when_empty(self):
         values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         values.update({"old2": "a,p", "new1": "b,p"})
@@ -905,7 +923,7 @@ class DynamicGroupTests(unittest.TestCase):
 
         empty_values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         with tempfile.TemporaryDirectory() as temp_dir, patch.dict(os.environ, empty_values, clear=False), patch(
@@ -916,15 +934,16 @@ class DynamicGroupTests(unittest.TestCase):
             first_group.assert_not_called()
             summary.assert_called_once()
 
-    def test_eighty_group_chain_state_stays_within_dispatch_input_limit(self):
+    def test_one_hundred_twenty_group_chain_state_stays_within_dispatch_input_limit(self):
         values = {
             f"{prefix}{index}": "account,password"
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh")
             for index in range(1, 21)
         }
+        values.update({f"new{index}": "legacy,password" for index in range(1, 21)})
         with patch.dict(os.environ, values, clear=False):
             state = new_chain_state("123", "main", "2026-08-26")
-        self.assertEqual(len(state["groups"]), 80)
+        self.assertEqual(len(state["groups"]), 120)
         self.assertLess(len(compact_json(state).encode("utf-8")), 65535)
 
     def test_existing_run_prevents_duplicate_dispatch(self):
@@ -946,13 +965,13 @@ class DynamicGroupTests(unittest.TestCase):
     def test_chain_freezes_configured_groups_and_advances_once(self):
         values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         values.update({"old2": "a,p", "new1": "b,p", "zh3": "c,p"})
         with patch.dict(os.environ, values, clear=False):
             state = new_chain_state("123", "main", "2026-08-26")
-        self.assertEqual([item["group_code"] for item in state["groups"]], ["old2", "new1", "zh3"])
+        self.assertEqual([item["group_code"] for item in state["groups"]], ["old2", "wudi1", "zh3"])
         with tempfile.TemporaryDirectory() as temp_dir, patch(
             "h3.dynamic_groups.dispatch_group"
         ) as next_group, patch("h3.dynamic_groups.dispatch_summary") as summary:
@@ -969,7 +988,7 @@ class DynamicGroupTests(unittest.TestCase):
 
             self.assertEqual(advance_chain(args), 0)
             next_group.assert_called_once()
-            self.assertEqual(next_group.call_args.args[1], "new1")
+            self.assertEqual(next_group.call_args.args[1], "wudi1")
             summary.assert_not_called()
 
     def test_chain_last_group_dispatches_summary_and_preserves_run_ids(self):
@@ -980,7 +999,7 @@ class DynamicGroupTests(unittest.TestCase):
             "ref": "main",
             "groups": [
                 {"group_code": "old1", "account_category": "老号全干组", "account_count": 1, "run_id": 111},
-                {"group_code": "new1", "account_category": "新号全干组", "account_count": 1, "run_id": 0},
+                {"group_code": "new1", "account_category": "无敌全干组", "account_count": 1, "run_id": 0},
             ],
         }
         with tempfile.TemporaryDirectory() as temp_dir, patch("h3.dynamic_groups.dispatch_summary") as summary:
@@ -1017,7 +1036,7 @@ class DynamicGroupTests(unittest.TestCase):
             "ref": "main",
             "groups": [
                 {"group_code": "old1", "account_category": "老号全干组", "account_count": 1, "run_id": 111},
-                {"group_code": "new1", "account_category": "新号全干组", "account_count": 1, "run_id": 222},
+                {"group_code": "new1", "account_category": "无敌全干组", "account_count": 1, "run_id": 222},
             ],
         }
 
@@ -1115,7 +1134,7 @@ class DynamicGroupTests(unittest.TestCase):
     def test_group_detection_keeps_global_order_and_skips_gaps(self):
         values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         values.update(
@@ -1130,7 +1149,7 @@ class DynamicGroupTests(unittest.TestCase):
             groups = configured_groups()
         self.assertEqual(
             [item["group_code"] for item in groups],
-            ["old2", "new1", "ll3", "zh1"],
+            ["old2", "wudi1", "ll3", "zh1"],
         )
         self.assertEqual([item["account_count"] for item in groups], [1, 2, 1, 1])
         self.assertEqual(groups[-1]["account_category"], "同行不签到组")
@@ -1159,7 +1178,7 @@ class DynamicGroupTests(unittest.TestCase):
             path = resolve_output_xlsx_path(temp_dir, {"task_start_date": "2026-08-25"})
         self.assertTrue(path.endswith("2026-08-25-老号全干组.xlsx"))
 
-    def test_three_category_reports_are_generated_separately(self):
+    def test_five_category_reports_are_generated_separately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             results_dir = os.path.join(temp_dir, "results")
             os.makedirs(os.path.join(results_dir, "old1"))
@@ -1201,7 +1220,7 @@ class DynamicGroupTests(unittest.TestCase):
                 )
             values = {
                 f"{prefix}{index}": ""
-                for prefix in ("old", "new", "ll", "zh")
+                for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
                 for index in range(1, 21)
             }
             values.update(
@@ -1220,8 +1239,10 @@ class DynamicGroupTests(unittest.TestCase):
             self.assertEqual(
                 names,
                 [
+                    "2026-08-25-YYY全干组.xlsx",
                     "2026-08-25-同行不签到组.xlsx",
-                    "2026-08-25-新号全干组.xlsx",
+                    "2026-08-25-无敌全干组.xlsx",
+                    "2026-08-25-立东全干组.xlsx",
                     "2026-08-25-老号全干组.xlsx",
                 ],
             )
@@ -1229,7 +1250,7 @@ class DynamicGroupTests(unittest.TestCase):
     def test_report_uses_plain_account_and_confidential_password_marker(self):
         values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         values.update({
@@ -1248,6 +1269,28 @@ class DynamicGroupTests(unittest.TestCase):
                 {("old1", 1): "plain-account"},
             )
             self.assertEqual(normalized["username"], "plain-account")
+
+    def test_report_wudi_credentials_prefer_new_secret_name_then_legacy_fallback(self):
+        values = {
+            f"{prefix}{index}": ""
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
+            for index in range(1, 21)
+        }
+        values.update(
+            {
+                "wudi1": "preferred-account,preferred-password",
+                "new1": "legacy-account,legacy-password",
+                "new2": "fallback-account,fallback-password",
+                "REPORT_GROUP_FILTER_ACTIVE": "true",
+                "REPORT_GROUP_CODES": "wudi1,wudi2",
+                "REPORT_GROUP_LIMITS": '{"wudi1":1,"wudi2":1}',
+            }
+        )
+        with patch.dict(os.environ, values, clear=False):
+            lookup, total = load_credential_lookup()
+        self.assertEqual(total, 2)
+        self.assertEqual(lookup[("wudi1", 1)]["username"], "preferred-account")
+        self.assertEqual(lookup[("wudi2", 1)]["username"], "fallback-account")
 
     def test_telegram_message_is_plain_but_log_message_is_masked(self):
         record = normalize_record(
@@ -1384,14 +1427,14 @@ class DynamicGroupTests(unittest.TestCase):
     def test_recovery_manifest_keeps_excluded_category_visible(self):
         values = {
             f"{prefix}{index}": ""
-            for prefix in ("old", "new", "ll", "zh")
+            for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
             for index in range(1, 21)
         }
         values.update({"old1": "account,password", "new1": "new,password"})
         with patch.dict(os.environ, values, clear=False):
             state = new_chain_state("123", "main", "2026-08-30", "old1")
-        self.assertEqual([item["group_code"] for item in state["groups"]], ["new1"])
-        self.assertEqual([item["group_code"] for item in state["all_groups"]], ["old1", "new1"])
+        self.assertEqual([item["group_code"] for item in state["groups"]], ["wudi1"])
+        self.assertEqual([item["group_code"] for item in state["all_groups"]], ["old1", "wudi1"])
         self.assertEqual(state["excluded_groups"], ["old1"])
         self.assertEqual(state["all_groups"][0]["handoff_status"], "excluded_by_resume")
 

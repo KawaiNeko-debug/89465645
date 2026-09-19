@@ -7,7 +7,9 @@ from pathlib import Path
 
 CATEGORIES = (
     ("老号全干组", "老号全干组"),
-    ("新号全干组", "新号全干组"),
+    ("无敌全干组", "无敌全干组"),
+    ("立东全干组", "立东全干组"),
+    ("YYY全干组", "YYY全干组"),
     ("同行不签到组", "同行不签到组"),
 )
 
@@ -48,7 +50,9 @@ def main() -> int:
 
     requested = str(os.getenv("SUMMARY_CATEGORY_FILTER") or "").strip().lower()
     if requested in {"peer", "同行不签到组", "同行", "ll_zh"}:
-        selected_categories = (CATEGORIES[2],)
+        selected_categories = tuple(
+            item for item in CATEGORIES if item[0] == "同行不签到组"
+        )
     elif requested:
         selected_categories = tuple(
             item for item in CATEGORIES

@@ -10,7 +10,10 @@ CLAIM_PATH = "/api/cgi/operationService/front/lottery/receivePrize"
 
 def is_box_lottery_required(task_date: str, group_code: str) -> bool:
     code = str(group_code or "").strip().lower()
-    if not (code.startswith("old") or code.startswith("new") or code == "test"):
+    if not (
+        code.startswith(("old", "wudi", "ld", "yyy", "new"))
+        or code == "test"
+    ):
         return False
     try:
         return datetime.strptime(str(task_date or "")[:10], "%Y-%m-%d").weekday() == 5

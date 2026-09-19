@@ -122,12 +122,17 @@ def load_credential_lookup() -> tuple[dict[tuple[object, int], dict[str, str]], 
         }
     except (AttributeError, json.JSONDecodeError):
         requested_limits = {}
-    for prefix in ("old", "new", "ll", "zh"):
+    prefixes = ["old", "wudi", "ld", "yyy", "ll", "zh"]
+    if group_filter_active and any(code.startswith("new") for code in requested_codes):
+        prefixes.append("new")
+    for prefix in prefixes:
         for slot in range(1, 21):
             group_code = f"{prefix}{slot}"
             if group_filter_active and group_code not in requested_codes:
                 continue
             raw = os.getenv(group_code) or ""
+            if not raw and prefix == "wudi":
+                raw = os.getenv(f"new{slot}") or ""
             lines = [line.strip() for line in raw.splitlines() if line.strip() and "," in line]
             limit = requested_limits.get(group_code)
             if limit is not None:
@@ -315,6 +320,12 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
         truthy(record.get("sign_success")) and date_part(task_start_date) and date_part(sign_time) and date_part(sign_time) > date_part(task_start_date)
     )
     account_category = str(record.get("account_category") or payload.get("account_category") or "").strip()
+    if group_code.startswith(("wudi", "new")):
+        account_category = "无敌全干组"
+    elif group_code.startswith("ld"):
+        account_category = "立东全干组"
+    elif group_code.startswith("yyy"):
+        account_category = "YYY全干组"
     execution_mode = str(record.get("execution_mode") or payload.get("execution_mode") or "").strip()
     sign_skipped = truthy(record.get("sign_skipped")) or execution_mode == "skip_sign"
     vote_required = truthy(record.get("vote_required"))
@@ -416,8 +427,12 @@ def build_missing_record(group_identity, account_index: int, username: str, task
     group_number = safe_int(group_identity, 0) if not group_code else 0
     if group_code.startswith("old"):
         category = "老号全干组"
-    elif group_code.startswith("new"):
-        category = "新号全干组"
+    elif group_code.startswith(("wudi", "new")):
+        category = "无敌全干组"
+    elif group_code.startswith("ld"):
+        category = "立东全干组"
+    elif group_code.startswith("yyy"):
+        category = "YYY全干组"
     elif group_code.startswith(("ll", "zh")):
         category = "同行不签到组"
     elif group_code == "test":
@@ -1065,11 +1080,20 @@ def coupon_sheet_row_sort_key(row: tuple) -> tuple:
 
 
 def stable_account_order(records: list[dict]) -> list[dict]:
-    prefix_order = {"old": 0, "new": 1, "ll": 2, "zh": 3, "test": 4}
+    prefix_order = {
+        "old": 0,
+        "wudi": 1,
+        "new": 1,
+        "ld": 2,
+        "yyy": 3,
+        "ll": 4,
+        "zh": 5,
+        "test": 6,
+    }
 
     def group_key(item: dict) -> tuple:
         code = str(item.get("group_code") or item.get("source_group") or "").lower()
-        match = re.fullmatch(r"(old|new|ll|zh)(\d+)", code)
+        match = re.fullmatch(r"(old|wudi|new|ld|yyy|ll|zh)(\d+)", code)
         if match:
             return prefix_order[match.group(1)], safe_int(match.group(2), 999999)
         return prefix_order.get(code, 999999), 999999
@@ -1463,7 +1487,9 @@ def main():
     if summary_category:
         allowed_prefixes = {
             "老号全干组": {"old"},
-            "新号全干组": {"new"},
+            "无敌全干组": {"wudi", "new"},
+            "立东全干组": {"ld"},
+            "YYY全干组": {"yyy"},
             "同行不签到组": {"ll", "zh"},
             "测试组": {"test"},
         }.get(summary_category, set())

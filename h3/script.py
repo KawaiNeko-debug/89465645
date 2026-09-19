@@ -253,8 +253,12 @@ def execution_context() -> dict:
     group_code = (os.getenv('GROUP_CODE') or os.getenv('GROUP_NAME') or '').strip().lower()
     if group_code.startswith('old'):
         default_category = '老号全干组'
-    elif group_code.startswith('new'):
-        default_category = '新号全干组'
+    elif group_code.startswith(('wudi', 'new')):
+        default_category = '无敌全干组'
+    elif group_code.startswith('ld'):
+        default_category = '立东全干组'
+    elif group_code.startswith('yyy'):
+        default_category = 'YYY全干组'
     elif group_code.startswith(('ll', 'zh')):
         default_category = '同行不签到组'
     elif group_code == 'test':

@@ -13,8 +13,9 @@ from urllib.parse import quote
 import requests
 
 
-GROUP_PREFIXES = ("old", "new", "ll", "zh")
+GROUP_PREFIXES = ("old", "wudi", "ld", "yyy", "ll", "zh")
 GROUP_CODES = [f"{prefix}{index}" for prefix in GROUP_PREFIXES for index in range(1, 21)]
+LEGACY_GROUP_CODES = [f"new{index}" for index in range(1, 21)]
 GROUP_WORKFLOW_FILE = "dynamic-group.yml"
 SUMMARY_WORKFLOW_FILE = "dynamic-summary.yml"
 DISPATCH_ATTEMPTS = 3
@@ -23,8 +24,12 @@ DISPATCH_ATTEMPTS = 3
 def category_for(code: str) -> str:
     if code.startswith("old"):
         return "老号全干组"
-    if code.startswith("new"):
-        return "新号全干组"
+    if code.startswith(("wudi", "new")):
+        return "无敌全干组"
+    if code.startswith("ld"):
+        return "立东全干组"
+    if code.startswith("yyy"):
+        return "YYY全干组"
     if code.startswith(("ll", "zh")):
         return "同行不签到组"
     raise ValueError(f"unsupported group code: {code}")
@@ -34,10 +39,17 @@ def account_count(raw: str) -> int:
     return sum(1 for line in str(raw or "").splitlines() if line.strip() and "," in line)
 
 
+def configured_group_raw(code: str) -> str:
+    raw = os.getenv(code, "")
+    if raw or not code.startswith("wudi"):
+        return raw
+    return os.getenv(f"new{code[len('wudi'):]}", "")
+
+
 def configured_groups() -> list[dict]:
     groups = []
     for code in GROUP_CODES:
-        count = account_count(os.getenv(code, ""))
+        count = account_count(configured_group_raw(code))
         if count:
             groups.append(
                 {
@@ -90,8 +102,9 @@ def load_chain_state(raw: str) -> dict:
         seen = set()
         for group in value:
             code = str(group.get("group_code") or "").strip().lower() if isinstance(group, dict) else ""
-            if code not in GROUP_CODES or code in seen:
+            if code not in GROUP_CODES + LEGACY_GROUP_CODES or code in seen:
                 raise ValueError(f"invalid or duplicate group code in {field_name}: {code}")
+            group["account_category"] = category_for(code)
             seen.add(code)
     return state
 

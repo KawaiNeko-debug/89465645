@@ -24,12 +24,14 @@ except ImportError:
     )
 
 
-GROUP_PREFIXES = ("old", "new", "ll", "zh")
+GROUP_PREFIXES = ("old", "wudi", "ld", "yyy", "ll", "zh")
 GROUP_CODES = tuple(
     f"{prefix}{index}" for prefix in GROUP_PREFIXES for index in range(1, 21)
 )
+LEGACY_GROUP_CODES = tuple(f"new{index}" for index in range(1, 21))
+FROZEN_GROUP_CODES = GROUP_CODES + LEGACY_GROUP_CODES
 TEST_GROUP_CODE = "test"
-ALL_SOURCE_GROUP_CODES = GROUP_CODES + (TEST_GROUP_CODE,)
+ALL_SOURCE_GROUP_CODES = FROZEN_GROUP_CODES + (TEST_GROUP_CODE,)
 BATCH_SIZE = 220
 BATCH_WORKFLOW_FILE = "dynamic-batch.yml"
 SUMMARY_WORKFLOW_FILE = "dynamic-summary.yml"
@@ -49,8 +51,12 @@ FORBIDDEN_STATE_KEYS = {
 def category_for(source_group: str) -> str:
     if source_group.startswith("old"):
         return "老号全干组"
-    if source_group.startswith("new"):
-        return "新号全干组"
+    if source_group.startswith(("wudi", "new")):
+        return "无敌全干组"
+    if source_group.startswith("ld"):
+        return "立东全干组"
+    if source_group.startswith("yyy"):
+        return "YYY全干组"
     if source_group.startswith(("ll", "zh")):
         return "同行不签到组"
     if source_group == TEST_GROUP_CODE:
@@ -64,6 +70,14 @@ def account_count(raw: str) -> int:
         for line in str(raw or "").splitlines()
         if line.strip() and "," in line
     )
+
+
+def configured_group_raw(source_group: str) -> str:
+    raw = os.getenv(source_group, "")
+    if raw or not source_group.startswith("wudi"):
+        return raw
+    suffix = source_group[len("wudi") :]
+    return os.getenv(f"new{suffix}", "")
 
 
 def account_metadata(source_group: str, account_index: int) -> dict:
@@ -80,7 +94,7 @@ def account_metadata(source_group: str, account_index: int) -> dict:
 def configured_accounts() -> list[dict]:
     accounts = []
     for source_group in GROUP_CODES:
-        count = account_count(os.getenv(source_group, ""))
+        count = account_count(configured_group_raw(source_group))
         for account_index in range(1, count + 1):
             accounts.append(account_metadata(source_group, account_index))
     return accounts
@@ -90,7 +104,7 @@ def configured_group_counts() -> dict[str, int]:
     return {
         source_group: count
         for source_group in GROUP_CODES
-        if (count := account_count(os.getenv(source_group, ""))) > 0
+        if (count := account_count(configured_group_raw(source_group))) > 0
     }
 
 
@@ -114,7 +128,10 @@ def manual_test_batch_accounts(
 
 def accounts_from_group_counts(counts: dict[str, int]) -> list[dict]:
     accounts = []
-    for source_group in GROUP_CODES:
+    ordered_codes = GROUP_CODES + tuple(
+        code for code in LEGACY_GROUP_CODES if code in counts
+    )
+    for source_group in ordered_codes:
         for account_index in range(1, int(counts.get(source_group, 0)) + 1):
             accounts.append(account_metadata(source_group, account_index))
     return accounts
@@ -178,13 +195,16 @@ def group_counts_from_batches(batches: list[dict]) -> dict[str, int]:
 
 def report_groups_from_batches(batches: list[dict]) -> list[dict]:
     counts = group_counts_from_batches(batches)
+    ordered_codes = GROUP_CODES + tuple(
+        code for code in LEGACY_GROUP_CODES if code in counts
+    )
     return [
         {
             "group_code": source_group,
             "account_category": category_for(source_group),
             "account_count": counts[source_group],
         }
-        for source_group in GROUP_CODES
+        for source_group in ordered_codes
         if counts.get(source_group, 0) > 0
     ]
 
@@ -268,7 +288,7 @@ def load_chain_state(raw: str) -> dict:
     if not isinstance(group_counts, dict):
         raise ValueError("chain_state group_counts must be an object")
     for source_group, count in group_counts.items():
-        if source_group not in GROUP_CODES or int(count) <= 0:
+        if source_group not in FROZEN_GROUP_CODES or int(count) <= 0:
             raise ValueError(f"invalid frozen group count: {source_group}={count}")
     expected_total = sum(int(value) for value in group_counts.values())
     if expected_total != int(state.get("total_accounts") or 0):
@@ -283,6 +303,11 @@ def load_chain_state(raw: str) -> dict:
             raise ValueError(f"invalid account count for {batch_id}")
     if sum(int(batch.get("account_count") or 0) for batch in batches) != expected_total:
         raise ValueError("chain_state batch counts do not match total_accounts")
+    for group in state.get("groups") or []:
+        if isinstance(group, dict):
+            code = str(group.get("group_code") or "").strip().lower()
+            if code in FROZEN_GROUP_CODES:
+                group["account_category"] = category_for(code)
     _assert_no_credentials(state)
     return state
 

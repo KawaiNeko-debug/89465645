@@ -17,6 +17,7 @@ from h3.mixed_batches import (
     new_chain_state,
     split_batches,
     manual_test_batch_accounts,
+    category_for,
 )
 from h3.mixed_results import (
     build_retry_matrix,
@@ -29,7 +30,7 @@ from h3.report import signin_sheet_order, stable_account_order
 def env_slots(**configured):
     values = {
         f"{prefix}{index}": ""
-        for prefix in ("old", "new", "ll", "zh")
+        for prefix in ("old", "wudi", "ld", "yyy", "ll", "zh", "new")
         for index in range(1, 21)
     }
     values.update(configured)
@@ -43,7 +44,7 @@ def complete_row(source_group: str, account_index: int, *, vote_success=True) ->
         "account_index": account_index,
         "batch_id": "batch-1",
         "execution_order": account_index,
-        "account_category": "老号全干组" if source_group.startswith("old") else "新号全干组",
+        "account_category": category_for(source_group),
         "execution_mode": "full",
         "sign_skipped": False,
         "token_extracted": True,
@@ -77,7 +78,9 @@ def write_result(root: Path, name: str, row: dict) -> None:
 def test_configured_pool_mixes_sources_without_test_secret():
     values = env_slots(
         old3="old-a,p\nold-b,p",
-        new2="new-a,p",
+        wudi2="wudi-a,p",
+        ld1="ld-a,p",
+        yyy1="yyy-a,p",
         ll1="peer-a,p",
         test="must-not-appear,p",
     )
@@ -86,17 +89,21 @@ def test_configured_pool_mixes_sources_without_test_secret():
     assert {(item["source_group"], item["account_index"]) for item in accounts} == {
         ("old3", 1),
         ("old3", 2),
-        ("new2", 1),
+        ("wudi2", 1),
+        ("ld1", 1),
+        ("yyy1", 1),
         ("ll1", 1),
     }
     assert next(item for item in accounts if item["source_group"] == "ll1")["skip_sign"] is True
-    assert next(item for item in accounts if item["source_group"] == "new2")["execution_mode"] == "full"
+    assert next(item for item in accounts if item["source_group"] == "wudi2")["execution_mode"] == "full"
+    assert next(item for item in accounts if item["source_group"] == "ld1")["account_category"] == "立东全干组"
+    assert next(item for item in accounts if item["source_group"] == "yyy1")["account_category"] == "YYY全干组"
 
 
 def test_date_seed_is_stable_and_changes_on_another_day():
     accounts = [
         account_metadata("old1", index) for index in range(1, 21)
-    ] + [account_metadata("new2", index) for index in range(1, 21)]
+    ] + [account_metadata("wudi2", index) for index in range(1, 21)]
     first = deterministic_order(accounts, "2026-08-31")
     repeated = deterministic_order(list(reversed(accounts)), "2026-08-31")
     another_day = deterministic_order(accounts, "2026-09-01")
@@ -135,6 +142,17 @@ def test_chain_state_is_compressed_and_contains_no_credentials():
     assert "visible-password" not in serialized
     assert "username" not in serialized.lower()
     assert "password" not in serialized.lower()
+    assert restored["group_counts"] == {"old1": 1, "wudi1": 1}
+
+
+def test_wudi_secret_wins_over_legacy_new_secret():
+    values = env_slots(
+        wudi1="preferred-account,preferred-password",
+        new1="legacy-account,legacy-password\nlegacy-second,password",
+    )
+    with patch.dict(os.environ, values, clear=False):
+        state = new_chain_state("123", "main", "2026-08-31")
+    assert state["group_counts"] == {"wudi1": 1}
 
 
 def test_compact_state_scales_without_embedding_every_account():
@@ -179,18 +197,18 @@ def test_batch_accounts_are_rebuilt_from_frozen_counts():
         state = new_chain_state("123", "main", "2026-08-31")
     first = batch_accounts(state, "batch-1")
     assert len(first) == 4
-    assert {item["source_group"] for item in first} == {"old3", "new2", "ll1"}
+    assert {item["source_group"] for item in first} == {"old3", "wudi2", "ll1"}
     assert all(item["batch_id"] == "batch-1" for item in first)
 
 
 def test_retry_matrix_uses_composite_identity_and_only_shrinks(tmp_path):
     old = {**account_metadata("old1", 1), "batch_id": "batch-1", "execution_order": 1}
-    new = {**account_metadata("new1", 1), "batch_id": "batch-1", "execution_order": 2}
+    new = {**account_metadata("wudi1", 1), "batch_id": "batch-1", "execution_order": 2}
     write_result(tmp_path, "old", complete_row("old1", 1))
-    write_result(tmp_path, "new", complete_row("new1", 1, vote_success=False))
+    write_result(tmp_path, "new", complete_row("wudi1", 1, vote_success=False))
 
     first = build_retry_matrix(tmp_path, [old, new], task_date="2026-08-31")
-    assert [(item["source_group"], item["account_index"]) for item in first] == [("new1", 1)]
+    assert [(item["source_group"], item["account_index"]) for item in first] == [("wudi1", 1)]
     assert first[0]["retry_components"] == "vote"
 
     missing_retry_dir = tmp_path / "missing"
@@ -204,7 +222,7 @@ def test_retry_matrix_uses_composite_identity_and_only_shrinks(tmp_path):
     assert len(second) == 1
     assert second[0]["retry_components"] == "vote"
 
-    expanded = complete_row("new1", 1, vote_success=True)
+    expanded = complete_row("wudi1", 1, vote_success=True)
     expanded["account_data"]["invoice_fetch_success"] = False
     write_result(tmp_path, "next", expanded)
     third = build_retry_matrix(
@@ -218,16 +236,16 @@ def test_retry_matrix_uses_composite_identity_and_only_shrinks(tmp_path):
 
 def test_merge_keeps_same_account_index_from_different_groups(tmp_path):
     old = {**account_metadata("old1", 1), "batch_id": "batch-1", "execution_order": 1}
-    new = {**account_metadata("new1", 1), "batch_id": "batch-1", "execution_order": 2}
+    new = {**account_metadata("wudi1", 1), "batch_id": "batch-1", "execution_order": 2}
     write_result(tmp_path, "old-result", complete_row("old1", 1))
-    write_result(tmp_path, "new-result", complete_row("new1", 1))
+    write_result(tmp_path, "new-result", complete_row("wudi1", 1))
     output = tmp_path / "merged.json"
     merge_results(tmp_path, output, [old, new], "2026-08-31")
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert len(payload["results"]) == 2
     assert {(row["source_group"], row["account_index"]) for row in payload["results"]} == {
         ("old1", 1),
-        ("new1", 1),
+        ("wudi1", 1),
     }
 
 
@@ -400,7 +418,9 @@ def test_summary_downloads_exact_batch_run_artifact(tmp_path):
 
 def test_report_order_ignores_random_execution_order():
     records = [
-        {"group_code": "new1", "account_index": 2, "execution_order": 1},
+        {"group_code": "wudi1", "account_index": 2, "execution_order": 1},
+        {"group_code": "ld1", "account_index": 1, "execution_order": 6},
+        {"group_code": "yyy1", "account_index": 1, "execution_order": 7},
         {"group_code": "old10", "account_index": 1, "execution_order": 2},
         {"group_code": "old2", "account_index": 2, "execution_order": 3},
         {"group_code": "old2", "account_index": 1, "execution_order": 4},
@@ -411,7 +431,9 @@ def test_report_order_ignores_random_execution_order():
         ("old2", 1),
         ("old2", 2),
         ("old10", 1),
-        ("new1", 2),
+        ("wudi1", 2),
+        ("ld1", 1),
+        ("yyy1", 1),
         ("ll1", 1),
     ]
 

@@ -44,9 +44,12 @@ runs:
         code = os.environ['SOURCE_GROUP'].strip().lower()
         if code not in ALL_SOURCE_GROUP_CODES:
             raise SystemExit(f'unsupported frozen source group: {code}')
+        raw = os.environ.get(code, '')
+        if not raw and code.startswith('wudi'):
+            raw = os.environ.get('new' + code[len('wudi'):], '')
         lines = [
             line.strip()
-            for line in os.environ.get(code, '').splitlines()
+            for line in raw.splitlines()
             if line.strip() and ',' in line
         ]
         index = int(os.environ['ACCOUNT_INDEX'])
