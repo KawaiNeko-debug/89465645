@@ -76,6 +76,13 @@ def safe_int(value, default=0) -> int:
         return default
 
 
+def safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
 def strip_resolved_data_failures(text: str) -> str:
     parts = [part.strip() for part in re.split(r"[；;]\s*", str(text or "")) if part.strip()]
     kept = [part for part in parts if not any(marker in part for marker in DATA_FAILURE_MARKERS)]
@@ -86,7 +93,12 @@ def merge_data_fields(picked: dict, fallback: dict | None):
     if not fallback:
         return
     if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
-        for key in ("initial_points", "final_points", "points_reward"):
+        for key in (
+            "initial_points",
+            "final_points",
+            "points_reward",
+            "box_lottery_points_reward",
+        ):
             picked[key] = fallback.get(key, 0.0)
         picked["points_fetch_success"] = True
     if not truthy(picked.get("activity_fetch_success")) and truthy(fallback.get("activity_fetch_success")):
@@ -173,6 +185,15 @@ def merge_component_fields(picked: dict, fallback: dict | None):
         )
         merged_box.append(candidate if candidate_complete and not current_complete else current or candidate)
     picked["box_lottery"] = merged_box
+    picked_box_reward = safe_float(picked.get("box_lottery_points_reward"), 0.0)
+    fallback_box_reward = safe_float(fallback.get("box_lottery_points_reward"), 0.0)
+    if fallback_box_reward > picked_box_reward:
+        picked["box_lottery_points_reward"] = fallback_box_reward
+        if truthy(fallback.get("points_fetch_success")):
+            for key in ("initial_points", "final_points", "points_reward"):
+                picked[key] = fallback.get(key, picked.get(key, 0.0))
+    else:
+        picked["box_lottery_points_reward"] = picked_box_reward
     picked["box_lottery_required"] = truthy(picked.get("box_lottery_required")) or truthy(
         fallback.get("box_lottery_required")
     )
@@ -380,6 +401,7 @@ def main():
                 "initial_points": row.get("initial_points", 0.0),
                 "final_points": row.get("final_points", 0.0),
                 "points_reward": row.get("points_reward", 0.0),
+                "box_lottery_points_reward": row.get("box_lottery_points_reward", 0.0),
                 "has_reward": truthy(row.get("has_reward")),
                 "password_error": truthy(row.get("password_error")),
                 "risk_controlled": truthy(row.get("risk_controlled")),
@@ -413,6 +435,8 @@ def main():
                 "vote_product_sku": row.get("vote_product_sku", ""),
                 "vote_product_name": row.get("vote_product_name", ""),
                 "vote_detail": row.get("vote_detail", ""),
+                "box_lottery_required": truthy(row.get("box_lottery_required")),
+                "box_lottery": row.get("box_lottery") if isinstance(row.get("box_lottery"), list) else [],
                 "component_status": component_status(row),
             }
         )

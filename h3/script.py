@@ -1058,6 +1058,7 @@ class ApiClient:
         self.initial_points = 0
         self.final_points = 0
         self.points_reward = 0
+        self.box_lottery_points_reward = 0
 
         self.sign_status = "未知"
         self.has_reward = False
@@ -1125,6 +1126,7 @@ class ApiClient:
             self.initial_points = previous.get("initial_points") or 0
             self.final_points = previous.get("final_points") or 0
             self.points_reward = previous.get("points_reward") or 0
+            self.box_lottery_points_reward = previous.get("box_lottery_points_reward") or 0
             self.points_fetch_success = True
         self.account_data = deepcopy(previous.get("account_data")) if isinstance(previous.get("account_data"), dict) else empty_account_data()
         self.account_data_fetch_success = truthy(previous.get("account_data_fetch_success"))
@@ -2446,6 +2448,8 @@ class ApiClient:
             )
             return False
         self.final_points = latest_points
+        if previous_success:
+            self.box_lottery_points_reward += max(0.0, latest_points - previous_points)
         self.points_reward = self.final_points - self.initial_points
         log(
             f"账号{self.account_index} - 纸盒抽奖后已刷新金豆数量: "
@@ -2909,6 +2913,9 @@ def sign_in_account(
         'initial_points': previous_final_points if data_only_retry else 0,
         'final_points': previous_final_points if data_only_retry else 0,
         'points_reward': 0,
+        'box_lottery_points_reward': safe_float(
+            previous_result.get('box_lottery_points_reward'), 0.0
+        ),
         'has_reward': False,
         'token_extracted': False,
         'secretkey_extracted': False,
@@ -3187,6 +3194,7 @@ def sign_in_account(
                     'initial_points': client.initial_points,
                     'final_points': client.final_points,
                     'points_reward': client.points_reward,
+                    'box_lottery_points_reward': client.box_lottery_points_reward,
                     'has_reward': client.has_reward,
                     'risk_controlled': client.risk_controlled,
                     'detail_reason': client.detail_reason,
@@ -3297,6 +3305,7 @@ def process_single_account(username, password, account_index, total_accounts):
         'initial_points': 0,
         'final_points': 0,
         'points_reward': 0,
+        'box_lottery_points_reward': 0,
         'has_reward': False,
         'token_extracted': False,
         'secretkey_extracted': False,
@@ -3458,6 +3467,17 @@ def process_single_account(username, password, account_index, total_accounts):
                 merged[key] = res.get(key)
         if isinstance(res.get('box_lottery'), list):
             merged['box_lottery'] = res.get('box_lottery')
+        if (
+            truthy(res.get('points_fetch_success'))
+            and safe_float(res.get('box_lottery_points_reward'), 0.0)
+            >= safe_float(merged.get('box_lottery_points_reward'), 0.0)
+        ):
+            for key in ('initial_points', 'final_points', 'points_reward'):
+                merged[key] = res.get(key, merged.get(key, 0))
+        merged['box_lottery_points_reward'] = max(
+            safe_float(merged.get('box_lottery_points_reward'), 0.0),
+            safe_float(res.get('box_lottery_points_reward'), 0.0),
+        )
 
         if not should_retry(merged) or attempt >= max_retries:
             break
@@ -3587,6 +3607,17 @@ def final_retry(all_results, usernames, passwords, total_accounts):
         for key in ('account_format_error', 'account_format_reason', 'box_lottery_required', 'box_lottery'):
             if key in final:
                 orig[key] = final.get(key)
+        if (
+            truthy(final.get('points_fetch_success'))
+            and safe_float(final.get('box_lottery_points_reward'), 0.0)
+            >= safe_float(orig.get('box_lottery_points_reward'), 0.0)
+        ):
+            for key in ('initial_points', 'final_points', 'points_reward'):
+                orig[key] = final.get(key, orig.get(key, 0))
+        orig['box_lottery_points_reward'] = max(
+            safe_float(orig.get('box_lottery_points_reward'), 0.0),
+            safe_float(final.get('box_lottery_points_reward'), 0.0),
+        )
 
         if f != failed[-1]:
             time.sleep(random.uniform(4, 8))
@@ -3705,6 +3736,7 @@ def write_results_json(path, all_results, total_accounts):
                 "initial_points": r.get("initial_points"),
                 "final_points": r.get("final_points"),
                 "points_reward": r.get("points_reward"),
+                "box_lottery_points_reward": r.get("box_lottery_points_reward"),
                 "has_reward": r.get("has_reward"),
                 "token_extracted": r.get("token_extracted"),
                 "secretkey_extracted": r.get("secretkey_extracted"),

@@ -358,6 +358,9 @@ def normalize_record(record: dict, payload: dict, account_lookup: dict[tuple[obj
         "initial_points": safe_float(record.get("initial_points"), 0.0),
         "final_points": safe_float(record.get("final_points"), 0.0),
         "points_reward": safe_float(record.get("points_reward"), 0.0),
+        "box_lottery_points_reward": safe_float(
+            record.get("box_lottery_points_reward"), 0.0
+        ),
         "has_reward": truthy(record.get("has_reward")),
         "password_error": truthy(record.get("password_error")),
         "account_format_error": truthy(record.get("account_format_error")),
@@ -459,6 +462,7 @@ def build_missing_record(group_identity, account_index: int, username: str, task
         "initial_points": 0.0,
         "final_points": 0.0,
         "points_reward": 0.0,
+        "box_lottery_points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
         "account_format_error": False,
@@ -613,7 +617,7 @@ def problem_reason(record: dict) -> str:
     reasons = []
     if truthy(record.get("account_format_error")):
         reasons.append(str(record.get("account_format_reason") or "账号错误：检测到11位手机号，请改用客编").strip())
-    if status_sort_bucket(record) == 0:
+    if status_sort_bucket(record) == 0 and not truthy(record.get("risk_controlled")):
         reasons.append(detail_reason(record))
     if truthy(record.get("listing_gift_required")) and not truthy(record.get("listing_gift_success")):
         reasons.append(str(record.get("listing_gift_status") or record.get("listing_gift_detail") or "礼包领取未完成").strip())
@@ -705,11 +709,23 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
     abnormal = sum(1 for item in records if status_label(item) == "签到异常")
     skipped = sum(1 for item in records if status_label(item) == "按配置跳过签到")
     reward = sum(safe_float(item.get("points_reward"), 0.0) for item in records)
+    box_lottery_reward = sum(
+        max(0.0, safe_float(item.get("box_lottery_points_reward"), 0.0))
+        for item in records
+    )
+    sign_reward = reward - box_lottery_reward
     success_rate = (success / total * 100) if total > 0 else 0.0
     listing_gift_required = sum(1 for item in records if truthy(item.get("listing_gift_required")))
     listing_gift_success = sum(
         1 for item in records
         if truthy(item.get("listing_gift_required")) and truthy(item.get("listing_gift_success"))
+    )
+    box_lottery_required = sum(
+        1 for item in records if truthy(item.get("box_lottery_required"))
+    )
+    box_lottery_success = sum(
+        1 for item in records
+        if truthy(item.get("box_lottery_required")) and box_lottery_complete(item)
     )
     return {
         "total": total,
@@ -722,14 +738,18 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "skipped": skipped,
         "problem_count": sum(1 for item in records if is_problem_record(item)),
         "reward": reward,
+        "sign_reward": sign_reward,
+        "box_lottery_reward": box_lottery_reward,
         "success_rate": success_rate,
         "listing_gift_required": listing_gift_required,
         "listing_gift_success": listing_gift_success,
+        "box_lottery_required": box_lottery_required,
+        "box_lottery_success": box_lottery_success,
     }
 
 
 def build_stats_lines(summary: dict) -> list[str]:
-    return [
+    lines = [
         "📈 总体统计",
         f"  ├── 总账号数: {summary['total']}",
         f"  ├── 签到成功: {summary['success']}/{summary['total']}",
@@ -737,9 +757,18 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
         f"  ├── 星火会礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+    ]
+    if summary["box_lottery_required"]:
+        lines.extend([
+            f"  ├── 纸盒抽奖完成: {summary['box_lottery_success']}/{summary['box_lottery_required']}",
+            f"  ├── 签到获得 +{summary['sign_reward']:.1f} 🌽",
+            f"  ├── 纸盒抽奖获得 +{summary['box_lottery_reward']:.1f} 🌽",
+        ])
+    lines.extend([
         f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
         f"  └── 签到成功率: {format_percent(summary['success_rate'])}%",
-    ]
+    ])
+    return lines
 
 
 def build_message(records: list[dict], manifest: dict, expected_total: int) -> tuple[str, dict]:
@@ -747,11 +776,7 @@ def build_message(records: list[dict], manifest: dict, expected_total: int) -> t
     summary = build_summary(sorted_records, expected_total)
     problem_records = [record for record in sorted_records if is_problem_record(record)]
     conflict_records = [record for record in problem_records if is_vote_conflict_record(record)]
-    visible_problem_records = [
-        record
-        for record in problem_records
-        if not truthy(record.get("risk_controlled")) and problem_reason(record)
-    ]
+    visible_problem_records = [record for record in problem_records if problem_reason(record)]
     category_label = str(os.getenv("SUMMARY_CATEGORY_LABEL") or "").strip()
     recovery_excluded = [
         item.strip()

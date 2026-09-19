@@ -51,6 +51,7 @@ def main() -> int:
         "initial_points": 0.0,
         "final_points": 0.0,
         "points_reward": 0.0,
+        "box_lottery_points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
         "account_format_error": False,

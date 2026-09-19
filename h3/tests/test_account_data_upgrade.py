@@ -241,6 +241,87 @@ class DynamicLotteryTests(unittest.TestCase):
         })
         self.assertIn("box_lottery", retry_components(row))
 
+    def test_box_lottery_summary_splits_points_and_groups_failures(self):
+        complete = record(1, 0)
+        complete.update({
+            "points_reward": 150,
+            "box_lottery_points_reward": 50,
+            "data_fetch_completed": True,
+            "box_lottery_required": True,
+            "box_lottery": [
+                {"draw_success": True, "claim_success": True},
+                {"draw_success": True, "claim_success": True},
+            ],
+        })
+        incomplete = record(2, 0)
+        incomplete.update({
+            "risk_controlled": True,
+            "sign_success": False,
+            "sign_status": "签到风控",
+            "detail_reason": "签到失败，疑似违反签到规则",
+            "points_reward": 50,
+            "data_fetch_completed": True,
+            "box_lottery_required": True,
+            "box_lottery": [],
+        })
+        message, summary = build_message([complete, incomplete], {}, 2)
+        self.assertIn("1个账号：纸盒抽奖未完成❌", message)
+        self.assertNotIn("疑似违反签到规则", message)
+        self.assertIn("纸盒抽奖完成: 1/2", message)
+        self.assertIn("签到获得 +150.0", message)
+        self.assertIn("纸盒抽奖获得 +50.0", message)
+        self.assertIn("总计获得 +200.0", message)
+        self.assertEqual(summary["box_lottery_reward"], 50)
+
+    def test_skip_sign_group_has_no_box_lottery_summary(self):
+        row = record(1, 0)
+        row.update({
+            "group_code": "ll1",
+            "sign_skipped": True,
+            "sign_success": False,
+            "sign_status": "按组配置跳过签到",
+            "box_lottery_required": False,
+            "box_lottery": [],
+        })
+        message, summary = build_message([row], {}, 1)
+        self.assertNotIn("纸盒抽奖完成", message)
+        self.assertNotIn("纸盒抽奖获得", message)
+        self.assertEqual(summary["box_lottery_required"], 0)
+
+    def test_retry_merge_keeps_box_lottery_points_reward(self):
+        initial = record(1, 0)
+        initial.update({
+            "risk_controlled": True,
+            "sign_success": False,
+            "sign_status": "签到风控",
+            "points_fetch_success": True,
+            "initial_points": 100,
+            "final_points": 100,
+            "points_reward": 0,
+            "box_lottery_required": True,
+            "box_lottery": [],
+        })
+        retry = record(1, 0)
+        retry.update({
+            "risk_controlled": True,
+            "sign_success": False,
+            "sign_status": "签到风控",
+            "points_fetch_success": True,
+            "initial_points": 100,
+            "final_points": 200,
+            "points_reward": 100,
+            "box_lottery_points_reward": 100,
+            "box_lottery_required": True,
+            "box_lottery": [
+                {"draw_success": True, "claim_success": True},
+                {"draw_success": True, "claim_success": True},
+            ],
+        })
+        merged = pick_result(initial, retry)
+        self.assertEqual(merged["box_lottery_points_reward"], 100)
+        self.assertEqual(merged["final_points"], 200)
+        self.assertTrue(box_lottery_complete(True, merged["box_lottery"]))
+
     def test_activity_config_request_never_uses_an_empty_payload(self):
         self.assertEqual(
             activity_config_payload(" campaign-id "),
