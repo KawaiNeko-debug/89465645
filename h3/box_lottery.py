@@ -21,6 +21,18 @@ def is_box_lottery_required(task_date: str, group_code: str) -> bool:
         return False
 
 
+def can_run_box_lottery_after_sign(
+    required: bool,
+    sign_success: bool,
+    previous_sign_success: bool,
+    risk_controlled: bool,
+    banned_account: bool,
+) -> bool:
+    if not required or banned_account:
+        return False
+    return bool(sign_success or previous_sign_success or risk_controlled)
+
+
 def empty_box_lottery() -> list[dict]:
     return [
         {"attempt": 1, "draw_success": False, "terminal": False, "draw_status": "待执行", "prizes": [], "claim_success": False, "claim_status": "待执行", "claim_detail": "", "draw_time": ""},

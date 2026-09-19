@@ -89,6 +89,7 @@ try:
         CLAIM_PATH as BOX_LOTTERY_CLAIM_PATH,
         TURN_PATH as BOX_LOTTERY_TURN_PATH,
         box_lottery_complete,
+        can_run_box_lottery_after_sign,
         empty_box_lottery,
         is_box_lottery_required,
     )
@@ -119,6 +120,7 @@ except ImportError:
         CLAIM_PATH as BOX_LOTTERY_CLAIM_PATH,
         TURN_PATH as BOX_LOTTERY_TURN_PATH,
         box_lottery_complete,
+        can_run_box_lottery_after_sign,
         empty_box_lottery,
         is_box_lottery_required,
     )
@@ -2397,8 +2399,13 @@ class ApiClient:
             return
         failures = []
         for prize in prizes:
+            if str(prize.get("claim_status") or "").strip() == "已领取":
+                continue
             win_code = str(prize.get("winCode") or prize.get("win_code") or "").strip()
             if not win_code:
+                prize["claim_status"] = "领取失败"
+                prize["claim_detail"] = "缺少领取凭证"
+                failures.append("缺少领取凭证")
                 continue
             try:
                 response = self._browser_fetch_json_once(
@@ -2411,13 +2418,40 @@ class ApiClient:
                 )
                 if isinstance(response, dict) and response.get("success") is True:
                     prize["claim_status"] = "已领取"
+                    prize["claim_detail"] = ""
                 else:
-                    failures.append(build_detail_reason(response, "奖励领取未成功"))
+                    reason = build_detail_reason(response, "奖励领取未成功")
+                    prize["claim_status"] = "领取失败"
+                    prize["claim_detail"] = reason
+                    failures.append(reason)
             except Exception as exc:
-                failures.append(type(exc).__name__)
+                reason = type(exc).__name__
+                prize["claim_status"] = "领取失败"
+                prize["claim_detail"] = reason
+                failures.append(reason)
         record["claim_success"] = not failures
         record["claim_status"] = "领取成功" if not failures else "部分领取失败"
         record["claim_detail"] = "；".join(dict.fromkeys(failures))
+
+    def refresh_points_after_box_lottery(self) -> bool:
+        previous_success = self.points_fetch_success
+        previous_points = self.final_points
+        latest_points = self.get_points()
+        if latest_points is None:
+            self.points_fetch_success = previous_success
+            self.final_points = previous_points
+            log(
+                f"账号{self.account_index} - 纸盒抽奖后金豆数量刷新失败，"
+                "保留抽奖前数值"
+            )
+            return False
+        self.final_points = latest_points
+        self.points_reward = self.final_points - self.initial_points
+        log(
+            f"账号{self.account_index} - 纸盒抽奖后已刷新金豆数量: "
+            f"{self.final_points:.1f}"
+        )
+        return True
 
     def execute_box_lottery(self, task_date="") -> bool:
         self.box_lottery_required = is_box_lottery_required(
@@ -2432,12 +2466,18 @@ class ApiClient:
         self.box_lottery = (self.box_lottery or empty_box_lottery())[:2]
         while len(self.box_lottery) < 2:
             self.box_lottery.append(empty_box_lottery()[len(self.box_lottery)])
+        log(f"账号{self.account_index} - 开始执行纸盒抽奖，最多两次并自动领取奖励")
         for index, record in enumerate(self.box_lottery, start=1):
             if truthy(record.get("terminal")):
+                log(f"账号{self.account_index} - 纸盒抽奖第{index}次为业务终态，跳过重复请求")
                 continue
             if truthy(record.get("draw_success")):
                 if not truthy(record.get("claim_success")):
                     self._claim_box_prizes(record)
+                    log(
+                        f"账号{self.account_index} - 纸盒抽奖第{index}次仅补领奖励："
+                        f"{record.get('claim_status') or '未确认'}"
+                    )
                 continue
             if index == 1:
                 time.sleep(10)
@@ -2470,7 +2510,9 @@ class ApiClient:
                                 "claim_success": True,
                                 "claim_status": "业务终态",
                             })
+                            log(f"账号{self.account_index} - 纸盒抽奖次数不可用：{reason}")
                             break
+                    log(f"账号{self.account_index} - 纸盒抽奖第{index}次未成功：{reason}")
                     continue
                 data = response.get("data") if isinstance(response.get("data"), dict) else {}
                 prizes = data.get("prizeList") if isinstance(data.get("prizeList"), list) else []
@@ -2481,6 +2523,10 @@ class ApiClient:
                 record["draw_success"] = True
                 record["draw_status"] = "抽奖成功" if prizes else "抽奖成功但无奖励"
                 self._claim_box_prizes(record)
+                log(
+                    f"账号{self.account_index} - 纸盒抽奖第{index}次："
+                    f"{record['draw_status']}；{record.get('claim_status') or '未确认'}"
+                )
             except Exception as exc:
                 record["draw_status"] = "结果未知"
                 record["terminal"] = True
@@ -3089,14 +3135,19 @@ def sign_in_account(
                             client.final_points = latest_points
                             client.points_reward = client.final_points - client.initial_points
 
-                if (
-                    "box_lottery" in components
-                    and client.box_lottery_required
-                    and (truthy(success) or truthy(previous_result.get("sign_success")))
-                    and not banned_account
-                    and not client.risk_controlled
+                if "box_lottery" in components and can_run_box_lottery_after_sign(
+                    client.box_lottery_required,
+                    truthy(success),
+                    truthy(previous_result.get("sign_success")),
+                    truthy(client.risk_controlled) or previous_risk_controlled,
+                    banned_account,
                 ):
+                    if client.risk_controlled or previous_risk_controlled:
+                        log(f"账号{account_index} - 签到触发风控，仍按组配置执行纸盒抽奖")
+                    else:
+                        log(f"账号{account_index} - 签到步骤完成，开始执行纸盒抽奖")
                     client.execute_box_lottery(task_start_date)
+                    client.refresh_points_after_box_lottery()
 
                 if not banned_account and "gift" in components:
                     client.execute_listing_gift(task_start_date)

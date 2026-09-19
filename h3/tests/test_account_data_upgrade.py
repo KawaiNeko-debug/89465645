@@ -35,7 +35,11 @@ from h3.listing_gift import (
     monthly_gift_origin,
     should_claim_listing_gift,
 )
-from h3.box_lottery import box_lottery_complete, is_box_lottery_required
+from h3.box_lottery import (
+    box_lottery_complete,
+    can_run_box_lottery_after_sign,
+    is_box_lottery_required,
+)
 from h3.report import (
     is_current_pcb_smt_coupon,
     max_lottery_count,
@@ -188,6 +192,54 @@ class DynamicLotteryTests(unittest.TestCase):
             "coupon_fetch_success": True,
         })
         self.assertNotIn("box_lottery", retry_components(row))
+
+    def test_box_lottery_runs_after_sign_risk_control(self):
+        self.assertTrue(
+            can_run_box_lottery_after_sign(True, False, False, True, False)
+        )
+        self.assertTrue(
+            can_run_box_lottery_after_sign(True, True, False, False, False)
+        )
+        self.assertFalse(
+            can_run_box_lottery_after_sign(True, False, False, False, False)
+        )
+        self.assertFalse(
+            can_run_box_lottery_after_sign(True, False, False, True, True)
+        )
+
+    def test_risk_controlled_box_lottery_remains_retryable_until_executed(self):
+        row = record(1, 0)
+        row.update({
+            "risk_controlled": True,
+            "sign_success": False,
+            "box_lottery_required": True,
+            "box_lottery": [],
+            "component_status": {"box_lottery": True},
+        })
+        self.assertIn("box_lottery", retry_components(row))
+        row["banned_account"] = True
+        self.assertNotIn("box_lottery", retry_components(row))
+
+    def test_partial_box_lottery_claim_remains_retryable(self):
+        row = record(1, 0)
+        row.update({
+            "sign_success": True,
+            "box_lottery_required": True,
+            "box_lottery": [
+                {
+                    "draw_success": True,
+                    "claim_success": False,
+                    "claim_status": "部分领取失败",
+                    "claim_detail": "NOT FOUND",
+                },
+                {
+                    "draw_success": True,
+                    "claim_success": True,
+                    "claim_status": "领取成功",
+                },
+            ],
+        })
+        self.assertIn("box_lottery", retry_components(row))
 
     def test_activity_config_request_never_uses_an_empty_payload(self):
         self.assertEqual(

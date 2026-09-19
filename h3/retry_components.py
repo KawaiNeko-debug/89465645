@@ -64,8 +64,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
     )
     box_required = truthy(row.get("box_lottery_required"))
     box_complete = (
-        truthy(row.get("risk_controlled"))
-        or truthy(row.get("banned_account"))
+        truthy(row.get("banned_account"))
         or box_lottery_complete(box_required, row.get("box_lottery"))
     )
     gift_complete = not truthy(row.get("listing_gift_required")) or truthy(
@@ -91,6 +90,8 @@ def component_status(row: dict | None) -> dict[str, bool]:
         "box_lottery": box_complete,
     }
     for key in result:
+        if key == "box_lottery":
+            continue
         if key in stored:
             result[key] = result[key] or truthy(stored[key])
     return result
