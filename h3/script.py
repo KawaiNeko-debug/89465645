@@ -80,6 +80,7 @@ try:
         component_status,
         needs_retry,
         retry_components,
+        scoped_retry_components,
         vote_is_terminal_insufficient_points,
     )
     from login_page import fill_password_login, is_mobile_account
@@ -109,6 +110,7 @@ except ImportError:
         component_status,
         needs_retry,
         retry_components,
+        scoped_retry_components,
         vote_is_terminal_insufficient_points,
     )
     from h3.login_page import fill_password_login, is_mobile_account
@@ -263,9 +265,15 @@ def execution_context() -> dict:
         default_category = '同行不签到组'
     elif group_code == 'test':
         default_category = '测试组'
+    elif group_code == 'gift_test':
+        default_category = '领券测试组'
     else:
         default_category = ''
-    skip_sign = truthy(os.getenv('SKIP_SIGN')) or group_code.startswith(('ll', 'zh'))
+    skip_sign = (
+        truthy(os.getenv('SKIP_SIGN'))
+        or group_code.startswith(('ll', 'zh'))
+        or group_code == 'gift_test'
+    )
     return {
         'source_group': group_code,
         'group_code': group_code,
@@ -435,12 +443,16 @@ def load_previous_result(path=None) -> dict:
     return {}
 
 
-def requested_components(previous_result=None) -> set[str]:
-    explicit = {
+def explicit_component_scope() -> set[str]:
+    return {
         item.strip()
         for item in str(os.getenv("RETRY_COMPONENTS") or "").split(",")
         if item.strip() in COMPONENTS
     }
+
+
+def requested_components(previous_result=None) -> set[str]:
+    explicit = explicit_component_scope()
     if explicit:
         if previous_result:
             return explicit.intersection(retry_components(previous_result))
@@ -448,6 +460,7 @@ def requested_components(previous_result=None) -> set[str]:
     if previous_result:
         return set(retry_components(previous_result))
     return set(COMPONENTS)
+
 
 def parse_banned_accounts(raw=None) -> set[str]:
     raw = os.getenv("BANNED_ACCOUNTS", "") if raw is None else raw
@@ -3286,7 +3299,7 @@ def process_single_account(username, password, account_index, total_accounts):
     max_retries = 3
     for attempt in range(max_retries + 1):
         if attempt > 0 or seed:
-            pending = retry_components(merged)
+            pending = scoped_retry_components(merged, explicit_component_scope())
             if not pending:
                 break
         res = sign_in_account(

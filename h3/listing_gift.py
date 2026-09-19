@@ -7,6 +7,7 @@ SPARK_GIFT_PAGE_PATH = "/pages/coupon-page/index?id=72"
 SPARK_GIFT_API_PATH = "/api/appPlatform/couponPage/receiveCoupon"
 SPARK_GIFT_ID = 72
 SPARK_GIFT_GROUP_PREFIXES = ("wudi", "ld", "new")
+SPARK_GIFT_TEST_GROUP = "gift_test"
 # Legacy names are retained so existing result fields and imports remain compatible.
 MONTHLY_GIFT_PAGE_PATH = SPARK_GIFT_PAGE_PATH
 MONTHLY_GIFT_API_PATH = SPARK_GIFT_API_PATH
@@ -60,7 +61,8 @@ def is_listing_gift_date(value) -> bool:
 
 
 def is_monthly_gift_group(group_code: str) -> bool:
-    return str(group_code or "").strip().lower().startswith(MONTHLY_GIFT_GROUP_PREFIXES)
+    value = str(group_code or "").strip().lower()
+    return value == SPARK_GIFT_TEST_GROUP or value.startswith(MONTHLY_GIFT_GROUP_PREFIXES)
 
 
 def should_claim_listing_gift(value, group_code: str = "") -> bool:

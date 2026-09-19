@@ -1,0 +1,96 @@
+name: gift-test
+
+run-name: gift-test-${{ github.run_id }}
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      task_start_date: ${{ steps.date.outputs.task_start_date }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: date
+        run: |
+          python - <<'PY'
+          import os
+          from datetime import datetime, timedelta, timezone
+          from h3.listing_gift import is_listing_gift_date
+
+          value = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+          if not is_listing_gift_date(value):
+              raise SystemExit('领券测试组仅允许在星火会礼包活动日期运行')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'task_start_date={value}\n')
+          PY
+
+  claim:
+    needs: prepare
+    uses: ./.github/workflows/dynamic-batch.yml
+    with:
+      orchestration_id: ${{ github.run_id }}
+      batch_id: gift-test
+      task_start_date: ${{ needs.prepare.outputs.task_start_date }}
+      continue_chain: false
+      chain_state: ""
+      test_mode: false
+      gift_test_mode: true
+    secrets: inherit
+
+  summary:
+    needs: [prepare, claim]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: batch-result-${{ github.run_id }}-gift-test
+          path: gift-test-result
+      - name: Write safe claim summary
+        env:
+          RESULT_PATH: gift-test-result/result.json
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ['RESULT_PATH'])
+          rows = []
+          if path.exists():
+              payload = json.loads(path.read_text(encoding='utf-8'))
+              rows = payload.get('results') if isinstance(payload, dict) else []
+              rows = rows if isinstance(rows, list) else []
+          success = sum(1 for row in rows if row.get('listing_gift_success'))
+          lines = [
+              '# 领券测试组',
+              '',
+              f'- 账号数：{len(rows)}',
+              f'- 领取成功或已领取：{success}',
+              f'- 未完成：{len(rows) - success}',
+              '',
+          ]
+          for row in sorted(rows, key=lambda item: int(item.get('account_index') or 0)):
+              index = int(row.get('account_index') or 0)
+              status = str(row.get('listing_gift_status') or '未执行').strip()
+              lines.append(f'- 账号{index}：{status}')
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary:
+              with open(summary, 'a', encoding='utf-8') as output:
+                  output.write('\n'.join(lines) + '\n')
+          PY
+      - name: Upload merged gift-test result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gift-test-summary-${{ github.run_id }}
+          path: gift-test-result/result.json
+          if-no-files-found: warn
+          retention-days: 3

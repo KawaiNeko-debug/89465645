@@ -31,7 +31,8 @@ GROUP_CODES = tuple(
 LEGACY_GROUP_CODES = tuple(f"new{index}" for index in range(1, 21))
 FROZEN_GROUP_CODES = GROUP_CODES + LEGACY_GROUP_CODES
 TEST_GROUP_CODE = "test"
-ALL_SOURCE_GROUP_CODES = FROZEN_GROUP_CODES + (TEST_GROUP_CODE,)
+GIFT_TEST_GROUP_CODE = "gift_test"
+ALL_SOURCE_GROUP_CODES = FROZEN_GROUP_CODES + (TEST_GROUP_CODE, GIFT_TEST_GROUP_CODE)
 BATCH_SIZE = 220
 BATCH_WORKFLOW_FILE = "dynamic-batch.yml"
 SUMMARY_WORKFLOW_FILE = "dynamic-summary.yml"
@@ -61,6 +62,8 @@ def category_for(source_group: str) -> str:
         return "同行不签到组"
     if source_group == TEST_GROUP_CODE:
         return "测试组"
+    if source_group == GIFT_TEST_GROUP_CODE:
+        return "领券测试组"
     raise ValueError(f"unsupported source group: {source_group}")
 
 
@@ -81,12 +84,15 @@ def configured_group_raw(source_group: str) -> str:
 
 
 def account_metadata(source_group: str, account_index: int) -> dict:
-    skip_sign = source_group.startswith(("ll", "zh"))
+    gift_only = source_group == GIFT_TEST_GROUP_CODE
+    skip_sign = source_group.startswith(("ll", "zh")) or gift_only
     return {
         "source_group": source_group,
         "account_index": int(account_index),
         "account_category": category_for(source_group),
-        "execution_mode": "skip_sign" if skip_sign else "full",
+        "execution_mode": (
+            "gift_only" if gift_only else ("skip_sign" if skip_sign else "full")
+        ),
         "skip_sign": skip_sign,
     }
 
@@ -123,6 +129,28 @@ def manual_test_batch_accounts(
     accounts = deterministic_order(accounts, resolved_date)
     for account in accounts:
         account["batch_id"] = str(batch_id or TEST_GROUP_CODE)
+    return accounts
+
+
+def manual_gift_test_batch_accounts(
+    task_date: str, batch_id: str = "gift-test"
+) -> list[dict]:
+    count = account_count(os.getenv("gift_test") or os.getenv("GIFT_TEST") or "")
+    if count <= 0:
+        raise ValueError("GIFT_TEST is empty")
+    if count > BATCH_SIZE:
+        raise ValueError(f"GIFT_TEST supports at most {BATCH_SIZE} accounts per run")
+    resolved_date = str(task_date or "").strip() or datetime.now(
+        timezone(timedelta(hours=8))
+    ).strftime("%Y-%m-%d")
+    accounts = [
+        account_metadata(GIFT_TEST_GROUP_CODE, index)
+        for index in range(1, count + 1)
+    ]
+    accounts = deterministic_order(accounts, resolved_date)
+    for account in accounts:
+        account["batch_id"] = str(batch_id or "gift-test")
+        account["retry_components"] = "gift"
     return accounts
 
 
@@ -452,6 +480,24 @@ def output_test_matrix(args) -> int:
     return 0
 
 
+def output_gift_test_matrix(args) -> int:
+    accounts = manual_gift_test_batch_accounts(args.task_start_date, args.batch_id)
+    values = {
+        "matrix": json.dumps(
+            {"include": accounts}, ensure_ascii=False, separators=(",", ":")
+        ),
+        "count": str(len(accounts)),
+    }
+    output = os.environ.get("GITHUB_OUTPUT")
+    if output:
+        with open(output, "a", encoding="utf-8") as file:
+            for key, value in values.items():
+                file.write(f"{key}={value}\n")
+    else:
+        print(json.dumps(values, ensure_ascii=False))
+    return 0
+
+
 def download_batches(args) -> int:
     repo, token = github_context()
     raw = os.environ.get(args.chain_state_env, "") if args.chain_state_env else args.chain_state
@@ -534,6 +580,10 @@ def main() -> int:
     test_matrix.add_argument("--batch-id", default=TEST_GROUP_CODE)
     test_matrix.add_argument("--task-start-date", required=True)
 
+    gift_test_matrix = commands.add_parser("gift-test-matrix")
+    gift_test_matrix.add_argument("--batch-id", default="gift-test")
+    gift_test_matrix.add_argument("--task-start-date", required=True)
+
     download = commands.add_parser("download")
     download.add_argument("--chain-state", default="")
     download.add_argument("--chain-state-env", default="")
@@ -548,6 +598,8 @@ def main() -> int:
         return output_batch_matrix(args)
     if args.command == "test-matrix":
         return output_test_matrix(args)
+    if args.command == "gift-test-matrix":
+        return output_gift_test_matrix(args)
     return download_batches(args)
 
 

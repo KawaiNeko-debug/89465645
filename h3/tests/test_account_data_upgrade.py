@@ -46,6 +46,7 @@ from h3.report import (
 from h3.retry_components import (
     build_retry_matrix,
     retry_components,
+    scoped_retry_components,
     vote_is_terminal_insufficient_points,
 )
 from h3.runner_recovery import should_rerun
@@ -655,6 +656,13 @@ class ListingGiftTests(unittest.TestCase):
         self.assertEqual(SPARK_GIFT_ID, 72)
         self.assertEqual(SPARK_GIFT_PAGE_PATH, "/pages/coupon-page/index?id=72")
 
+    def test_gift_only_scope_stops_after_gift_success(self):
+        pending = record(1, 0)
+        pending["listing_gift_success"] = False
+        self.assertEqual(scoped_retry_components(pending, {"gift"}), ["gift"])
+        pending["listing_gift_success"] = True
+        self.assertEqual(scoped_retry_components(pending, {"gift"}), [])
+
     def test_date_window_is_exact(self):
         self.assertFalse(is_listing_gift_date("2026-09-18"))
         self.assertTrue(is_listing_gift_date("2026-09-19 23:59:59"))
@@ -664,6 +672,7 @@ class ListingGiftTests(unittest.TestCase):
         self.assertTrue(should_claim_listing_gift("2026-09-19", "wudi1"))
         self.assertTrue(should_claim_listing_gift("2026-09-20", "ld1"))
         self.assertTrue(should_claim_listing_gift("2026-09-19", "new1"))
+        self.assertTrue(should_claim_listing_gift("2026-09-20", "gift_test"))
         self.assertFalse(should_claim_listing_gift("2026-09-19", "yyy1"))
         self.assertFalse(should_claim_listing_gift("2026-09-19", "old1"))
         self.assertFalse(should_claim_listing_gift("2026-09-19", "ll1"))

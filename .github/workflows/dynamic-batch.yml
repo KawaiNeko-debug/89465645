@@ -49,6 +49,10 @@ on:
         required: false
         default: false
         type: boolean
+      gift_test_mode:
+        required: false
+        default: false
+        type: boolean
 
 env:
   TZ: Asia/Shanghai
@@ -193,6 +197,7 @@ env:
   zh18: ${{ secrets.zh18 }}
   zh19: ${{ secrets.zh19 }}
   zh20: ${{ secrets.zh20 }}
+  gift_test: ${{ inputs.gift_test_mode && secrets.GIFT_TEST || '' }}
   BASE_URL: ${{ secrets.BASE_URL }}
   PASSPORT_URL: ${{ secrets.PASSPORT_URL }}
   REFERER: ${{ secrets.REFERER }}
@@ -211,7 +216,7 @@ env:
   VOTE_CAMPAIGN_URL: ${{ secrets.VOTE_CAMPAIGN_URL }}
   VOTE_API_BASE: ${{ secrets.VOTE_API_BASE }}
   BOX_LOTTERY_ACTIVITY_CODE: ${{ vars.BOX_LOTTERY_ACTIVITY_CODE }}
-  ACCOUNT_DATA_ENABLED: "true"
+  ACCOUNT_DATA_ENABLED: ${{ inputs.gift_test_mode && 'false' || 'true' }}
   SIGN_TASK_START_DATE: ${{ inputs.task_start_date }}
   BATCH_ID: ${{ inputs.batch_id }}
 
@@ -228,13 +233,19 @@ jobs:
     env:
       CHAIN_STATE: ${{ inputs.chain_state }}
       TEST_MODE: ${{ inputs.test_mode }}
+      GIFT_TEST_MODE: ${{ inputs.gift_test_mode }}
       test: ${{ inputs.test_mode && secrets.TEST || '' }}
+      gift_test: ${{ inputs.gift_test_mode && secrets.GIFT_TEST || '' }}
     steps:
       - uses: actions/checkout@v4
       - id: matrix
         shell: bash
         run: |
-          if [ "$TEST_MODE" = "true" ]; then
+          if [ "$GIFT_TEST_MODE" = "true" ]; then
+            python h3/mixed_batches.py gift-test-matrix \
+              --batch-id "${{ inputs.batch_id }}" \
+              --task-start-date "${{ inputs.task_start_date }}"
+          elif [ "$TEST_MODE" = "true" ]; then
             python h3/mixed_batches.py test-matrix \
               --batch-id "${{ inputs.batch_id }}" \
               --task-start-date "${{ inputs.task_start_date }}"
@@ -253,6 +264,7 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env: &account_env
       test: ${{ inputs.test_mode && secrets.TEST || '' }}
+      gift_test: ${{ inputs.gift_test_mode && secrets.GIFT_TEST || '' }}
       SOURCE_GROUP: ${{ matrix.source_group }}
       GROUP_CODE: ${{ matrix.source_group }}
       GROUP_NAME: ${{ matrix.source_group }}
@@ -265,6 +277,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/run-mixed-account
         with:
+          retry-components: ${{ matrix.retry_components }}
           artifact-name: account-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}-${{ matrix.source_group }}-${{ matrix.account_index }}-r0
 
   prepare_retry:
@@ -414,7 +427,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 2
       - name: Continue mixed batch chain
-        if: ${{ always() && inputs.continue_chain && !inputs.test_mode }}
+        if: ${{ always() && inputs.continue_chain && !inputs.test_mode && !inputs.gift_test_mode }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}

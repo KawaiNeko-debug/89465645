@@ -17,6 +17,7 @@ from h3.mixed_batches import (
     new_chain_state,
     split_batches,
     manual_test_batch_accounts,
+    manual_gift_test_batch_accounts,
     category_for,
 )
 from h3.mixed_results import (
@@ -169,6 +170,31 @@ def test_campaign_gift_component_is_limited_to_dates_and_groups():
     assert "gift" not in applicable_components(
         {"source_group": "wudi1", "skip_sign": False}, "2026-09-21"
     )
+
+
+def test_gift_test_matrix_is_manual_gift_only_and_contains_no_credentials():
+    values = {"gift_test": "customer-a,password-a\ncustomer-b,password-b"}
+    with patch.dict(os.environ, values, clear=False):
+        accounts = manual_gift_test_batch_accounts("2026-09-20")
+    assert len(accounts) == 2
+    assert all(item["source_group"] == "gift_test" for item in accounts)
+    assert all(item["account_category"] == "领券测试组" for item in accounts)
+    assert all(item["execution_mode"] == "gift_only" for item in accounts)
+    assert all(item["skip_sign"] is True for item in accounts)
+    assert all(item["retry_components"] == "gift" for item in accounts)
+    serialized = json.dumps(accounts, ensure_ascii=False)
+    assert "customer-a" not in serialized
+    assert "password-a" not in serialized
+
+
+def test_daily_pool_never_includes_gift_test_secret():
+    values = env_slots(old1="old-a,password")
+    values["gift_test"] = "gift-only,password"
+    with patch.dict(os.environ, values, clear=False):
+        accounts = configured_accounts()
+    assert {(item["source_group"], item["account_index"]) for item in accounts} == {
+        ("old1", 1)
+    }
 
 
 def test_compact_state_scales_without_embedding_every_account():

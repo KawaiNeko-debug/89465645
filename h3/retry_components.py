@@ -104,6 +104,14 @@ def retry_components(row: dict | None) -> list[str]:
     return [name for name in COMPONENTS if not status.get(name, False)]
 
 
+def scoped_retry_components(
+    row: dict | None, allowed_components: set[str] | list[str] | tuple[str, ...]
+) -> list[str]:
+    allowed = {item for item in allowed_components if item in COMPONENTS}
+    pending = retry_components(row)
+    return [item for item in pending if item in allowed] if allowed else pending
+
+
 def needs_retry(row: dict | None) -> bool:
     return bool(retry_components(row))
 
