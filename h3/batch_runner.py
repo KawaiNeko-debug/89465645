@@ -15,9 +15,11 @@ except ImportError:
 
 try:
     from account_data import empty_account_data
+    from box_lottery import is_box_lottery_required
     from listing_gift import should_claim_listing_gift
 except ImportError:
     from h3.account_data import empty_account_data
+    from h3.box_lottery import is_box_lottery_required
     from h3.listing_gift import should_claim_listing_gift
 
 
@@ -97,6 +99,7 @@ def shuffle_accounts(accounts: list[dict]) -> list[dict]:
 
 def build_placeholder_result(account: dict, status="签到异常", reason="工作流未生成 result.json") -> dict:
     task_date = os.getenv("SIGN_TASK_START_DATE", "")
+    group_code = str(account.get("group_code") or os.getenv("GROUP_CODE") or "").strip().lower()
     return {
         "account_index": account["account_index"],
         "execution_order": account.get("execution_order", 0),
@@ -105,6 +108,7 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "group_name": account.get("group_name", ""),
         "group_number": account.get("group_number", 0),
         "group_position": account.get("group_position", ""),
+        "group_code": group_code,
         "sign_success": False,
         "sign_status": status,
         "initial_points": 0.0,
@@ -126,12 +130,12 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "task_start_date": task_date,
         "sign_completed_at": "",
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
-        "box_lottery_required": False,
+        "box_lottery_required": is_box_lottery_required(task_date, group_code),
         "box_lottery": [],
-        "listing_gift_required": should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")),
+        "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, account.get("group_code") or os.getenv("GROUP_CODE")) else "非星火会礼包领取日期或当前组不适用",
+        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, group_code) else "非星火会礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": False,
@@ -185,7 +189,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "activity_fetch_success": truthy(raw.get("activity_fetch_success")),
             "data_fetch_completed": truthy(raw.get("data_fetch_completed")),
             "next_day_success": truthy(raw.get("next_day_success")),
-            "task_start_date": str(raw.get("task_start_date") or "").strip(),
+            "task_start_date": str(raw.get("task_start_date") or normalized["task_start_date"]).strip(),
             "sign_completed_at": str(raw.get("sign_completed_at") or "").strip(),
             "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": [], "exchange": []},
             "box_lottery_required": truthy(raw.get("box_lottery_required")),
@@ -214,6 +218,13 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "sign_ip": str(raw.get("sign_ip") or "").strip(),
         }
     )
+
+    task_date = normalized["task_start_date"]
+    group_code = str(normalized.get("group_code") or os.getenv("GROUP_CODE") or "").strip().lower()
+    normalized["box_lottery_required"] = is_box_lottery_required(task_date, group_code)
+    normalized["listing_gift_required"] = should_claim_listing_gift(task_date, group_code)
+    if not normalized["listing_gift_required"]:
+        normalized["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
 
     if not normalized["detail_reason"]:
         if normalized["password_error"]:
@@ -287,6 +298,7 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "group_name": item.get("group_name", ""),
                 "group_number": item.get("group_number", 0),
                 "group_position": item.get("group_position", ""),
+                "group_code": item.get("group_code") or os.getenv("GROUP_CODE", ""),
                 "sign_success": item["sign_success"],
                 "sign_status": item["sign_status"],
                 "initial_points": item["initial_points"],

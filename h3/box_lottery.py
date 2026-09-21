@@ -16,7 +16,7 @@ def is_box_lottery_required(task_date: str, group_code: str) -> bool:
     ):
         return False
     try:
-        return datetime.strptime(str(task_date or "")[:10], "%Y-%m-%d").weekday() == 5
+        return datetime.strptime(str(task_date or "")[:10], "%Y-%m-%d").weekday() == 1
     except ValueError:
         return False
 

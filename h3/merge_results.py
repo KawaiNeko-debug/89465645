@@ -6,9 +6,9 @@ import sys
 from datetime import datetime
 
 try:
-    from retry_components import component_status
+    from retry_components import canonical_activity_requirements, component_status
 except ImportError:
-    from h3.retry_components import component_status
+    from h3.retry_components import canonical_activity_requirements, component_status
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 DATA_FAILURE_MARKERS = (
@@ -194,9 +194,11 @@ def merge_component_fields(picked: dict, fallback: dict | None):
                 picked[key] = fallback.get(key, picked.get(key, 0.0))
     else:
         picked["box_lottery_points_reward"] = picked_box_reward
-    picked["box_lottery_required"] = truthy(picked.get("box_lottery_required")) or truthy(
-        fallback.get("box_lottery_required")
-    )
+    box_required, gift_required = canonical_activity_requirements(picked)
+    picked["box_lottery_required"] = box_required
+    picked["listing_gift_required"] = gift_required
+    if not gift_required:
+        picked["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
     picked_status["box_lottery"] = component_status(picked).get("box_lottery", False)
     picked["component_status"] = {
         key: bool(picked_status.get(key) or fallback_status.get(key))
@@ -239,6 +241,7 @@ def load_single_result(path: str):
     row["_group_code"] = payload.get("group_code") if isinstance(payload, dict) else ""
     row["_account_category"] = payload.get("account_category") if isinstance(payload, dict) else ""
     row["_execution_mode"] = payload.get("execution_mode") if isinstance(payload, dict) else ""
+    row["_task_start_date"] = payload.get("task_start_date") if isinstance(payload, dict) else ""
     return row
 
 
@@ -258,6 +261,9 @@ def score(row: dict):
 
 def pick_result(initial: dict, retry: dict | None):
     if retry is None:
+        box_required, gift_required = canonical_activity_requirements(initial)
+        initial["box_lottery_required"] = box_required
+        initial["listing_gift_required"] = gift_required
         return initial
     if is_risk_control_result(initial):
         picked = initial
@@ -308,6 +314,11 @@ def pick_result(initial: dict, retry: dict | None):
             picked["detail_reason"] = "账号在 BANNED_ACCOUNTS 中，已跳过签到"
             if failures:
                 picked["detail_reason"] += "；" + "；".join(failures)
+    box_required, gift_required = canonical_activity_requirements(picked)
+    picked["box_lottery_required"] = box_required
+    picked["listing_gift_required"] = gift_required
+    if not gift_required:
+        picked["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
     picked["component_status"] = component_status(picked)
     return picked
 
@@ -381,6 +392,11 @@ def main():
     }
 
     for row in sorted(merged, key=lambda item: safe_int(item.get("account_index"), 0)):
+        box_required, gift_required = canonical_activity_requirements(row)
+        row["box_lottery_required"] = box_required
+        row["listing_gift_required"] = gift_required
+        if not gift_required:
+            row["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
         payload["results"].append(
             {
                 "account_index": safe_int(row.get("account_index"), 0),
@@ -410,7 +426,7 @@ def main():
                 "activity_fetch_success": truthy(row.get("activity_fetch_success")),
                 "data_fetch_completed": truthy(row.get("data_fetch_completed")),
                 "next_day_success": truthy(row.get("next_day_success")),
-                "task_start_date": row.get("task_start_date", ""),
+                "task_start_date": row.get("task_start_date") or row.get("_task_start_date") or task_start_date,
                 "sign_completed_at": row.get("sign_completed_at", ""),
                 "retry_count": safe_int(row.get("retry_count"), 0),
                 "is_final_retry": truthy(row.get("is_final_retry")),

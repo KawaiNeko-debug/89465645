@@ -327,6 +327,17 @@ def merge_results(results_dir: str | Path, output_path: str | Path, batch_accoun
                 f"{account.get('source_group')}账号{account.get('account_index')}"
             )
             selected["sign_skipped"] = truthy(account.get("skip_sign"))
+            selected["task_start_date"] = task_date
+            selected["box_lottery_required"] = is_box_lottery_required(
+                task_date, account.get("source_group")
+            )
+            selected["listing_gift_required"] = should_claim_listing_gift(
+                task_date, account.get("source_group")
+            )
+            if not selected["listing_gift_required"]:
+                selected["listing_gift_status"] = (
+                    "非星火会礼包领取日期或当前组不适用"
+                )
             selected["component_status"] = component_status(selected)
         merged.append(sanitized(selected))
 

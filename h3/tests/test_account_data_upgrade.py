@@ -72,7 +72,10 @@ from h3.dynamic_groups import (
     encode_chain_state,
     load_chain_state,
 )
-from h3.category_reports import main as category_reports_main
+from h3.category_reports import (
+    combine_category_messages,
+    main as category_reports_main,
+)
 from h3.report import (
     build_message,
     is_problem_record,
@@ -84,6 +87,8 @@ from h3.report import (
     redact_accounts_for_log,
     report_password,
     resolve_output_xlsx_path,
+    send_telegram_documents,
+    summarize_box_lottery,
 )
 from h3.test_report import prepare_manifest
 
@@ -158,15 +163,40 @@ class DynamicLotteryTests(unittest.TestCase):
         self.assertIn("账号错误：检测到11位手机号，请改用客编", message)
 
     def test_box_lottery_schedule_and_group_scope(self):
-        self.assertTrue(is_box_lottery_required("2026-09-19", "old1"))
-        self.assertTrue(is_box_lottery_required("2026-09-19", "wudi2"))
-        self.assertTrue(is_box_lottery_required("2026-09-19", "ld2"))
-        self.assertTrue(is_box_lottery_required("2026-09-19", "yyy2"))
-        self.assertTrue(is_box_lottery_required("2026-09-19", "new2"))
-        self.assertTrue(is_box_lottery_required("2026-09-19", "test"))
-        self.assertFalse(is_box_lottery_required("2026-09-19", "ll1"))
-        self.assertFalse(is_box_lottery_required("2026-09-18", "old1"))
+        for group_code in ("old1", "wudi2", "ld2", "yyy2", "new2", "test"):
+            self.assertTrue(is_box_lottery_required("2026-09-22", group_code))
+        for group_code in ("ll1", "zh1", "gift_test"):
+            self.assertFalse(is_box_lottery_required("2026-09-22", group_code))
+        for task_date in ("2026-09-21", "2026-09-23", "2026-09-26", "2026-09-27"):
+            self.assertFalse(is_box_lottery_required(task_date, "old1"))
         self.assertTrue(box_lottery_complete(True, [{"terminal": True}, {"terminal": True}]))
+
+    def test_normalization_ignores_stale_activity_flags(self):
+        payload = {"group_code": "old1", "task_start_date": "2026-09-21"}
+        normalized = normalize_record(
+            {
+                "account_index": 1,
+                "box_lottery_required": True,
+                "listing_gift_required": True,
+                "listing_gift_status": "尚未执行",
+            },
+            payload,
+            {},
+        )
+        self.assertFalse(normalized["box_lottery_required"])
+        self.assertFalse(normalized["listing_gift_required"])
+        self.assertEqual(
+            normalized["listing_gift_status"],
+            "非星火会礼包领取日期或当前组不适用",
+        )
+
+    def test_historical_tuesday_remains_box_lottery_required(self):
+        normalized = normalize_record(
+            {"account_index": 1},
+            {"group_code": "old1", "task_start_date": "2026-09-22"},
+            {},
+        )
+        self.assertTrue(normalized["box_lottery_required"])
 
     def test_account_format_error_is_terminal_for_retry(self):
         self.assertEqual(
@@ -267,11 +297,60 @@ class DynamicLotteryTests(unittest.TestCase):
         message, summary = build_message([complete, incomplete], {}, 2)
         self.assertIn("1个账号：纸盒抽奖未完成❌", message)
         self.assertNotIn("疑似违反签到规则", message)
-        self.assertIn("纸盒抽奖完成: 1/2", message)
+        self.assertIn("抽奖成功: 1/2", message)
         self.assertIn("签到获得 +150.0", message)
         self.assertIn("纸盒抽奖获得 +50.0", message)
         self.assertIn("总计获得 +200.0", message)
         self.assertEqual(summary["box_lottery_reward"], 50)
+
+    def test_box_lottery_prize_and_coupon_statistics(self):
+        first = record(1, 0)
+        first.update({
+            "box_lottery_required": True,
+            "box_lottery": [
+                {
+                    "draw_success": True,
+                    "claim_success": True,
+                    "prizes": [
+                        {"name": "5金豆", "prize_type": 1, "quantity": 2},
+                        {"name": "纸盒10元无门槛券", "prize_type": 2},
+                    ],
+                },
+                {
+                    "draw_success": True,
+                    "claim_success": True,
+                    "prizes": [{"name": "纸盒10元无门槛券", "prize_type": 2}],
+                },
+            ],
+        })
+        second = record(2, 0)
+        second.update({
+            "box_lottery_required": True,
+            "box_lottery": [
+                {
+                    "draw_success": True,
+                    "claim_success": True,
+                    "prizes": [{"name": "纸盒10元无门槛券"}],
+                },
+                {
+                    "draw_success": True,
+                    "claim_success": True,
+                    "prizes": [{"name": "方形记忆棉腰靠", "prize_type": 5}],
+                },
+            ],
+        })
+        summary = summarize_box_lottery([first, second])
+        self.assertEqual(summary["box_draw_success"], 2)
+        self.assertEqual(summary["box_winning_accounts"], 2)
+        self.assertEqual(summary["box_result_count"], 6)
+        self.assertEqual(summary["box_coupon_type_count"], 1)
+        self.assertEqual(summary["box_coupon_total"], 3)
+        self.assertEqual(summary["box_coupon_counts"]["纸盒10元无门槛券"], 2)
+
+        message, _ = build_message([first, second], {}, 2)
+        self.assertIn("抽奖结果总数: 6", message)
+        self.assertIn("🎁 奖品分布", message)
+        self.assertIn("纸盒10元无门槛券: 2 个账号", message)
 
     def test_skip_sign_group_has_no_box_lottery_summary(self):
         row = record(1, 0)
@@ -284,7 +363,7 @@ class DynamicLotteryTests(unittest.TestCase):
             "box_lottery": [],
         })
         message, summary = build_message([row], {}, 1)
-        self.assertNotIn("纸盒抽奖完成", message)
+        self.assertNotIn("抽奖成功:", message)
         self.assertNotIn("纸盒抽奖获得", message)
         self.assertEqual(summary["box_lottery_required"], 0)
 
@@ -1398,6 +1477,52 @@ class DynamicGroupTests(unittest.TestCase):
                     "2026-08-25-老号全干组.xlsx",
                 ],
             )
+
+    def test_category_messages_are_combined_with_separator(self):
+        combined = combine_category_messages(
+            [("无敌全干组", "第一组消息"), ("立东全干组", "第二组消息")]
+        )
+        self.assertEqual(combined.count("============================="), 1)
+        self.assertIn("无敌全干组:\n第一组消息", combined)
+        self.assertIn("立东全干组:\n第二组消息", combined)
+
+    def test_multiple_xlsx_files_use_one_telegram_media_group(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = []
+            for index in range(2):
+                path = os.path.join(temp_dir, f"report-{index}.xlsx")
+                Path(path).write_bytes(b"xlsx")
+                paths.append(path)
+            response = SimpleNamespace(status_code=200)
+            with patch.dict(
+                os.environ,
+                {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"},
+            ), patch("h3.report.requests.post", return_value=response) as post:
+                self.assertTrue(send_telegram_documents(paths))
+            self.assertEqual(post.call_count, 1)
+            self.assertTrue(post.call_args.args[0].endswith("/sendMediaGroup"))
+            media = json.loads(post.call_args.kwargs["data"]["media"])
+            self.assertEqual(len(media), 2)
+
+    def test_telegram_media_group_retries_once(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = []
+            for index in range(2):
+                path = os.path.join(temp_dir, f"retry-report-{index}.xlsx")
+                Path(path).write_bytes(b"xlsx")
+                paths.append(path)
+            with patch.dict(
+                os.environ,
+                {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"},
+            ), patch(
+                "h3.report.requests.post",
+                side_effect=[
+                    SimpleNamespace(status_code=500),
+                    SimpleNamespace(status_code=200),
+                ],
+            ) as post:
+                self.assertTrue(send_telegram_documents(paths))
+            self.assertEqual(post.call_count, 2)
 
     def test_report_uses_plain_account_and_confidential_password_marker(self):
         values = {

@@ -8,6 +8,13 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
+
+try:
+    from box_lottery import is_box_lottery_required
+    from listing_gift import should_claim_listing_gift
+except ImportError:
+    from h3.box_lottery import is_box_lottery_required
+    from h3.listing_gift import should_claim_listing_gift
 try:
     from merge_results import load_single_result, pick_result, safe_int, truthy
 except ImportError:
@@ -192,6 +199,12 @@ def merge_individual_results(results_dir: str, output_path: str) -> int:
         "results": [],
     }
     for row in sorted(merged, key=lambda item: safe_int(item.get("account_index"), 0)):
+        row_task_date = str(row.get("task_start_date") or task_start_date).strip()
+        row_group_code = str(
+            row.get("group_code") or row.get("source_group") or payload.get("group_code") or ""
+        ).strip().lower()
+        box_required = is_box_lottery_required(row_task_date, row_group_code)
+        gift_required = should_claim_listing_gift(row_task_date, row_group_code)
         payload["results"].append(
             {
                 "account_index": safe_int(row.get("account_index"), 0),
@@ -224,12 +237,12 @@ def merge_individual_results(results_dir: str, output_path: str) -> int:
                 "sign_time": row.get("sign_time", ""),
                 "sign_ip": row.get("sign_ip", ""),
                 "activity_records": row.get("activity_records") or {"seckill": [], "lottery": [], "exchange": []},
-                "box_lottery_required": truthy(row.get("box_lottery_required")),
+                "box_lottery_required": box_required,
                 "box_lottery": row.get("box_lottery") if isinstance(row.get("box_lottery"), list) else [],
                 "account_data_required": truthy(row.get("account_data_required")),
                 "account_data_fetch_success": truthy(row.get("account_data_fetch_success")),
                 "account_data": row.get("account_data") or {},
-                "listing_gift_required": truthy(row.get("listing_gift_required")),
+                "listing_gift_required": gift_required,
                 "listing_gift_success": truthy(row.get("listing_gift_success")),
                 "listing_gift_attempted": truthy(row.get("listing_gift_attempted")),
                 "listing_gift_status": row.get("listing_gift_status", ""),

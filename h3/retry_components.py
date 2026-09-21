@@ -5,9 +5,11 @@ import sys
 from pathlib import Path
 
 try:
-    from box_lottery import box_lottery_complete
+    from box_lottery import box_lottery_complete, is_box_lottery_required
+    from listing_gift import should_claim_listing_gift
 except ImportError:
-    from h3.box_lottery import box_lottery_complete
+    from h3.box_lottery import box_lottery_complete, is_box_lottery_required
+    from h3.listing_gift import should_claim_listing_gift
 
 
 COMPONENTS = (
@@ -46,6 +48,28 @@ def vote_is_terminal_insufficient_points(row: dict) -> bool:
     return "\u91d1\u8c46\u4e0d\u8db3" in text
 
 
+def canonical_activity_requirements(row: dict | None) -> tuple[bool, bool]:
+    row = row if isinstance(row, dict) else {}
+    task_date = str(
+        row.get("task_start_date") or row.get("_task_start_date") or ""
+    ).strip()
+    group_code = str(
+        row.get("group_code")
+        or row.get("source_group")
+        or row.get("_group_code")
+        or ""
+    ).strip().lower()
+    if task_date and group_code:
+        return (
+            is_box_lottery_required(task_date, group_code),
+            should_claim_listing_gift(task_date, group_code),
+        )
+    return (
+        truthy(row.get("box_lottery_required")),
+        truthy(row.get("listing_gift_required")),
+    )
+
+
 def component_status(row: dict | None) -> dict[str, bool]:
     row = row if isinstance(row, dict) else {}
     stored = row.get("component_status") if isinstance(row.get("component_status"), dict) else {}
@@ -62,12 +86,12 @@ def component_status(row: dict | None) -> dict[str, bool]:
         or vote_is_terminal_conflict(row)
         or vote_is_terminal_insufficient_points(row)
     )
-    box_required = truthy(row.get("box_lottery_required"))
+    box_required, gift_required = canonical_activity_requirements(row)
     box_complete = (
         truthy(row.get("banned_account"))
         or box_lottery_complete(box_required, row.get("box_lottery"))
     )
-    gift_complete = not truthy(row.get("listing_gift_required")) or truthy(
+    gift_complete = not gift_required or truthy(
         row.get("listing_gift_success")
     )
     activity_success = truthy(row.get("activity_fetch_success"))

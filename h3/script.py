@@ -2521,7 +2521,19 @@ class ApiClient:
                 data = response.get("data") if isinstance(response.get("data"), dict) else {}
                 prizes = data.get("prizeList") if isinstance(data.get("prizeList"), list) else []
                 record["prizes"] = [
-                    {"name": str(item.get("prizeTitle") or "未命名奖励"), "winCode": str(item.get("winCode") or ""), "claim_status": "待领取"}
+                    {
+                        "name": str(item.get("prizeTitle") or "未命名奖励"),
+                        "prize_type": item.get("prizeType"),
+                        "quantity": safe_int(
+                            item.get("quantity")
+                            or item.get("prizeNum")
+                            or item.get("num")
+                            or item.get("count"),
+                            1,
+                        ),
+                        "winCode": str(item.get("winCode") or ""),
+                        "claim_status": "待领取",
+                    }
                     for item in prizes if isinstance(item, dict)
                 ]
                 record["draw_success"] = True
