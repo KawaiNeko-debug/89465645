@@ -173,18 +173,11 @@ def merge_component_fields(picked: dict, fallback: dict | None):
     }
     picked_box = picked.get("box_lottery") if isinstance(picked.get("box_lottery"), list) else []
     fallback_box = fallback.get("box_lottery") if isinstance(fallback.get("box_lottery"), list) else []
-    merged_box = []
-    for index in range(max(len(picked_box), len(fallback_box))):
-        current = picked_box[index] if index < len(picked_box) and isinstance(picked_box[index], dict) else {}
-        candidate = fallback_box[index] if index < len(fallback_box) and isinstance(fallback_box[index], dict) else {}
-        current_complete = truthy(current.get("terminal")) or (
-            truthy(current.get("draw_success")) and truthy(current.get("claim_success"))
-        )
-        candidate_complete = truthy(candidate.get("terminal")) or (
-            truthy(candidate.get("draw_success")) and truthy(candidate.get("claim_success"))
-        )
-        merged_box.append(candidate if candidate_complete and not current_complete else current or candidate)
-    picked["box_lottery"] = merged_box
+    try:
+        from box_lottery import merge_box_records
+    except ImportError:
+        from h3.box_lottery import merge_box_records
+    picked["box_lottery"] = merge_box_records(picked_box, fallback_box)
     picked_box_reward = safe_float(picked.get("box_lottery_points_reward"), 0.0)
     fallback_box_reward = safe_float(fallback.get("box_lottery_points_reward"), 0.0)
     if fallback_box_reward > picked_box_reward:

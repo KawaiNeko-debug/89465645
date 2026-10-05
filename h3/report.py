@@ -399,7 +399,9 @@ def normalize_record(
         listing_gift_status = "缺少礼包领取结果"
     elif not listing_gift_required:
         listing_gift_status = "非星火会礼包领取日期或当前组不适用"
-    box_lottery_required = is_box_lottery_required(task_start_date, group_code)
+    box_lottery_required = is_box_lottery_required(
+        task_start_date, group_code, record.get("assigned_date", "")
+    )
     return {
         "account_index": account_index,
         "execution_order": safe_int(record.get("execution_order"), 0),
@@ -435,6 +437,9 @@ def normalize_record(
         "data_fetch_completed": data_fetch_completed,
         "next_day_success": next_day_success,
         "task_start_date": task_start_date,
+        "week_id": str(record.get("week_id") or "").strip(),
+        "assigned_date": str(record.get("assigned_date") or "").strip(),
+        "weekly_box_lottery": truthy(record.get("weekly_box_lottery")),
         "sign_completed_at": str(record.get("sign_completed_at") or "").strip(),
         "retry_count": safe_int(record.get("retry_count"), 0),
         "is_final_retry": truthy(record.get("is_final_retry")),
@@ -882,6 +887,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         lines.extend(
             [
                 f"  ├── 抽奖成功: {summary['box_draw_success']}/{summary['box_lottery_required']}",
+                f"  ├── 无抽奖次数账号数: {summary['box_no_chance']}",
                 f"  ├── 有中奖记录账号: {summary['box_winning_accounts']}",
                 f"  ├── 抽奖结果总数: {summary['box_result_count']}",
                 f"  ├── 盲盒优惠券种类: {summary['box_coupon_type_count']}",
@@ -1222,6 +1228,15 @@ def summarize_box_lottery(records: list[dict]) -> dict:
         if isinstance(prize, dict) and is_box_coupon_prize(prize)
         for quantity in (box_prize_quantity(prize),)
     )
+    try:
+        from h3.weekly_box_schedule import no_chance
+    except ImportError:
+        from weekly_box_schedule import no_chance
+    no_chance_count = sum(no_chance(item.get('box_lottery')) for item in required_records)
+    unfinished = sum(not box_lottery_complete(item) or any(
+        draw.get('draw_status') == '结果未知' for draw in item.get('box_lottery', [])
+        if isinstance(draw, dict)
+    ) for item in required_records)
     required = len(required_records)
     return {
         "box_draw_success": draw_success,
@@ -1229,7 +1244,8 @@ def summarize_box_lottery(records: list[dict]) -> dict:
         "box_result_count": sum(prize_counts.values()),
         "box_coupon_type_count": len(coupon_counts),
         "box_coupon_total": coupon_total,
-        "box_unfinished": max(0, required - draw_success),
+        "box_unfinished": unfinished,
+        "box_no_chance": no_chance_count,
         "box_draw_success_rate": (draw_success / required * 100) if required else 0.0,
         "box_prize_counts": prize_counts,
         "box_coupon_counts": coupon_counts,
@@ -1994,6 +2010,17 @@ def main():
     records = merge_records_with_expected(
         raw_records, account_lookup, target_date_text(manifest)
     )
+    # Missing batch artifacts must retain today's assigned lottery obligation.
+    assignments = manifest.get('weekly_assignments', {})
+    for record in records:
+        assignment = assignments.get(
+            f"{record.get('group_code')}:{record.get('account_index')}"
+        )
+        if assignment:
+            record.update(assignment)
+            record['box_lottery_required'] = is_box_lottery_required(
+                record['task_start_date'], record['group_code'], assignment['assigned_date']
+            )
     for record in records:
         key = record_key(record)
         credential = credential_lookup.get(key, {}) if key is not None else {}

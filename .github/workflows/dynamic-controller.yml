@@ -162,7 +162,7 @@ env:
   zh20: ${{ secrets.zh20 }}
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:

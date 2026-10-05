@@ -283,6 +283,9 @@ def execution_context() -> dict:
         'account_category': (os.getenv('ACCOUNT_CATEGORY') or default_category).strip(),
         'execution_mode': (os.getenv('EXECUTION_MODE') or ('skip_sign' if skip_sign else 'full')).strip(),
         'sign_skipped': skip_sign,
+        'weekly_box_lottery': truthy(os.getenv('WEEKLY_BOX_LOTTERY_ENABLED')),
+        'week_id': (os.getenv('WEEKLY_BOX_LOTTERY_WEEK_ID') or '').strip(),
+        'assigned_date': (os.getenv('WEEKLY_BOX_LOTTERY_ASSIGNED_DATE') or '').strip(),
     }
 
 
@@ -2393,7 +2396,7 @@ class ApiClient:
         self._campaign_session_established = True
         return True
 
-    def _claim_box_prizes(self, record: dict) -> None:
+    def _claim_box_prizes(self, record: dict, progress_callback=None) -> None:
         prizes = record.get("prizes") if isinstance(record.get("prizes"), list) else []
         if not prizes:
             record["claim_success"] = True
@@ -2431,6 +2434,8 @@ class ApiClient:
                 prize["claim_status"] = "领取失败"
                 prize["claim_detail"] = reason
                 failures.append(reason)
+            if progress_callback:
+                progress_callback()
         record["claim_success"] = not failures
         record["claim_status"] = "领取成功" if not failures else "部分领取失败"
         record["claim_detail"] = "；".join(dict.fromkeys(failures))
@@ -2464,12 +2469,42 @@ class ApiClient:
         if not self.box_lottery_required:
             self.box_lottery = empty_box_lottery()
             for item in self.box_lottery:
-                item["draw_status"] = "非周六或当前组不适用"
+                item["draw_status"] = "非分配日或当前组不适用"
                 item["claim_status"] = "不适用"
             return True
         self.box_lottery = (self.box_lottery or empty_box_lottery())[:2]
         while len(self.box_lottery) < 2:
             self.box_lottery.append(empty_box_lottery()[len(self.box_lottery)])
+        checkpoint = None
+        context = execution_context()
+        if context.get('weekly_box_lottery'):
+            try:
+                try:
+                    from h3.weekly_box_schedule import AccountCheckpoint, WeeklyStore
+                except ImportError:
+                    from weekly_box_schedule import AccountCheckpoint, WeeklyStore
+                checkpoint = AccountCheckpoint(WeeklyStore(), {
+                    'week_id': context['week_id'], 'source_group': context['source_group'],
+                    'account_index': self.account_index, 'assigned_date': context['assigned_date'],
+                })
+                # Load only the box component. Yesterday's sign/data success
+                # must never suppress today's normal daily operations.
+                if checkpoint.rows:
+                    try:
+                        from box_lottery import merge_box_records
+                    except ImportError:
+                        from h3.box_lottery import merge_box_records
+                    self.box_lottery = merge_box_records(checkpoint.rows, self.box_lottery)
+                    while len(self.box_lottery) < 2:
+                        self.box_lottery.append(empty_box_lottery()[len(self.box_lottery)])
+            except Exception:
+                log(f"账号{self.account_index} - 周状态读取失败，本次不发起抽奖，其他组件继续")
+                return False
+
+        def persist_progress():
+            if checkpoint:
+                checkpoint.save(self.box_lottery)
+
         log(f"账号{self.account_index} - 开始执行纸盒抽奖，最多两次并自动领取奖励")
         for index, record in enumerate(self.box_lottery, start=1):
             if truthy(record.get("terminal")):
@@ -2477,7 +2512,12 @@ class ApiClient:
                 continue
             if truthy(record.get("draw_success")):
                 if not truthy(record.get("claim_success")):
-                    self._claim_box_prizes(record)
+                    try:
+                        self._claim_box_prizes(record, persist_progress)
+                        persist_progress()
+                    except Exception:
+                        log(f"账号{self.account_index} - 领奖进度保存失败，暂停纸盒组件")
+                        return False
                     log(
                         f"账号{self.account_index} - 纸盒抽奖第{index}次仅补领奖励："
                         f"{record.get('claim_status') or '未确认'}"
@@ -2489,6 +2529,19 @@ class ApiClient:
                 time.sleep(random.uniform(8, 15))
             record["attempt"] = index
             record["draw_time"] = current_time_text()
+            if checkpoint:
+                # Reserve the attempt durably BEFORE sending /turn. A crash
+                # or timeout must not cause a later Runner to draw it again.
+                before_reservation = deepcopy(record)
+                record.update(terminal=True, draw_status="结果未知", claim_status="未执行")
+                try:
+                    persist_progress()
+                except Exception:
+                    record.clear()
+                    record.update(before_reservation)
+                    log(f"账号{self.account_index} - 无法安全预留抽奖次数，本次不请求抽奖")
+                    return False
+                record["terminal"] = False
             try:
                 response = self._browser_fetch_json_once(
                     "POST",
@@ -2502,7 +2555,7 @@ class ApiClient:
                     reason = build_detail_reason(response, "抽奖未成功")
                     record["draw_status"] = reason
                     record["claim_status"] = "未执行"
-                    if any(marker in reason for marker in ("次数不足", "已达上限", "没有抽奖次数", "已抽完")):
+                    if any(marker in reason for marker in ("次数不足", "已达上限", "没有抽奖次数", "暂无抽奖机会", "暂无抽奖次数", "没有抽奖机会", "已抽完")):
                         record["terminal"] = True
                         record["claim_success"] = True
                         record["claim_status"] = "业务终态"
@@ -2515,8 +2568,10 @@ class ApiClient:
                                 "claim_status": "业务终态",
                             })
                             log(f"账号{self.account_index} - 纸盒抽奖次数不可用：{reason}")
+                            persist_progress()
                             break
                     log(f"账号{self.account_index} - 纸盒抽奖第{index}次未成功：{reason}")
+                    persist_progress()
                     continue
                 data = response.get("data") if isinstance(response.get("data"), dict) else {}
                 prizes = data.get("prizeList") if isinstance(data.get("prizeList"), list) else []
@@ -2538,17 +2593,29 @@ class ApiClient:
                 ]
                 record["draw_success"] = True
                 record["draw_status"] = "抽奖成功" if prizes else "抽奖成功但无奖励"
-                self._claim_box_prizes(record)
+                # Save winCode before claiming so a new Runner can claim only.
+                persist_progress()
+                self._claim_box_prizes(record, persist_progress)
+                persist_progress()
                 log(
                     f"账号{self.account_index} - 纸盒抽奖第{index}次："
                     f"{record['draw_status']}；{record.get('claim_status') or '未确认'}"
                 )
             except Exception as exc:
-                record["draw_status"] = "结果未知"
-                record["terminal"] = True
-                record["claim_status"] = "未执行"
+                if truthy(record.get('draw_success')):
+                    record['terminal'] = False
+                    record['claim_success'] = False
+                    record['claim_status'] = '领奖待补偿'
+                else:
+                    record["draw_status"] = "结果未知"
+                    record["terminal"] = True
+                    record["claim_status"] = "未执行"
                 record["claim_detail"] = type(exc).__name__
-                log(f"账号{self.account_index} - 纸盒抽奖第{index}次结果未知，不自动重复抽奖")
+                log(f"账号{self.account_index} - 纸盒抽奖第{index}次需核查或补领，不重复已发起的抽奖")
+                try:
+                    persist_progress()
+                except Exception:
+                    return False
         return box_lottery_complete(True, self.box_lottery)
 
     def execute_campaign_vote(self) -> bool:
@@ -3788,6 +3855,9 @@ def write_results_json(path, all_results, total_accounts):
                 "vote_detail": r.get("vote_detail"),
                 "box_lottery_required": r.get("box_lottery_required"),
                 "box_lottery": r.get("box_lottery") or empty_box_lottery(),
+                "week_id": execution.get("week_id", ""),
+                "assigned_date": execution.get("assigned_date", ""),
+                "weekly_box_lottery": execution.get("weekly_box_lottery", False),
                 "component_status": component_status(r),
                 "group_code": r.get("group_code") or execution["group_code"],
                 "source_group": r.get("source_group") or execution["source_group"],

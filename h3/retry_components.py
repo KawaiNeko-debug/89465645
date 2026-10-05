@@ -61,7 +61,7 @@ def canonical_activity_requirements(row: dict | None) -> tuple[bool, bool]:
     ).strip().lower()
     if task_date and group_code:
         return (
-            is_box_lottery_required(task_date, group_code),
+            is_box_lottery_required(task_date, group_code, row.get("assigned_date", "")),
             should_claim_listing_gift(task_date, group_code),
         )
     return (

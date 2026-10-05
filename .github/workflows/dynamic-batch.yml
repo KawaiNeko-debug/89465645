@@ -221,7 +221,7 @@ env:
   BATCH_ID: ${{ inputs.batch_id }}
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:
@@ -273,6 +273,12 @@ jobs:
       ACCOUNT_CATEGORY: ${{ matrix.account_category }}
       EXECUTION_MODE: ${{ matrix.execution_mode }}
       SKIP_SIGN: ${{ matrix.skip_sign }}
+      WEEKLY_BOX_LOTTERY_ENABLED: ${{ matrix.weekly_box_lottery || false }}
+      WEEKLY_BOX_LOTTERY_WEEK_ID: ${{ matrix.week_id }}
+      WEEKLY_BOX_LOTTERY_ASSIGNED_DATE: ${{ matrix.assigned_date }}
+      WEEKLY_BOX_STATE_KEY: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_API_URL: ${{ github.api_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/run-mixed-account
@@ -425,7 +431,7 @@ jobs:
           name: batch-result-${{ inputs.orchestration_id }}-${{ inputs.batch_id }}
           path: merged/result.json
           if-no-files-found: warn
-          retention-days: 2
+          retention-days: 10
       - name: Continue mixed batch chain
         if: ${{ always() && inputs.continue_chain && !inputs.test_mode && !inputs.gift_test_mode }}
         env:

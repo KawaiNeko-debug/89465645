@@ -337,6 +337,20 @@ def load_chain_state(raw: str) -> dict:
             if code in FROZEN_GROUP_CODES:
                 group["account_category"] = category_for(code)
     _assert_no_credentials(state)
+    assignments = state.get('weekly_assignments', {})
+    if not isinstance(assignments, dict):
+        raise ValueError('weekly assignments must be an object')
+    for identity, assignment in assignments.items():
+        try:
+            code, index = identity.split(':')
+            if code not in GROUP_CODES or int(index) < 1:
+                raise ValueError('invalid weekly account')
+            if set(assignment) != {'week_id', 'assigned_date', 'weekly_box_lottery'}:
+                raise ValueError('invalid weekly metadata')
+            if str(assignment['week_id']) != str(state['week_id']):
+                raise ValueError('weekly assignment has a different cycle')
+        except (TypeError, KeyError, ValueError) as exc:
+            raise ValueError('invalid weekly assignment') from exc
     return state
 
 
@@ -357,6 +371,10 @@ def batch_accounts(state: dict, batch_id: str) -> list[dict]:
     selected = [deepcopy(item) for item in ordered[start : start + batch["account_count"]]]
     for item in selected:
         item["batch_id"] = batch_id
+        assignments = state.get("weekly_assignments", {})
+        assignment = assignments.get(f"{item['source_group']}:{item['account_index']}")
+        if assignment:
+            item.update(assignment)
     return selected
 
 
@@ -413,6 +431,27 @@ def start_chain(args) -> int:
         args.task_start_date,
         args.batch_size,
     )
+    try:
+        from h3.weekly_box_schedule import WeeklyStore, enabled_for
+    except ImportError:
+        from weekly_box_schedule import WeeklyStore, enabled_for
+    if enabled_for(state['task_start_date']):
+        try:
+            roster = WeeklyStore().freeze(
+                accounts_from_group_counts(state['group_counts']), state['task_start_date']
+            )
+            state['weekly_assignments'] = {
+                f"{item['source_group']}:{item['account_index']}": {
+                    key: item[key] for key in ('week_id', 'assigned_date', 'weekly_box_lottery')
+                }
+                for item in roster['accounts']
+            }
+            state['week_id'] = roster['week_id']
+        except Exception:
+            # Fail closed for lottery only. A state service outage must not
+            # discard today's entire sign-in/data/report chain.
+            state['weekly_schedule_error'] = '周计划不可用，纸盒暂停，其余日常流程继续'
+            print('::warning::weekly schedule unavailable; lottery paused, daily chain continues')
     write_json(args.output, state)
     if state["batches"]:
         dispatch_batch(state, state["batches"][0]["batch_id"])

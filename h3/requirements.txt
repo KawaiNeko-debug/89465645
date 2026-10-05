@@ -3,3 +3,4 @@ python-dotenv
 fake-useragent
 playwright
 openpyxl
+cryptography

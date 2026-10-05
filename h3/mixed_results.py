@@ -83,6 +83,9 @@ def metadata_from_env() -> dict:
         "account_category": str(os.getenv("ACCOUNT_CATEGORY") or "").strip(),
         "execution_mode": str(os.getenv("EXECUTION_MODE") or "").strip(),
         "sign_skipped": truthy(os.getenv("SKIP_SIGN")),
+        "week_id": os.getenv("WEEKLY_BOX_LOTTERY_WEEK_ID", ""),
+        "assigned_date": os.getenv("WEEKLY_BOX_LOTTERY_ASSIGNED_DATE", ""),
+        "weekly_box_lottery": truthy(os.getenv("WEEKLY_BOX_LOTTERY_ENABLED")),
     }
 
 
@@ -161,6 +164,8 @@ def applicable_components(account: dict, task_date: str) -> list[str]:
         components.remove("gift")
     if not is_vote_date(task_date):
         components.remove("vote")
+    if not is_box_lottery_required(task_date, source_group, account.get("assigned_date", "")):
+        components.remove("box_lottery")
     return components
 
 
@@ -184,6 +189,9 @@ def build_retry_matrix(
                 "account_category",
                 "execution_mode",
                 "skip_sign",
+                "week_id",
+                "assigned_date",
+                "weekly_box_lottery",
             )
         }
         row = rows.get(identity(account))
@@ -233,7 +241,7 @@ def missing_result(account: dict, task_date: str) -> dict:
     skip_sign = truthy(account.get("skip_sign"))
     gift_required = should_claim_listing_gift(task_date, source_group)
     vote_required = is_vote_date(task_date)
-    box_required = is_box_lottery_required(task_date, source_group)
+    box_required = is_box_lottery_required(task_date, source_group, account.get("assigned_date", ""))
     row = {
         **deepcopy(account),
         "group_code": source_group,
@@ -327,9 +335,14 @@ def merge_results(results_dir: str | Path, output_path: str | Path, batch_accoun
                 f"{account.get('source_group')}账号{account.get('account_index')}"
             )
             selected["sign_skipped"] = truthy(account.get("skip_sign"))
+            selected["week_id"] = account.get("week_id", selected.get("week_id", ""))
+            selected["assigned_date"] = account.get("assigned_date", selected.get("assigned_date", ""))
+            selected["weekly_box_lottery"] = truthy(
+                account.get("weekly_box_lottery", selected.get("weekly_box_lottery"))
+            )
             selected["task_start_date"] = task_date
             selected["box_lottery_required"] = is_box_lottery_required(
-                task_date, account.get("source_group")
+                task_date, account.get("source_group"), selected.get("assigned_date", "")
             )
             selected["listing_gift_required"] = should_claim_listing_gift(
                 task_date, account.get("source_group")
