@@ -16,6 +16,17 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as Playwrigh
 from fake_useragent import UserAgent
 
 try:
+    from seventh_reward import (
+        applies as reward_strategy_applies, choose_reward, empty_reward,
+        safe_reward, merge_reward,
+    )
+except ImportError:
+    from h3.seventh_reward import (
+        applies as reward_strategy_applies, choose_reward, empty_reward,
+        safe_reward, merge_reward,
+    )
+
+try:
     from campaign_vote import (
         ACTIVITY_CONFIG_PATH,
         ACTIVITY_WINNING_PATH,
@@ -139,7 +150,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-09-18-box-lottery-balance-v1"
+SCRIPT_VERSION = "2026-10-14-seventh-reward-quota-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -1065,6 +1076,7 @@ class ApiClient:
 
         self.sign_status = "未知"
         self.has_reward = False
+        self.seventh_reward = empty_reward()
 
         self.today_day = 0
         self.detail_reason = ""
@@ -1120,6 +1132,11 @@ class ApiClient:
         if not isinstance(previous, dict):
             return
         status = component_status(previous)
+        self.seventh_reward = (
+            safe_reward(previous.get('seventh_reward'))
+            if reward_strategy_applies(execution_context().get('group_code'))
+            else empty_reward()
+        )
         if status["sign"]:
             self.sign_status = str(previous.get("sign_status") or self.sign_status)
             self.sign_completed_at = str(previous.get("sign_completed_at") or "")
@@ -2748,7 +2765,41 @@ class ApiClient:
         log(f"账号{self.account_index} - 📅 签到配置解析：今天第 {today_day} 天，haveSignIn={have_signed}, haveReceive={have_receive}")
         return have_signed, today_day, have_receive, data
 
+    def reward_request(self, path, params):
+        # Claims never use the generic retry helper or print request bodies.
+        try:
+            response = requests.get(f'{self.base_url}{path}', params=params,
+                                    headers=self.headers, timeout=20)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            return data if isinstance(data, dict) else None
+        except Exception:
+            return None
+
+    def execute_seventh_reward(self, current=None):
+        group = execution_context().get('group_code')
+        if not reward_strategy_applies(group):
+            return
+        if self.seventh_reward['required'] and self.seventh_reward['complete']:
+            return
+        if current is None:
+            response = self.reward_request(SIGN_CONFIG_PATH, {})
+            current = response.get('data') if response and (
+                response.get('success') is True or (response.get('success') is not False and response.get('code') == 200)
+            ) else None
+        self.seventh_reward = choose_reward(
+            group, self.account_index, normalize_task_start_date(), current,
+            self.reward_request, previous=self.seventh_reward,
+        )
+        log(f"账号{self.account_index} - 七天奖励：{self.seventh_reward['status']}")
+
     def receive_voucher(self):
+        if reward_strategy_applies(execution_context().get('group_code')):
+            self.execute_seventh_reward()
+            reward = self.seventh_reward
+            if reward['required']:
+                return reward['complete'], 0, {'success': reward['complete']}
         url = f"{self.base_url}{RECEIVE_VOUCHER_PATH}"
         data = self.get_json_retry1(url, tag="领取奖励", dump_body_on_error=True, dump_json_on_success_false=True)
 
@@ -2759,7 +2810,7 @@ class ApiClient:
 
         if is_risk_control_response(data):
             self._mark_failure("签到风控", raw=data)
-            return False
+            return False, 0, data
         if data and data.get("success"):
             log(f"账号{self.account_index} - ❌ 领取奖励接口 success=true 但 data 异常: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
         else:
@@ -2869,7 +2920,33 @@ class ApiClient:
         log(f"账号{self.account_index} - ❌ 签到失败")
         return False
 
+    def execute_wudi_sign_process(self):
+        self.initial_points = self.get_points() or 0
+        cfg = self.get_sign_config()
+        if cfg is None:
+            self.sign_status = '检查失败'
+            return False
+        have_signed, _, _, response = cfg
+        current = response.get('data') or {}
+        if not truthy(current.get('haveReceive')) and current.get('signModeCode') == 'sign002':
+            self.execute_seventh_reward(current)
+        if have_signed:
+            success = True
+            self.sign_status = '已签到过'
+            self.sign_completed_at = self.sign_completed_at or current_time_text()
+        else:
+            success = self.sign_in()
+        # A successful seventh sign exposes the choice in the refreshed config.
+        # Reward failure must not erase an already successful sign component.
+        if success and current.get('signModeCode') == 'sign002':
+            self.execute_seventh_reward()
+        self.final_points = self.get_points() or self.initial_points
+        self.points_reward = self.final_points - self.initial_points
+        return success
+
     def execute_full_process(self):
+        if reward_strategy_applies(execution_context().get('group_code')):
+            return self.execute_wudi_sign_process()
         time.sleep(random.uniform(1, 2))
         self.initial_points = self.get_points() or 0
         time.sleep(random.uniform(1, 2))
@@ -3038,6 +3115,7 @@ def sign_in_account(
         'vote_detail': '',
         'box_lottery_required': is_box_lottery_required(task_start_date, execution.get('group_code')),
         'box_lottery': empty_box_lottery(),
+        'seventh_reward': empty_reward(),
         **execution,
     }
     if previous_result:
@@ -3070,6 +3148,7 @@ def sign_in_account(
         browser = None
         context = None
         page = None
+        client = None
         try:
             browser = p.chromium.launch(
                 headless=True,
@@ -3221,6 +3300,10 @@ def sign_in_account(
                             client.final_points = latest_points
                             client.points_reward = client.final_points - client.initial_points
 
+                if ("seventh_reward" in components and "sign" not in components
+                        and not banned_account and not skip_sign):
+                    client.execute_seventh_reward()
+
                 if "box_lottery" in components and can_run_box_lottery_after_sign(
                     client.box_lottery_required,
                     truthy(success),
@@ -3246,6 +3329,13 @@ def sign_in_account(
                     data_components.add("coupons")
                 if "box_lottery" in components:
                     data_components.add("balance")
+                if client.seventh_reward['required']:
+                    data_components.add('coupons')
+                    if client.seventh_reward['complete']:
+                        latest_points = client.get_points()
+                        if latest_points is not None:
+                            client.final_points = latest_points
+                            client.points_reward = latest_points - client.initial_points
                 client.fetch_account_data(data_components)
                 client.fetch_activity_records(components)
                 if VOTE_ENABLED and "vote" in components:
@@ -3306,6 +3396,7 @@ def sign_in_account(
                     'vote_detail': client.vote_detail,
                     'box_lottery_required': client.box_lottery_required,
                     'box_lottery': client.box_lottery,
+                    'seventh_reward': safe_reward(client.seventh_reward),
                     'component_status': {
                         'login': True,
                         'sign': (
@@ -3359,6 +3450,12 @@ def sign_in_account(
                 if banned_account else f'执行异常: {error_text}'
             )
         finally:
+            if client is not None:
+                result['seventh_reward'] = safe_reward(client.seventh_reward)
+                if truthy(locals().get('success')):
+                    result['sign_success'] = True
+                    result['sign_status'] = client.sign_status
+                    result['sign_completed_at'] = client.sign_completed_at
             if context:
                 context.close()
             if browser:
@@ -3529,6 +3626,7 @@ def process_single_account(username, password, account_index, total_accounts):
             for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in res:
                     merged[key] = res.get(key)
+        merged['seventh_reward'] = merge_reward(res.get('seventh_reward'), merged.get('seventh_reward'))
         for key in EXECUTION_RESULT_FIELDS:
             if key in res:
                 merged[key] = res.get(key)
@@ -3673,6 +3771,7 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in final:
                     orig[key] = final.get(key)
+        orig['seventh_reward'] = merge_reward(final.get('seventh_reward'), orig.get('seventh_reward'))
         for key in EXECUTION_RESULT_FIELDS:
             if key in final:
                 orig[key] = final.get(key)
@@ -3855,6 +3954,7 @@ def write_results_json(path, all_results, total_accounts):
                 "vote_detail": r.get("vote_detail"),
                 "box_lottery_required": r.get("box_lottery_required"),
                 "box_lottery": r.get("box_lottery") or empty_box_lottery(),
+                "seventh_reward": safe_reward(r.get("seventh_reward")),
                 "week_id": execution.get("week_id", ""),
                 "assigned_date": execution.get("assigned_date", ""),
                 "weekly_box_lottery": execution.get("weekly_box_lottery", False),

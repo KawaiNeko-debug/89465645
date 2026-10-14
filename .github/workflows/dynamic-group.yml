@@ -52,6 +52,8 @@ on:
 
 env:
   TZ: Asia/Shanghai
+  GITHUB_TOKEN: ${{ github.token }}
+  GITHUB_API_URL: ${{ github.api_url }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   old1: ${{ secrets.old1 }}
   old2: ${{ secrets.old2 }}
@@ -196,7 +198,7 @@ env:
   test: ${{ secrets.TEST }}
 
 permissions:
-  contents: read
+  contents: write
   actions: write
 
 jobs:

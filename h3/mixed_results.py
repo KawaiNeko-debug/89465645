@@ -13,6 +13,7 @@ try:
     from listing_gift import should_claim_listing_gift
     from merge_results import pick_result
     from retry_components import COMPONENTS, component_status, retry_components
+    from seventh_reward import record_reward, empty_reward, applies as reward_strategy_applies
 except ImportError:
     from h3.box_lottery import is_box_lottery_required
     from h3.account_data import empty_account_data
@@ -20,6 +21,7 @@ except ImportError:
     from h3.listing_gift import should_claim_listing_gift
     from h3.merge_results import pick_result
     from h3.retry_components import COMPONENTS, component_status, retry_components
+    from h3.seventh_reward import record_reward, empty_reward, applies as reward_strategy_applies
 
 
 SENSITIVE_RESULT_KEYS = {
@@ -102,6 +104,7 @@ def stamp_result(path: str | Path) -> int:
             continue
         row = sanitized(raw)
         row.update(metadata)
+        row['seventh_reward'] = record_reward(row)
         row["group_name"] = metadata["source_group"]
         row["group_position"] = (
             f"{metadata['source_group']}账号{metadata['account_index']}"
@@ -158,6 +161,8 @@ def result_map(results_dir: str | Path) -> dict[tuple[str, int], dict]:
 def applicable_components(account: dict, task_date: str) -> list[str]:
     components = list(COMPONENTS)
     source_group = str(account.get("source_group") or "").strip().lower()
+    if not reward_strategy_applies(source_group) or truthy(account.get('skip_sign')):
+        components.remove('seventh_reward')
     if truthy(account.get("skip_sign")) or source_group.startswith(("ll", "zh")):
         components.remove("sign")
     if not should_claim_listing_gift(task_date, source_group):
@@ -273,6 +278,7 @@ def missing_result(account: dict, task_date: str) -> dict:
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "box_lottery_required": box_required,
         "box_lottery": [],
+        "seventh_reward": empty_reward(),
         "account_data_required": True,
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),

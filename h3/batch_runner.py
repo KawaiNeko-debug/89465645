@@ -9,6 +9,11 @@ import time
 from datetime import datetime
 
 try:
+    from seventh_reward import safe_reward
+except ImportError:
+    from h3.seventh_reward import safe_reward
+
+try:
     from campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
 except ImportError:
     from h3.campaign_vote import VOTE_PRODUCT_NAME, VOTE_PRODUCT_SKU, is_vote_date
@@ -194,6 +199,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "activity_records": raw.get("activity_records") or {"seckill": [], "lottery": [], "exchange": []},
             "box_lottery_required": truthy(raw.get("box_lottery_required")),
             "box_lottery": raw.get("box_lottery") if isinstance(raw.get("box_lottery"), list) else [],
+            "seventh_reward": safe_reward(raw.get('seventh_reward')),
             "account_data_required": truthy(raw.get("account_data_required")),
             "account_data_fetch_success": truthy(raw.get("account_data_fetch_success")),
             "account_data": raw.get("account_data") if isinstance(raw.get("account_data"), dict) else empty_account_data(),
@@ -324,6 +330,7 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "activity_records": item.get("activity_records") or {"seckill": [], "lottery": [], "exchange": []},
                 "box_lottery_required": item.get("box_lottery_required", False),
                 "box_lottery": item.get("box_lottery") or [],
+                "seventh_reward": safe_reward(item.get('seventh_reward')),
                 "account_data_required": item.get("account_data_required", False),
                 "account_data_fetch_success": item.get("account_data_fetch_success", False),
                 "account_data": item.get("account_data") or empty_account_data(),

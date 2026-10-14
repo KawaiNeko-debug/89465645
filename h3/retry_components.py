@@ -5,6 +5,11 @@ import sys
 from pathlib import Path
 
 try:
+    from seventh_reward import record_reward
+except ImportError:
+    from h3.seventh_reward import record_reward
+
+try:
     from box_lottery import box_lottery_complete, is_box_lottery_required
     from listing_gift import should_claim_listing_gift
 except ImportError:
@@ -14,6 +19,7 @@ except ImportError:
 
 COMPONENTS = (
     "sign",
+    "seventh_reward",
     "points",
     "invoice",
     "pcb_orders",
@@ -74,6 +80,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
     row = row if isinstance(row, dict) else {}
     stored = row.get("component_status") if isinstance(row.get("component_status"), dict) else {}
     account_data = row.get("account_data") if isinstance(row.get("account_data"), dict) else {}
+    seventh_reward = record_reward(row)
     sign_complete = (
         truthy(row.get("sign_success"))
         or truthy(row.get("sign_skipped"))
@@ -98,6 +105,11 @@ def component_status(row: dict | None) -> dict[str, bool]:
     result = {
         "login": truthy(row.get("token_extracted")),
         "sign": sign_complete,
+        "seventh_reward": (
+            not truthy(seventh_reward.get('required'))
+            or truthy(seventh_reward.get('complete'))
+            or truthy(row.get('banned_account'))
+        ),
         "points": truthy(row.get("points_fetch_success")),
         "invoice": truthy(account_data.get("invoice_fetch_success")),
         "pcb_orders": truthy(account_data.get("pcb_order_fetch_success")),
@@ -114,7 +126,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
         "box_lottery": box_complete,
     }
     for key in result:
-        if key == "box_lottery":
+        if key in ("box_lottery", "seventh_reward"):
             continue
         if key in stored:
             result[key] = result[key] or truthy(stored[key])

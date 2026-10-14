@@ -6,6 +6,11 @@ import sys
 from datetime import datetime
 
 try:
+    from seventh_reward import merge_reward, safe_reward
+except ImportError:
+    from h3.seventh_reward import merge_reward, safe_reward
+
+try:
     from retry_components import canonical_activity_requirements, component_status
 except ImportError:
     from h3.retry_components import canonical_activity_requirements, component_status
@@ -138,6 +143,8 @@ def merge_component_fields(picked: dict, fallback: dict | None):
         return
     picked_status = component_status(picked)
     fallback_status = component_status(fallback)
+    picked['seventh_reward'] = merge_reward(picked.get('seventh_reward'), fallback.get('seventh_reward'))
+    picked_status['seventh_reward'] = component_status(picked)['seventh_reward']
     picked_account = picked.get("account_data") if isinstance(picked.get("account_data"), dict) else {}
     fallback_account = fallback.get("account_data") if isinstance(fallback.get("account_data"), dict) else {}
     account_groups = {
@@ -446,6 +453,7 @@ def main():
                 "vote_detail": row.get("vote_detail", ""),
                 "box_lottery_required": truthy(row.get("box_lottery_required")),
                 "box_lottery": row.get("box_lottery") if isinstance(row.get("box_lottery"), list) else [],
+                "seventh_reward": safe_reward(row.get('seventh_reward')),
                 "component_status": component_status(row),
             }
         )

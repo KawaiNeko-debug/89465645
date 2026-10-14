@@ -10,6 +10,17 @@ from datetime import datetime, timedelta, timezone
 from email.header import Header
 from email.mime.text import MIMEText
 
+try:
+    from seventh_reward import (
+        applies as reward_strategy_applies, is_target_coupon, SHELL_COUPON,
+        safe_reward, monthly_summary, record_reward,
+    )
+except ImportError:
+    from h3.seventh_reward import (
+        applies as reward_strategy_applies, is_target_coupon, SHELL_COUPON,
+        safe_reward, monthly_summary, record_reward,
+    )
+
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -427,6 +438,7 @@ def normalize_record(
             record.get("box_lottery_points_reward"), 0.0
         ),
         "has_reward": truthy(record.get("has_reward")),
+        "seventh_reward": record_reward({**record, 'group_code': group_code}),
         "password_error": truthy(record.get("password_error")),
         "account_format_error": truthy(record.get("account_format_error")),
         "account_format_reason": str(record.get("account_format_reason") or "").strip(),
@@ -707,6 +719,9 @@ def is_problem_record(record: dict) -> bool:
             and not truthy(record.get("vote_success"))
         )
         or not box_lottery_complete(record)
+        or (record_reward(record)['required']
+            and (not record_reward(record)['complete']
+                 or record_reward(record)['interface_failed']))
     )
 
 
@@ -744,6 +759,9 @@ def problem_reason(record: dict) -> str:
             )
     if not box_lottery_complete(record):
         reasons.append("纸盒抽奖未完成")
+    reward = record_reward(record)
+    if reward['required'] and (not reward['complete'] or reward['interface_failed']):
+        reasons.append('七天奖励：' + reward['status'])
     return "；".join(dict.fromkeys(reason for reason in reasons if reason))
 
 
@@ -851,6 +869,8 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         if truthy(item.get("box_lottery_required")) and box_lottery_complete(item)
     )
     box_summary = summarize_box_lottery(records)
+    wudi_records = [item for item in records if reward_strategy_applies(item.get('group_code'))]
+    rewards = [record_reward(item) for item in wudi_records]
     return {
         "total": total,
         "success": success,
@@ -870,6 +890,12 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "box_lottery_required": box_lottery_required,
         "box_lottery_success": box_lottery_success,
         **box_summary,
+        'seventh_enabled': bool(wudi_records) or os.getenv('SUMMARY_CATEGORY') == '无敌全干组',
+        'seventh_coupon_accounts': sum(item['choice'] == 'coupon' for item in rewards),
+        'seventh_fallback_accounts': sum(item['fallback'] and item['choice'] == 'beans' for item in rewards),
+        'seventh_already_received': sum(item['status'] == '奖励已领取' for item in rewards),
+        'seventh_interface_failures': sum(item['interface_failed'] for item in rewards),
+        'seventh_period_limits': sum(item['period_limited'] for item in rewards),
     }
 
 
@@ -898,6 +924,19 @@ def build_stats_lines(summary: dict) -> list[str]:
                 f"  ├── 抽奖成功率: {format_percent(summary['box_draw_success_rate'])}%",
             ]
         )
+    if summary.get('seventh_enabled'):
+        monthly = summary.get('seventh_monthly')
+        lines.extend([
+            f"  ├── 本月加急减免券已领取: {monthly['acquired'] if monthly else '数据不足'}",
+            f"  ├── 距离30张还差: {monthly['remaining'] if monthly else '数据不足'}",
+            f"  ├── 选择加急减免券账号数: {summary['seventh_coupon_accounts']}",
+            f"  ├── 奖励不可选而选择金豆账号数: {summary['seventh_fallback_accounts']}",
+            f"  ├── 七天奖励已经领取账号数: {summary['seventh_already_received']}",
+            f"  ├── 七天奖励接口失败: {summary['seventh_interface_failures']}",
+            f"  ├── 七天奖励周期限制: {summary['seventh_period_limits']}",
+        ])
+        if monthly and monthly.get('unknown'):
+            lines.append(f"  ├── 领取结果待核实（不计入已领取）: {monthly['unknown']}")
     lines.extend(
         [
             f"  ├── 总计获得 +{summary['reward']:.1f} 🌽",
@@ -937,6 +976,7 @@ def build_message(
 ) -> tuple[str, dict]:
     sorted_records = sort_records(records)
     summary = build_summary(sorted_records, expected_total)
+    summary['seventh_monthly'] = manifest.get('seventh_reward_monthly')
     problem_records = [record for record in sorted_records if is_problem_record(record)]
     conflict_records = [
         record for record in problem_records if is_vote_conflict_record(record)
@@ -1384,8 +1424,8 @@ def parse_coupon_datetime(value, end_of_day=False):
     return None
 
 
-def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
-    if not isinstance(coupon, dict) or not is_pcb_smt_coupon(coupon):
+def is_current_coupon(coupon: dict, now=None) -> bool:
+    if not isinstance(coupon, dict):
         return False
     if str(coupon.get("status_key") or "unused").lower() != "unused":
         return False
@@ -1399,6 +1439,10 @@ def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
     return not (valid_from and valid_from > now) and not (
         expires_at and expires_at < now
     )
+
+
+def is_current_pcb_smt_coupon(coupon: dict, now=None) -> bool:
+    return is_pcb_smt_coupon(coupon) and is_current_coupon(coupon, now)
 
 
 def invoice_profile_status(record: dict) -> str:
@@ -1518,6 +1562,10 @@ def write_coupon_sheets(workbook, records: list[dict]):
             "unused", []
         ) or []:
             name = str(coupon.get("name") or "未命名优惠券").strip()
+            if is_target_coupon(coupon):
+                if not is_current_coupon(coupon):
+                    continue
+                name = '加急减免券'
             by_name.setdefault(name, []).append(
                 (
                     account,
@@ -1527,7 +1575,8 @@ def write_coupon_sheets(workbook, records: list[dict]):
                 )
             )
     used = set(workbook.sheetnames)
-    for name, rows in sorted(by_name.items(), key=lambda item: item[0]):
+    priority = {'加急减免券': 0, SHELL_COUPON: 1}
+    for name, rows in sorted(by_name.items(), key=lambda item: (priority.get(item[0], 2), item[0])):
         rows.sort(key=coupon_sheet_row_sort_key)
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
         sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
@@ -1976,6 +2025,12 @@ def main():
         for key, value in credential_lookup.items()
     }
     manifest = load_manifest(results_dir)
+    if os.getenv('SUMMARY_CATEGORY') == '无敌全干组':
+        try:
+            manifest['seventh_reward_monthly'] = monthly_summary(target_date_text(manifest)[:7])
+        except Exception:
+            manifest['seventh_reward_monthly'] = None
+            print('[summary] monthly reward count unavailable; other reports continue')
     output_xlsx = resolve_output_xlsx_path(results_dir, manifest)
     raw_records = load_results(results_dir, account_lookup)
     summary_category = str(os.getenv("SUMMARY_CATEGORY") or "").strip()

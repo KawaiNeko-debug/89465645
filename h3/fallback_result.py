@@ -4,6 +4,11 @@ import sys
 from datetime import datetime
 
 try:
+    from seventh_reward import empty_reward
+except ImportError:
+    from h3.seventh_reward import empty_reward
+
+try:
     from box_lottery import is_box_lottery_required
     from campaign_vote import is_vote_date
     from feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
@@ -72,6 +77,7 @@ def main() -> int:
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "box_lottery_required": box_required,
         "box_lottery": [],
+        "seventh_reward": empty_reward(),
         "account_data_required": True,
         "account_data_fetch_success": False,
         "account_data": {"balance_fetch_success": False},

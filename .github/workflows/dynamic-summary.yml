@@ -199,6 +199,9 @@ jobs:
             python h3/dynamic_groups.py download --chain-state-env CHAIN_STATE --output-dir results
           fi
       - name: Generate and send category reports
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
         run: python h3/category_reports.py results
       - name: Upload category reports
         if: always()
