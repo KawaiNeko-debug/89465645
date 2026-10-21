@@ -38,7 +38,7 @@ try:
     )
     from account_data import empty_account_data, is_pcb_smt_coupon
     from campaign_vote import is_vote_date
-    from listing_gift import should_claim_listing_gift, gift_result_success
+    from listing_gift import should_claim_listing_gift, gift_result_success, gift_stock_exhausted
 except ImportError:
     from h3.box_lottery import (
         box_lottery_complete as box_lottery_is_complete,
@@ -46,7 +46,7 @@ except ImportError:
     )
     from h3.account_data import empty_account_data, is_pcb_smt_coupon
     from h3.campaign_vote import is_vote_date
-    from h3.listing_gift import should_claim_listing_gift, gift_result_success
+    from h3.listing_gift import should_claim_listing_gift, gift_result_success, gift_stock_exhausted
 
 for stream_name in ("stdout", "stderr"):
     stream = getattr(sys, stream_name, None)
@@ -895,6 +895,10 @@ def build_summary(records: list[dict], expected_total: int) -> dict:
         "success_rate": success_rate,
         "listing_gift_required": listing_gift_required,
         "listing_gift_success": listing_gift_success,
+        "listing_gift_stock_exhausted": sum(
+            1 for item in records
+            if truthy(item.get("listing_gift_required")) and gift_stock_exhausted(item)
+        ),
         "box_lottery_required": box_lottery_required,
         "box_lottery_success": box_lottery_success,
         **box_summary,
@@ -916,6 +920,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
         f"  ├── 每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+        f"  ├── 每月礼包券余量不足（不再重试）: {summary['listing_gift_stock_exhausted']}个账号",
     ]
     if summary["box_lottery_required"]:
         lines.extend(
@@ -992,6 +997,8 @@ def build_message(
                 reason = '密码错误'
             elif truthy(row.get('account_format_error')):
                 reason = '账号错误：检测到11位手机号，请改用客编'
+            elif gift_stock_exhausted(row):
+                reason = '每月礼包券余量不足（不再重试）'
             elif not gift_result_success(row):
                 reason = '每月礼包领取未完成'
             elif not (row.get('account_data') or {}).get('coupon_fetch_success'):
@@ -1004,6 +1011,7 @@ def build_message(
                         for row in sorted_records)
         lines.extend([f"总账号数: {summary['total']}",
                       f"每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+                      f"券余量不足（不再重试）: {summary['listing_gift_stock_exhausted']}个账号",
                       f'优惠券列表刷新完成: {refreshed}'])
         return '\n'.join(lines), summary
     summary['seventh_monthly'] = manifest.get('seventh_reward_monthly')

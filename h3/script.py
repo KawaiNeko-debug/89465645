@@ -83,6 +83,7 @@ try:
         MonthlyGiftCheckpoint,
         gift_identity,
         gift_result_success,
+        gift_result_rank,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
@@ -117,6 +118,7 @@ except ImportError:
         MonthlyGiftCheckpoint,
         gift_identity,
         gift_result_success,
+        gift_result_rank,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
@@ -1165,7 +1167,7 @@ class ApiClient:
         self.voucher_fetch_success = status["exchange"]
         self.seckill_fetch_success = True
         self.activity_fetch_success = self.lottery_fetch_success and self.voucher_fetch_success
-        if gift_result_success(previous, normalize_task_start_date()):
+        if gift_result_rank(previous, normalize_task_start_date()) > 0:
             for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in previous:
                     setattr(self, key, previous.get(key))
@@ -1917,6 +1919,7 @@ class ApiClient:
     def execute_listing_gift(self, task_date="") -> bool:
         task_date = task_date or current_date_text()
         group = execution_context().get("group_code")
+        prior_gift_rank = gift_result_rank(vars(self), task_date)
         self.listing_gift_id = MONTHLY_GIFT_ID
         self.listing_gift_month = date_part(task_date)[:7]
         self.listing_gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(
@@ -1925,6 +1928,9 @@ class ApiClient:
         if not self.listing_gift_required:
             self.listing_gift_status = "非每月礼包领取日期或当前组不适用"
             return True
+
+        if prior_gift_rank == 1:
+            return False
 
         try:
             checkpoint = MonthlyGiftCheckpoint(task_date, group, self.account_index)
@@ -1983,6 +1989,8 @@ class ApiClient:
                     self.listing_gift_detail = "领取已确认，月度状态保存失败；重跑将核对接口周期限制"
                     log(f"账号{self.account_index} - 月度领取状态保存失败，保留已确认成功结果")
                 return True
+            if last_result.get("state") == "stock_exhausted":
+                break
             if attempt < 3:
                 log(f"账号{self.account_index} - 每月礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
                 time.sleep(0.8 * attempt)
@@ -3566,6 +3574,9 @@ def process_single_account(username, password, account_index, total_accounts):
             pending = scoped_retry_components(merged, explicit_component_scope())
             if not pending:
                 break
+        previous_gift = {key: merged.get(key) for key in (
+            *LISTING_GIFT_RESULT_FIELDS, 'task_start_date'
+        )}
         res = sign_in_account(
             username,
             password,
@@ -3650,10 +3661,10 @@ def process_single_account(username, password, account_index, total_accounts):
             for key in VOTE_RESULT_FIELDS:
                 if key in res:
                     merged[key] = res.get(key)
-        if gift_result_success(res) or not gift_result_success(merged):
-            for key in LISTING_GIFT_RESULT_FIELDS:
-                if key in res:
-                    merged[key] = res.get(key)
+        gift_source = max((res, previous_gift), key=gift_result_rank)
+        for key in LISTING_GIFT_RESULT_FIELDS:
+            if key in gift_source:
+                merged[key] = gift_source.get(key)
         merged['seventh_reward'] = merge_reward(res.get('seventh_reward'), merged.get('seventh_reward'))
         for key in EXECUTION_RESULT_FIELDS:
             if key in res:
@@ -3717,6 +3728,9 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                                 retry_count=f['prev_retry'] + 1, is_final_retry=True,
                                 previous_result=all_results[f['index']])
         orig = all_results[f['index']]
+        previous_gift = {key: orig.get(key) for key in (
+            *LISTING_GIFT_RESULT_FIELDS, 'task_start_date'
+        )}
 
         if final.get('password_error'):
             orig.update({
@@ -3795,10 +3809,10 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             for key in VOTE_RESULT_FIELDS:
                 if key in final:
                     orig[key] = final.get(key)
-        if gift_result_success(final) or not gift_result_success(orig):
-            for key in LISTING_GIFT_RESULT_FIELDS:
-                if key in final:
-                    orig[key] = final.get(key)
+        gift_source = max((final, previous_gift), key=gift_result_rank)
+        for key in LISTING_GIFT_RESULT_FIELDS:
+            if key in gift_source:
+                orig[key] = gift_source.get(key)
         orig['seventh_reward'] = merge_reward(final.get('seventh_reward'), orig.get('seventh_reward'))
         for key in EXECUTION_RESULT_FIELDS:
             if key in final:

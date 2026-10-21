@@ -9,6 +9,7 @@ import yaml
 
 from h3.listing_gift import (
     MonthlyGiftCheckpoint, gift_identity, gift_result_success, should_claim_listing_gift,
+    gift_stock_exhausted, inspect_listing_gift_response,
 )
 from h3.retry_components import component_status, retry_components
 from h3.mixed_batches import batch_accounts, encode_chain_state, load_chain_state
@@ -87,6 +88,119 @@ def test_stock_shortage_is_not_reported_as_received(claim_client):
     assert not client.execute_listing_gift('2026-10-22')
     assert not client.listing_gift_success
     assert not store.files
+    assert client._browser_fetch_json_once.call_count == 1
+    assert not client.execute_listing_gift('2026-10-22')
+    assert client._browser_fetch_json_once.call_count == 1
+
+
+def exhausted_row(**overrides):
+    return gift_row(listing_gift_success=False,
+                    listing_gift_status='每月礼包领取失败：券余量不足', **overrides)
+
+
+@pytest.mark.parametrize('response', [
+    {'success': False, 'message': '券余量不足'},
+    {'success': True, 'data': {'success': False, 'msg': '券余量不足，请稍后再试'}},
+])
+def test_stock_shortage_response_is_terminal_failure(response):
+    result = inspect_listing_gift_response(response)
+    assert result['state'] == 'stock_exhausted' and result['success'] is False
+
+
+def test_shortage_only_stops_gift_component_and_keeps_other_retries():
+    row = exhausted_row(account_data={'coupon_fetch_success': False})
+    assert component_status(row)['gift'] is True
+    assert not gift_result_success(row)
+    assert 'gift' not in retry_components(row)
+    assert 'coupons' in retry_components(row)
+
+
+def test_three_runner_rounds_never_reintroduce_exhausted_gift(tmp_path):
+    state = recovery_state('123', 'main', '2026-10-22', {'wudi1': 2})
+    accounts = batch_accounts(state, 'batch-1')
+    candidates = accounts
+    for round_number in range(3):
+        rows = [exhausted_row(account_index=1,
+                             account_data={'coupon_fetch_success': False}),
+                exhausted_row(account_index=2,
+                             account_data={'coupon_fetch_success': True})]
+        directory = tmp_path / str(round_number)
+        directory.mkdir()
+        for row in rows:
+            artifact = directory / str(row['account_index'])
+            artifact.mkdir()
+            (artifact / 'result.json').write_text(json.dumps({'results': [row]}), encoding='utf-8')
+        candidates = build_retry_matrix(tmp_path, accounts, candidates, '2026-10-22')
+        assert len(candidates) == 1
+        assert candidates[0]['account_index'] == 1
+        assert candidates[0]['retry_components'] == 'coupons'
+
+
+def test_xlsx_keeps_shortage_failure_and_red_status(tmp_path):
+    from openpyxl import load_workbook
+    from h3.report import write_xlsx, FONT_RED
+    row = normalize_record(exhausted_row(), {'task_start_date': '2026-10-22'}, {})
+    path = tmp_path / 'report.xlsx'
+    write_xlsx(str(path), [row])
+    workbook = load_workbook(path)
+    sheet = workbook['签到汇总']
+    matches = [cell for cell in sheet[2] if cell.value == '每月礼包领取失败：券余量不足']
+    assert len(matches) == 1
+    assert matches[0].font.color.rgb == FONT_RED.color.rgb
+    workbook.close()
+
+
+@pytest.mark.parametrize('overrides', [{'listing_gift_id': 72}, {'listing_gift_month': '2026-09'}])
+def test_old_shortage_does_not_suppress_current_gift(overrides):
+    row = exhausted_row(**overrides)
+    assert not gift_stock_exhausted(row)
+    assert 'gift' in retry_components(row)
+
+
+def test_shortage_does_not_suppress_next_month(claim_client):
+    client, _ = claim_client
+    client._browser_fetch_json_once.return_value = {'success': False, 'message': '券余量不足'}
+    assert not client.execute_listing_gift('2026-10-22')
+    client._browser_fetch_json_once.return_value = {'success': True, 'data': ['synthetic-coupon']}
+    assert client.execute_listing_gift('2026-11-01')
+    assert client._browser_fetch_json_once.call_count == 2
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_shortage_survives_unrelated_retry_and_success_wins(reverse):
+    from h3.merge_results import pick_result
+    shortage = exhausted_row()
+    failed = gift_row(listing_gift_success=False, listing_gift_status='未执行', retry_count=2)
+    left, right = (failed, shortage) if reverse else (shortage, failed)
+    merged = pick_result(deepcopy(left), deepcopy(right))
+    assert gift_stock_exhausted(merged)
+    assert 'gift' not in retry_components(merged)
+    assert gift_stock_exhausted(overlay_gift_result(shortage, failed))
+    assert gift_result_success(pick_result(merged, gift_row()))
+    assert gift_result_success(overlay_gift_result(gift_row(), shortage))
+
+
+def test_shortage_hydrates_for_coupon_only_retry(claim_client, monkeypatch):
+    import h3.script as script
+    client, _ = claim_client
+    monkeypatch.setattr(script, 'normalize_task_start_date', lambda: '2026-10-22')
+    client.hydrate_from_previous(exhausted_row())
+    assert not client.execute_listing_gift('2026-10-22')
+    client._browser_fetch_json_once.assert_not_called()
+
+
+@pytest.mark.parametrize('gift_only', [False, True])
+def test_report_counts_stock_shortage_separately(monkeypatch, gift_only):
+    monkeypatch.setenv('REPORT_GIFT_ONLY', str(gift_only).lower())
+    raw = [exhausted_row(), exhausted_row(account_index=2), gift_row(account_index=3)]
+    rows = [normalize_record(row, {'task_start_date': '2026-10-22'}, {}) for row in raw]
+    message, summary = build_message(rows, {}, 3)
+    assert summary['listing_gift_stock_exhausted'] == 2
+    assert summary['listing_gift_success'] == 1
+    assert '券余量不足（不再重试）: 2个账号' in message
+    old = normalize_record(exhausted_row(task_start_date='2026-10-23'),
+                           {'task_start_date': '2026-10-23'}, {})
+    assert build_message([old], {}, 1)[1]['listing_gift_stock_exhausted'] == 0
 
 
 def test_legacy_campaign_or_previous_month_cannot_complete_gift():

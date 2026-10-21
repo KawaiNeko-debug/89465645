@@ -16,7 +16,7 @@ try:
                                load_chain_state, github_context)
     from mixed_results import sanitized, identity
     from listing_gift import (is_listing_gift_date, is_monthly_gift_group,
-                              gift_result_success)
+                              gift_result_success, gift_result_rank)
     from merge_results import LISTING_GIFT_FIELDS, pick_result
     from retry_components import component_status
     from account_data import predict_pcb_smt
@@ -27,7 +27,7 @@ except ImportError:
                                   load_chain_state, github_context)
     from h3.mixed_results import sanitized, identity
     from h3.listing_gift import (is_listing_gift_date, is_monthly_gift_group,
-                                 gift_result_success)
+                                 gift_result_success, gift_result_rank)
     from h3.merge_results import LISTING_GIFT_FIELDS, pick_result
     from h3.retry_components import component_status
     from h3.account_data import predict_pcb_smt
@@ -115,7 +115,7 @@ def overlay_gift_result(base, patch):
                                        else str(output.get('listing_gift_status') or '每月礼包尚未完成'))
         return output
     output = deepcopy(base)
-    if gift_result_success(patch) or not gift_result_success(output):
+    if gift_result_rank(patch) >= gift_result_rank(output):
         for key in LISTING_GIFT_FIELDS:
             output[key] = patch.get(key)
     fresh = patch.get('account_data') or {}

@@ -4,9 +4,9 @@ import os
 import re
 import sys
 try:
-    from listing_gift import gift_result_success
+    from listing_gift import gift_result_rank
 except ImportError:
-    from h3.listing_gift import gift_result_success
+    from h3.listing_gift import gift_result_rank
 from datetime import datetime
 
 try:
@@ -147,6 +147,9 @@ def merge_component_fields(picked: dict, fallback: dict | None):
     if not fallback:
         picked["component_status"] = component_status(picked)
         return
+    if gift_result_rank(fallback) > gift_result_rank(picked):
+        for key in LISTING_GIFT_FIELDS:
+            picked[key] = fallback.get(key)
     picked_status = component_status(picked)
     fallback_status = component_status(fallback)
     picked['seventh_reward'] = merge_reward(picked.get('seventh_reward'), fallback.get('seventh_reward'))
@@ -289,7 +292,7 @@ def pick_result(initial: dict, retry: dict | None):
         if truthy(fallback.get("vote_success")) and not truthy(picked.get("vote_success")):
             for key in VOTE_FIELDS:
                 picked[key] = fallback.get(key)
-        if gift_result_success(fallback) and not gift_result_success(picked):
+        if gift_result_rank(fallback) > gift_result_rank(picked):
             for key in LISTING_GIFT_FIELDS:
                 picked[key] = fallback.get(key)
         if truthy(picked.get("banned_account")):

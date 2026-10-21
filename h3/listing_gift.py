@@ -93,6 +93,25 @@ def gift_result_success(row: dict, task_date="") -> bool:
     )
 
 
+def gift_stock_exhausted(row: dict, task_date="") -> bool:
+    task_date = (task_date or row.get("task_start_date") or row.get("_task_start_date")
+                 or row.get("listing_gift_time") or "")
+    expected = gift_identity(task_date)
+    return (
+        not gift_result_success(row, task_date)
+        and row.get("listing_gift_id") == expected["listing_gift_id"]
+        and bool(expected["listing_gift_month"])
+        and row.get("listing_gift_month") == expected["listing_gift_month"]
+        and "券余量不足" in str(row.get("listing_gift_status") or "") + str(
+            row.get("listing_gift_detail") or "")
+    )
+
+
+def gift_result_rank(row: dict, task_date="") -> int:
+    # A terminal shortage must survive unrelated retries, but never replace success.
+    return 2 if gift_result_success(row, task_date) else int(gift_stock_exhausted(row, task_date))
+
+
 class MonthlyGiftCheckpoint:
     """Store confirmed claims only; the official endpoint enforces cycle limits."""
 
@@ -164,6 +183,8 @@ def _message(response) -> str:
 
 def inspect_listing_gift_response(response) -> dict:
     message = _message(response)
+    if "券余量不足" in message:
+        return {"state": "stock_exhausted", "success": False, "message": "券余量不足"}
     if any(hint in message for hint in ALREADY_RECEIVED_HINTS):
         return {"state": "already", "success": True, "message": message or "每月礼包已领取"}
     if not isinstance(response, dict) or response.get("success") is not True:
