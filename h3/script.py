@@ -80,6 +80,9 @@ try:
     from listing_gift import (
         MONTHLY_GIFT_API_PATH,
         MONTHLY_GIFT_ID,
+        MonthlyGiftCheckpoint,
+        gift_identity,
+        gift_result_success,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
@@ -111,6 +114,9 @@ except ImportError:
     from h3.listing_gift import (
         MONTHLY_GIFT_API_PATH,
         MONTHLY_GIFT_ID,
+        MonthlyGiftCheckpoint,
+        gift_identity,
+        gift_result_success,
         LISTING_GIFT_PATH,
         inspect_listing_gift_response,
         inspect_monthly_gift_page_text,
@@ -150,7 +156,7 @@ BASE_URL = os.getenv('BASE_URL')
 PASSPORT_URL = os.getenv('PASSPORT_URL')
 REFERER = os.getenv('REFERER')
 API_SIGN_PATH = os.getenv('API_SIGN_PATH', '/api/activity/sign/signIn?source=4')
-SCRIPT_VERSION = "2026-10-14-seventh-reward-quota-v1"
+SCRIPT_VERSION = "2026-10-22-monthly-gift-v1"
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
 CAMPAIGN_DESKTOP_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -178,6 +184,8 @@ ACCOUNT_DATA_RESULT_FIELDS = (
     'account_data',
 )
 LISTING_GIFT_RESULT_FIELDS = (
+    'listing_gift_id',
+    'listing_gift_month',
     'listing_gift_required',
     'listing_gift_success',
     'listing_gift_attempted',
@@ -1099,11 +1107,13 @@ class ApiClient:
             current_date_text(), execution_context().get("group_code")
         )
         self.listing_gift_success = False
+        self.listing_gift_id = MONTHLY_GIFT_ID
+        self.listing_gift_month = normalize_task_start_date()[:7]
         self.listing_gift_attempted = False
         self.listing_gift_status = (
             "待领取"
             if self.listing_gift_required
-            else "非星火会礼包领取日期或当前组不适用"
+            else "非每月礼包领取日期或当前组不适用"
         )
         self.listing_gift_time = ""
         self.listing_gift_detail = ""
@@ -1155,9 +1165,10 @@ class ApiClient:
         self.voucher_fetch_success = status["exchange"]
         self.seckill_fetch_success = True
         self.activity_fetch_success = self.lottery_fetch_success and self.voucher_fetch_success
-        for key in LISTING_GIFT_RESULT_FIELDS:
-            if key in previous:
-                setattr(self, key, previous.get(key))
+        if gift_result_success(previous, normalize_task_start_date()):
+            for key in LISTING_GIFT_RESULT_FIELDS:
+                if key in previous:
+                    setattr(self, key, previous.get(key))
         for key in VOTE_RESULT_FIELDS:
             if key in previous:
                 setattr(self, key, previous.get(key))
@@ -1904,15 +1915,28 @@ class ApiClient:
         return self.account_data
 
     def execute_listing_gift(self, task_date="") -> bool:
+        task_date = task_date or current_date_text()
+        group = execution_context().get("group_code")
+        self.listing_gift_id = MONTHLY_GIFT_ID
+        self.listing_gift_month = date_part(task_date)[:7]
         self.listing_gift_required = LISTING_GIFT_ENABLED and should_claim_listing_gift(
-            task_date or current_date_text(), execution_context().get("group_code")
+            task_date, group
         )
         if not self.listing_gift_required:
-            self.listing_gift_status = "非星火会礼包领取日期或当前组不适用"
+            self.listing_gift_status = "非每月礼包领取日期或当前组不适用"
             return True
 
+        try:
+            checkpoint = MonthlyGiftCheckpoint(task_date, group, self.account_index)
+            if checkpoint.completed():
+                self.listing_gift_success = True
+                self.listing_gift_status = "每月礼包本月已领取"
+                return True
+        except Exception:
+            self.listing_gift_status = "每月礼包领取失败：月度状态读取失败，未提交领取"
+            return False
         self.listing_gift_attempted = True
-        last_result = {"state": "error", "success": False, "message": "星火会礼包尚未执行"}
+        last_result = {"state": "error", "success": False, "message": "每月礼包尚未执行"}
         for attempt in range(1, 4):
             try:
                 gift_origin = monthly_gift_origin(self.base_url)
@@ -1932,40 +1956,39 @@ class ApiClient:
                         "POST",
                         f"{gift_origin}{MONTHLY_GIFT_API_PATH}",
                         payload={"id": MONTHLY_GIFT_ID},
-                        tag="星火会礼包领取",
-                        dump_body_on_error=True,
+                        tag="每月礼包领取",
+                        dump_body_on_error=False,
                     )
                 )
-                if api_result.get("success"):
-                    last_result = api_result
-                else:
-                    body_text = self.page.locator("body").inner_text(timeout=5000)
-                    page_result = inspect_monthly_gift_page_text(body_text)
-                    if page_result.get("success"):
-                        last_result = page_result
+                last_result = api_result
             except Exception as exc:
                 last_result = {
                     "state": "error",
                     "success": False,
-                    "message": f"星火会礼包页面请求异常：{type(exc).__name__}",
+                    "message": f"每月礼包页面请求异常：{type(exc).__name__}",
                 }
             if last_result.get("success"):
                 self.listing_gift_success = True
                 self.listing_gift_time = current_time_text()
                 self.listing_gift_detail = str(last_result.get("message") or "").strip()
                 self.listing_gift_status = (
-                    "星火会礼包已领取"
+                    "每月礼包已领取"
                     if last_result.get("state") == "already"
-                    else "星火会礼包领取成功"
+                    else "每月礼包领取成功"
                 )
                 log(f"账号{self.account_index} - ✅ {self.listing_gift_status}")
+                try:
+                    checkpoint.save(last_result.get("state"))
+                except Exception:
+                    self.listing_gift_detail = "领取已确认，月度状态保存失败；重跑将核对接口周期限制"
+                    log(f"账号{self.account_index} - 月度领取状态保存失败，保留已确认成功结果")
                 return True
             if attempt < 3:
-                log(f"账号{self.account_index} - 星火会礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
+                log(f"账号{self.account_index} - 每月礼包领取未确认，当前会话内第 {attempt + 1} 次尝试")
                 time.sleep(0.8 * attempt)
 
-        self.listing_gift_detail = str(last_result.get("message") or "星火会礼包未确认领取成功").strip()
-        self.listing_gift_status = f"星火会礼包领取失败：{self.listing_gift_detail}"
+        self.listing_gift_detail = str(last_result.get("message") or "每月礼包未确认领取成功").strip()
+        self.listing_gift_status = f"每月礼包领取失败：{self.listing_gift_detail}"
         log(f"账号{self.account_index} - ❌ {self.listing_gift_status}")
         return False
 
@@ -3095,6 +3118,7 @@ def sign_in_account(
         'task_start_date': task_start_date,
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
+        **gift_identity(task_start_date),
         'listing_gift_required': LISTING_GIFT_ENABLED and should_claim_listing_gift(
             task_start_date, execution_context().get('group_code')
         ),
@@ -3102,7 +3126,7 @@ def sign_in_account(
         'listing_gift_attempted': False,
         'listing_gift_status': '待领取' if LISTING_GIFT_ENABLED and should_claim_listing_gift(
             task_start_date, execution_context().get('group_code')
-        ) else '非星火会礼包领取日期或当前组不适用',
+        ) else '非每月礼包领取日期或当前组不适用',
         'listing_gift_time': '',
         'listing_gift_detail': '',
         'vote_required': VOTE_ENABLED and is_vote_date(task_start_date),
@@ -3380,6 +3404,8 @@ def sign_in_account(
                     'account_data': client.account_data,
                     'sign_completed_at': client.sign_completed_at,
                     'activity_records': client.activity_records,
+                    'listing_gift_id': client.listing_gift_id,
+                    'listing_gift_month': client.listing_gift_month,
                     'listing_gift_required': client.listing_gift_required,
                     'listing_gift_success': client.listing_gift_success,
                     'listing_gift_attempted': client.listing_gift_attempted,
@@ -3472,6 +3498,7 @@ def should_retry(res):
     return needs_retry(res)
 
 def process_single_account(username, password, account_index, total_accounts):
+    task_start_date = normalize_task_start_date()
     merged = {
         'account_index': account_index,
         'username': username,
@@ -3503,6 +3530,7 @@ def process_single_account(username, password, account_index, total_accounts):
         'task_start_date': normalize_task_start_date(),
         'sign_completed_at': '',
         'activity_records': make_empty_extra_records(),
+        **gift_identity(task_start_date),
         'listing_gift_required': LISTING_GIFT_ENABLED and should_claim_listing_gift(
             normalize_task_start_date(), execution_context().get('group_code')
         ),
@@ -3622,7 +3650,7 @@ def process_single_account(username, password, account_index, total_accounts):
             for key in VOTE_RESULT_FIELDS:
                 if key in res:
                     merged[key] = res.get(key)
-        if truthy(res.get('listing_gift_success')) or not truthy(merged.get('listing_gift_success')):
+        if gift_result_success(res) or not gift_result_success(merged):
             for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in res:
                     merged[key] = res.get(key)
@@ -3767,7 +3795,7 @@ def final_retry(all_results, usernames, passwords, total_accounts):
             for key in VOTE_RESULT_FIELDS:
                 if key in final:
                     orig[key] = final.get(key)
-        if truthy(final.get('listing_gift_success')) or not truthy(orig.get('listing_gift_success')):
+        if gift_result_success(final) or not gift_result_success(orig):
             for key in LISTING_GIFT_RESULT_FIELDS:
                 if key in final:
                     orig[key] = final.get(key)
@@ -3938,6 +3966,8 @@ def write_results_json(path, all_results, total_accounts):
                 "sign_time": r.get("sign_time"),
                 "sign_ip": r.get("sign_ip"),
                 "activity_records": r.get("activity_records") or make_empty_extra_records(),
+                "listing_gift_id": r.get("listing_gift_id"),
+                "listing_gift_month": r.get("listing_gift_month"),
                 "listing_gift_required": r.get("listing_gift_required"),
                 "listing_gift_success": r.get("listing_gift_success"),
                 "listing_gift_attempted": r.get("listing_gift_attempted"),

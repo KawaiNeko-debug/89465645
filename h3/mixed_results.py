@@ -10,7 +10,7 @@ try:
     from box_lottery import is_box_lottery_required
     from account_data import empty_account_data
     from campaign_vote import is_vote_date
-    from listing_gift import should_claim_listing_gift
+    from listing_gift import should_claim_listing_gift, gift_identity
     from merge_results import pick_result
     from retry_components import COMPONENTS, component_status, retry_components
     from seventh_reward import record_reward, empty_reward, applies as reward_strategy_applies
@@ -18,7 +18,7 @@ except ImportError:
     from h3.box_lottery import is_box_lottery_required
     from h3.account_data import empty_account_data
     from h3.campaign_vote import is_vote_date
-    from h3.listing_gift import should_claim_listing_gift
+    from h3.listing_gift import should_claim_listing_gift, gift_identity
     from h3.merge_results import pick_result
     from h3.retry_components import COMPONENTS, component_status, retry_components
     from h3.seventh_reward import record_reward, empty_reward, applies as reward_strategy_applies
@@ -282,10 +282,11 @@ def missing_result(account: dict, task_date: str) -> dict:
         "account_data_required": True,
         "account_data_fetch_success": False,
         "account_data": empty_account_data(),
+        **gift_identity(task_date),
         "listing_gift_required": gift_required,
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "缺少星火会礼包领取结果" if gift_required else "非星火会礼包领取日期或当前组不适用",
+        "listing_gift_status": "缺少每月礼包领取结果" if gift_required else "非每月礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": vote_required,
@@ -355,7 +356,7 @@ def merge_results(results_dir: str | Path, output_path: str | Path, batch_accoun
             )
             if not selected["listing_gift_required"]:
                 selected["listing_gift_status"] = (
-                    "非星火会礼包领取日期或当前组不适用"
+                    "非每月礼包领取日期或当前组不适用"
                 )
             selected["component_status"] = component_status(selected)
         merged.append(sanitized(selected))

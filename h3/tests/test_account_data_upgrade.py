@@ -27,8 +27,8 @@ from h3.account_data import (
 )
 from h3.merge_results import pick_result
 from h3.listing_gift import (
-    SPARK_GIFT_ID,
-    SPARK_GIFT_PAGE_PATH,
+    MONTHLY_GIFT_ID,
+    MONTHLY_GIFT_PAGE_PATH,
     inspect_listing_gift_response,
     inspect_monthly_gift_page_text,
     is_listing_gift_date,
@@ -140,11 +140,13 @@ def record(index: int, lottery_count: int, account_data=None) -> dict:
         "account_data_fetch_success": True,
         "account_data": account_data or account_data_with_amount(),
         "listing_gift_required": True,
+        "listing_gift_id": 43,
+        "listing_gift_month": "2026-10",
         "listing_gift_success": True,
         "listing_gift_attempted": True,
-        "listing_gift_status": "星火会礼包领取成功",
-        "listing_gift_time": "2026-09-19 12:00:00",
-        "listing_gift_detail": "星火会礼包领取成功",
+        "listing_gift_status": "每月礼包领取成功",
+        "listing_gift_time": "2026-10-22 12:00:00",
+        "listing_gift_detail": "每月礼包领取成功",
     }
 
 
@@ -187,7 +189,7 @@ class DynamicLotteryTests(unittest.TestCase):
         self.assertFalse(normalized["listing_gift_required"])
         self.assertEqual(
             normalized["listing_gift_status"],
-            "非星火会礼包领取日期或当前组不适用",
+            "非每月礼包领取日期或当前组不适用",
         )
 
     def test_historical_tuesday_remains_box_lottery_required(self):
@@ -865,8 +867,8 @@ class AccountDataTests(unittest.TestCase):
 
 class ListingGiftTests(unittest.TestCase):
     def test_har_campaign_configuration(self):
-        self.assertEqual(SPARK_GIFT_ID, 72)
-        self.assertEqual(SPARK_GIFT_PAGE_PATH, "/pages/coupon-page/index?id=72")
+        self.assertEqual(MONTHLY_GIFT_ID, 43)
+        self.assertEqual(MONTHLY_GIFT_PAGE_PATH, "/pages/coupon-page/index?id=43")
 
     def test_gift_only_scope_stops_after_gift_success(self):
         pending = record(1, 0)
@@ -876,21 +878,14 @@ class ListingGiftTests(unittest.TestCase):
         self.assertEqual(scoped_retry_components(pending, {"gift"}), [])
 
     def test_date_window_is_exact(self):
-        self.assertFalse(is_listing_gift_date("2026-09-18"))
-        self.assertTrue(is_listing_gift_date("2026-09-19 23:59:59"))
-        self.assertTrue(is_listing_gift_date("2026-09-20"))
-        self.assertFalse(is_listing_gift_date("2026-09-21"))
-        self.assertFalse(is_listing_gift_date("2027-09-19"))
-        self.assertTrue(should_claim_listing_gift("2026-09-19", "wudi1"))
-        self.assertTrue(should_claim_listing_gift("2026-09-20", "ld1"))
-        self.assertTrue(should_claim_listing_gift("2026-09-19", "new1"))
-        self.assertTrue(should_claim_listing_gift("2026-09-20", "gift_test"))
-        self.assertFalse(should_claim_listing_gift("2026-09-19", "yyy1"))
-        self.assertFalse(should_claim_listing_gift("2026-09-19", "old1"))
-        self.assertFalse(should_claim_listing_gift("2026-09-19", "ll1"))
-        self.assertFalse(should_claim_listing_gift("2026-09-19", "zh1"))
-        self.assertFalse(should_claim_listing_gift("2026-09-19", "test"))
-        self.assertFalse(should_claim_listing_gift("2026-09-18", "wudi1"))
+        for value in ("2026-09-19", "2026-09-20", "2026-10-01", "2026-10-23", "2026-10-30", "2026-11-30", "2026-02-30"):
+            self.assertFalse(is_listing_gift_date(value), value)
+        for value in ("2026-10-22 23:59:59", "2026-11-01", "2026-12-01", "2027-01-01"):
+            self.assertTrue(is_listing_gift_date(value), value)
+        for group in ("wudi1", "ld1", "new1", "yyy1", "gift_test"):
+            self.assertTrue(should_claim_listing_gift("2026-10-22", group), group)
+        for group in ("old1", "ll1", "zh1", "test", "wudi21", "wudibad"):
+            self.assertFalse(should_claim_listing_gift("2026-10-22", group), group)
 
     def test_har_success_shape_is_required(self):
         success = inspect_listing_gift_response(
@@ -935,8 +930,8 @@ class ListingGiftTests(unittest.TestCase):
         self.assertTrue(inspect_monthly_gift_page_text("领取成功")['success'])
         self.assertEqual(inspect_monthly_gift_page_text("本月已领取")['state'], "already")
         self.assertFalse(inspect_monthly_gift_page_text("活动尚未开始")['success'])
-        self.assertTrue(should_claim_listing_gift("2026-09-20", "wudi20"))
-        self.assertFalse(should_claim_listing_gift("2026-09-20", "yyy1"))
+        self.assertTrue(should_claim_listing_gift("2026-10-22", "wudi20"))
+        self.assertTrue(should_claim_listing_gift("2026-11-01", "yyy1"))
 
     def test_bodyless_repeat_response_is_idempotent_success(self):
         result = inspect_listing_gift_response(
@@ -959,7 +954,7 @@ class ListingGiftTests(unittest.TestCase):
         )
         picked = pick_result(initial, retry)
         self.assertTrue(picked["listing_gift_success"])
-        self.assertEqual(picked["listing_gift_status"], "星火会礼包领取成功")
+        self.assertEqual(picked["listing_gift_status"], "每月礼包领取成功")
 
     def test_xlsx_contains_gift_status_column(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -967,8 +962,8 @@ class ListingGiftTests(unittest.TestCase):
             write_xlsx(path, [record(1, 1)])
             sheet = load_workbook(path)["签到汇总"]
             headers = [cell.value for cell in sheet[1]]
-            column = headers.index("星火会礼包领取情况") + 1
-            self.assertIn("星火会礼包领取成功", sheet.cell(2, column).value)
+            column = headers.index("每月礼包领取情况") + 1
+            self.assertIn("每月礼包领取成功", sheet.cell(2, column).value)
             self.assertEqual(sheet.cell(2, column).font.color.rgb, "00008000")
 
 

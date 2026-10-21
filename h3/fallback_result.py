@@ -12,12 +12,12 @@ try:
     from box_lottery import is_box_lottery_required
     from campaign_vote import is_vote_date
     from feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
-    from listing_gift import should_claim_listing_gift
+    from listing_gift import should_claim_listing_gift, gift_identity
 except ImportError:
     from h3.box_lottery import is_box_lottery_required
     from h3.campaign_vote import is_vote_date
     from h3.feature_flags import LISTING_GIFT_ENABLED, VOTE_ENABLED
-    from h3.listing_gift import should_claim_listing_gift
+    from h3.listing_gift import should_claim_listing_gift, gift_identity
 
 
 def truthy(value) -> bool:
@@ -81,6 +81,7 @@ def main() -> int:
         "account_data_required": True,
         "account_data_fetch_success": False,
         "account_data": {"balance_fetch_success": False},
+        **gift_identity(task_date),
         "listing_gift_required": gift_required,
         "listing_gift_success": False,
         "listing_gift_attempted": False,

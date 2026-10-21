@@ -159,10 +159,10 @@ def test_wudi_secret_wins_over_legacy_new_secret():
 
 def test_campaign_gift_component_is_limited_to_dates_and_groups():
     assert "gift" in applicable_components(
-        {"source_group": "wudi1", "skip_sign": False}, "2026-09-19"
+        {"source_group": "wudi1", "skip_sign": False}, "2026-10-22"
     )
     assert "gift" in applicable_components(
-        {"source_group": "ld1", "skip_sign": False}, "2026-09-20"
+        {"source_group": "ld1", "skip_sign": False}, "2026-11-01"
     )
     assert "gift" not in applicable_components(
         {"source_group": "yyy1", "skip_sign": False}, "2026-09-19"

@@ -3,6 +3,10 @@ import json
 import os
 import re
 import sys
+try:
+    from listing_gift import gift_result_success
+except ImportError:
+    from h3.listing_gift import gift_result_success
 from datetime import datetime
 
 try:
@@ -39,6 +43,8 @@ VOTE_FIELDS = (
     "vote_detail",
 )
 LISTING_GIFT_FIELDS = (
+    "listing_gift_id",
+    "listing_gift_month",
     "listing_gift_required",
     "listing_gift_success",
     "listing_gift_attempted",
@@ -198,7 +204,7 @@ def merge_component_fields(picked: dict, fallback: dict | None):
     picked["box_lottery_required"] = box_required
     picked["listing_gift_required"] = gift_required
     if not gift_required:
-        picked["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
+        picked["listing_gift_status"] = "非每月礼包领取日期或当前组不适用"
     picked_status["box_lottery"] = component_status(picked).get("box_lottery", False)
     picked["component_status"] = {
         key: bool(picked_status.get(key) or fallback_status.get(key))
@@ -283,7 +289,7 @@ def pick_result(initial: dict, retry: dict | None):
         if truthy(fallback.get("vote_success")) and not truthy(picked.get("vote_success")):
             for key in VOTE_FIELDS:
                 picked[key] = fallback.get(key)
-        if truthy(fallback.get("listing_gift_success")) and not truthy(picked.get("listing_gift_success")):
+        if gift_result_success(fallback) and not gift_result_success(picked):
             for key in LISTING_GIFT_FIELDS:
                 picked[key] = fallback.get(key)
         if truthy(picked.get("banned_account")):
@@ -318,7 +324,7 @@ def pick_result(initial: dict, retry: dict | None):
     picked["box_lottery_required"] = box_required
     picked["listing_gift_required"] = gift_required
     if not gift_required:
-        picked["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
+        picked["listing_gift_status"] = "非每月礼包领取日期或当前组不适用"
     picked["component_status"] = component_status(picked)
     return picked
 
@@ -396,7 +402,7 @@ def main():
         row["box_lottery_required"] = box_required
         row["listing_gift_required"] = gift_required
         if not gift_required:
-            row["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
+            row["listing_gift_status"] = "非每月礼包领取日期或当前组不适用"
         payload["results"].append(
             {
                 "account_index": safe_int(row.get("account_index"), 0),
@@ -438,6 +444,8 @@ def main():
                 "account_data_fetch_success": truthy(row.get("account_data_fetch_success")),
                 "account_data": row.get("account_data") or {},
                 "listing_gift_required": truthy(row.get("listing_gift_required")),
+                "listing_gift_id": row.get("listing_gift_id"),
+                "listing_gift_month": row.get("listing_gift_month"),
                 "listing_gift_success": truthy(row.get("listing_gift_success")),
                 "listing_gift_attempted": truthy(row.get("listing_gift_attempted")),
                 "listing_gift_status": row.get("listing_gift_status", ""),

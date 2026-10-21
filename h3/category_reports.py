@@ -32,7 +32,7 @@ def main() -> int:
     results_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "results")
     manifest = json.loads((results_dir / "manifest.json").read_text(encoding="utf-8"))
     task_date = str(manifest.get("task_start_date") or "").strip()
-    active_groups = manifest.get("groups", [])
+    active_groups = manifest.get("report_groups") or manifest.get("groups", [])
     configured_groups = manifest.get("all_groups") or active_groups
     group_codes = ",".join(
         str(group.get("group_code") or "").strip().lower()
@@ -77,6 +77,9 @@ def main() -> int:
         )
     else:
         selected_categories = CATEGORIES
+    isolated_gifts = bool(manifest.get('gift_recovery') and not manifest.get('recovery_base_chain'))
+    if isolated_gifts:
+        selected_categories = tuple(item for item in selected_categories if counts[item[0]] > 0)
 
     failures = []
     messages = []
@@ -99,6 +102,7 @@ def main() -> int:
                 "REPORT_GROUP_CODES": group_codes,
                 "REPORT_GROUP_FILTER_ACTIVE": "true",
                 "REPORT_GROUP_LIMITS": json.dumps(group_limits, ensure_ascii=False),
+                "REPORT_GIFT_ONLY": "true" if isolated_gifts else "false",
                 "SUMMARY_RECOVERY_EXCLUDED_GROUPS": ",".join(
                     excluded_by_category[category]
                 ),
@@ -108,7 +112,7 @@ def main() -> int:
             [
                 sys.executable,
                 str(Path(__file__).with_name("report.py")),
-                str(results_dir),
+                str(results_dir / 'combined') if manifest.get('recovery_overlay_ready') else str(results_dir),
             ],
             env=env,
             check=False,

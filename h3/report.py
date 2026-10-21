@@ -38,7 +38,7 @@ try:
     )
     from account_data import empty_account_data, is_pcb_smt_coupon
     from campaign_vote import is_vote_date
-    from listing_gift import should_claim_listing_gift
+    from listing_gift import should_claim_listing_gift, gift_result_success
 except ImportError:
     from h3.box_lottery import (
         box_lottery_complete as box_lottery_is_complete,
@@ -46,7 +46,7 @@ except ImportError:
     )
     from h3.account_data import empty_account_data, is_pcb_smt_coupon
     from h3.campaign_vote import is_vote_date
-    from h3.listing_gift import should_claim_listing_gift
+    from h3.listing_gift import should_claim_listing_gift, gift_result_success
 
 for stream_name in ("stdout", "stderr"):
     stream = getattr(sys, stream_name, None)
@@ -406,10 +406,12 @@ def normalize_record(
     ).strip()
     listing_gift_required = should_claim_listing_gift(task_start_date, group_code)
     listing_gift_status = str(record.get("listing_gift_status") or "").strip()
-    if listing_gift_required and not listing_gift_status:
+    if listing_gift_required and (not listing_gift_status or (
+        truthy(record.get('listing_gift_success')) and not gift_result_success(record, task_start_date)
+    )):
         listing_gift_status = "缺少礼包领取结果"
     elif not listing_gift_required:
-        listing_gift_status = "非星火会礼包领取日期或当前组不适用"
+        listing_gift_status = "非每月礼包领取日期或当前组不适用"
     box_lottery_required = is_box_lottery_required(
         task_start_date, group_code, record.get("assigned_date", "")
     )
@@ -465,7 +467,9 @@ def normalize_record(
         if isinstance(record.get("account_data"), dict)
         else empty_account_data(),
         "listing_gift_required": listing_gift_required,
-        "listing_gift_success": truthy(record.get("listing_gift_success")),
+        "listing_gift_success": gift_result_success(record, task_start_date),
+        "listing_gift_id": record.get("listing_gift_id"),
+        "listing_gift_month": record.get("listing_gift_month"),
         "listing_gift_attempted": truthy(record.get("listing_gift_attempted")),
         "listing_gift_status": listing_gift_status,
         "listing_gift_time": str(record.get("listing_gift_time") or "").strip(),
@@ -579,9 +583,9 @@ def build_missing_record(
         "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "缺少星火会礼包领取结果"
+        "listing_gift_status": "缺少每月礼包领取结果"
         if should_claim_listing_gift(task_date, group_code)
-        else "非星火会礼包领取日期或当前组不适用",
+        else "非每月礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": vote_required,
@@ -637,6 +641,10 @@ def merge_records_with_expected(
 
 
 def status_label(record: dict) -> str:
+    if (record.get('execution_mode') == 'gift_recovery'
+            and not truthy(record.get('password_error'))
+            and not truthy(record.get('account_format_error'))):
+        return '仅补领每月礼包'
     raw_status = str(record.get("sign_status") or "")
     if truthy(record.get("account_format_error")):
         return "账号错误"
@@ -907,7 +915,7 @@ def build_stats_lines(summary: dict) -> list[str]:
         f"  ├── 次日成功: {summary['next_day']}",
         f"  ├── 按配置跳过签到: {summary['skipped']}",
         f"  ├── 账号封禁: {summary['banned']}",
-        f"  ├── 星火会礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+        f"  ├── 每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
     ]
     if summary["box_lottery_required"]:
         lines.extend(
@@ -976,6 +984,28 @@ def build_message(
 ) -> tuple[str, dict]:
     sorted_records = sort_records(records)
     summary = build_summary(sorted_records, expected_total)
+    if truthy(os.getenv('REPORT_GIFT_ONLY')):
+        failures = {}
+        for row in sorted_records:
+            reason = ''
+            if truthy(row.get('password_error')):
+                reason = '密码错误'
+            elif truthy(row.get('account_format_error')):
+                reason = '账号错误：检测到11位手机号，请改用客编'
+            elif not gift_result_success(row):
+                reason = '每月礼包领取未完成'
+            elif not (row.get('account_data') or {}).get('coupon_fetch_success'):
+                reason = '优惠券列表刷新未完成'
+            if reason:
+                failures[reason] = failures.get(reason, 0) + 1
+        lines = ['每月礼包专项补领（未重复执行签到、投票或抽奖）']
+        lines.extend(f'{count}个账号：{reason}' for reason, count in failures.items())
+        refreshed = sum(bool((row.get('account_data') or {}).get('coupon_fetch_success'))
+                        for row in sorted_records)
+        lines.extend([f"总账号数: {summary['total']}",
+                      f"每月礼包完成: {summary['listing_gift_success']}/{summary['listing_gift_required']}",
+                      f'优惠券列表刷新完成: {refreshed}'])
+        return '\n'.join(lines), summary
     summary['seventh_monthly'] = manifest.get('seventh_reward_monthly')
     problem_records = [record for record in sorted_records if is_problem_record(record)]
     conflict_records = [
@@ -1638,7 +1668,7 @@ def write_xlsx(path: str, records: list[dict]):
         "已过期优惠券",
         "PCB+SMT优惠券预测",
         "预测依据",
-        "星火会礼包领取情况",
+        "每月礼包领取情况",
         "投票状态",
         "投票时间",
         "投票商品",
@@ -1795,7 +1825,7 @@ def write_xlsx(path: str, records: list[dict]):
                 else FONT_BLUE
             )
         )
-        gift_cell = sheet.cell(row_index, header_index["星火会礼包领取情况"])
+        gift_cell = sheet.cell(row_index, header_index["每月礼包领取情况"])
         gift_cell.font = (
             FONT_GREEN
             if truthy(record.get("listing_gift_success"))

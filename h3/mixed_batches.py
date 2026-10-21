@@ -242,11 +242,12 @@ def new_chain_state(
     ref: str,
     task_start_date: str = "",
     batch_size: int = BATCH_SIZE,
+    group_counts: dict | None = None,
 ) -> dict:
     task_date = task_start_date or datetime.now(
         timezone(timedelta(hours=8))
     ).strftime("%Y-%m-%d")
-    group_counts = configured_group_counts()
+    group_counts = configured_group_counts() if group_counts is None else dict(group_counts)
     accounts = deterministic_order(accounts_from_group_counts(group_counts), task_date)
     expanded_batches = split_batches(accounts, batch_size)
     batches = [
@@ -338,6 +339,10 @@ def load_chain_state(raw: str) -> dict:
                 group["account_category"] = category_for(code)
     _assert_no_credentials(state)
     assignments = state.get('weekly_assignments', {})
+    if state.get('component_scope') and state['component_scope'] != ['gift', 'coupons']:
+        raise ValueError('unsupported recovery component scope')
+    if state.get('gift_recovery') and state.get('component_scope') != ['gift', 'coupons']:
+        raise ValueError('gift recovery scope is missing')
     if not isinstance(assignments, dict):
         raise ValueError('weekly assignments must be an object')
     for identity, assignment in assignments.items():
@@ -371,6 +376,8 @@ def batch_accounts(state: dict, batch_id: str) -> list[dict]:
     selected = [deepcopy(item) for item in ordered[start : start + batch["account_count"]]]
     for item in selected:
         item["batch_id"] = batch_id
+        if state.get('gift_recovery'):
+            item['retry_components'] = 'gift,coupons'
         assignments = state.get("weekly_assignments", {})
         assignment = assignments.get(f"{item['source_group']}:{item['account_index']}")
         if assignment:
@@ -589,6 +596,12 @@ def download_batches(args) -> int:
             print(f"::warning::{batch['batch_id']}: {exc}", flush=True)
     manifest["summary_downloaded_at"] = datetime.now(timezone.utc).isoformat()
     write_json(output / "manifest.json", manifest)
+    if manifest.get('gift_recovery'):
+        try:
+            from monthly_gift_recovery import merge_recovery_reports
+        except ImportError:
+            from h3.monthly_gift_recovery import merge_recovery_reports
+        merge_recovery_reports(output, manifest)
     return 0
 
 

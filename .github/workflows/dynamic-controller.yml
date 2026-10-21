@@ -1,6 +1,6 @@
 name: dynamic-controller
 
-run-name: dynamic-controller-${{ github.run_id }}
+run-name: ${{ inputs.gift_recovery && 'gift-recovery' || 'dynamic-controller' }}-${{ github.run_id }}
 
 on:
   schedule:
@@ -11,6 +11,16 @@ on:
         description: "任务日期（留空使用北京时间当天）"
         required: false
         default: ""
+        type: string
+      gift_recovery:
+        description: "仅补领每月礼包并刷新优惠券，不重复日常操作"
+        required: false
+        default: false
+        type: boolean
+      base_summary_run_id:
+        description: "需要保留的当天汇总 run ID；没有当天结果时填0"
+        required: false
+        default: "0"
         type: string
 
 concurrency:
@@ -173,6 +183,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Guard duplicate scheduled invocation
         id: schedule-guard
+        if: '!inputs.gift_recovery'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -188,7 +199,7 @@ jobs:
         if: steps.schedule-guard.outputs.skip != 'true'
         run: python -m pip install --timeout 60 --retries 3 requests
       - name: Freeze and dispatch first mixed batch
-        if: steps.schedule-guard.outputs.skip != 'true'
+        if: steps.schedule-guard.outputs.skip != 'true' && !inputs.gift_recovery
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_API_URL: ${{ github.api_url }}
@@ -198,3 +209,14 @@ jobs:
           --ref "${{ github.ref_name }}"
           --task-start-date "${{ inputs.task_start_date }}"
           --output chain-state.json
+      - name: Dispatch isolated monthly gift recovery
+        if: inputs.gift_recovery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+          RECOVERY_TASK_DATE: ${{ inputs.task_start_date }}
+          BASE_SUMMARY_RUN_ID: ${{ inputs.base_summary_run_id }}
+        run: >-
+          python h3/monthly_gift_recovery.py
+          --orchestration-id "${{ github.run_id }}"
+          --ref "${{ github.ref_name }}"

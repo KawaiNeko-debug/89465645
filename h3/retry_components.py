@@ -11,10 +11,10 @@ except ImportError:
 
 try:
     from box_lottery import box_lottery_complete, is_box_lottery_required
-    from listing_gift import should_claim_listing_gift
+    from listing_gift import should_claim_listing_gift, gift_result_success
 except ImportError:
     from h3.box_lottery import box_lottery_complete, is_box_lottery_required
-    from h3.listing_gift import should_claim_listing_gift
+    from h3.listing_gift import should_claim_listing_gift, gift_result_success
 
 
 COMPONENTS = (
@@ -98,9 +98,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
         truthy(row.get("banned_account"))
         or box_lottery_complete(box_required, row.get("box_lottery"))
     )
-    gift_complete = not gift_required or truthy(
-        row.get("listing_gift_success")
-    )
+    gift_complete = not gift_required or gift_result_success(row)
     activity_success = truthy(row.get("activity_fetch_success"))
     result = {
         "login": truthy(row.get("token_extracted")),
@@ -126,7 +124,7 @@ def component_status(row: dict | None) -> dict[str, bool]:
         "box_lottery": box_complete,
     }
     for key in result:
-        if key in ("box_lottery", "seventh_reward"):
+        if key in ("box_lottery", "seventh_reward", "gift"):
             continue
         if key in stored:
             result[key] = result[key] or truthy(stored[key])

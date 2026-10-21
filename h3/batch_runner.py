@@ -21,11 +21,11 @@ except ImportError:
 try:
     from account_data import empty_account_data
     from box_lottery import is_box_lottery_required
-    from listing_gift import should_claim_listing_gift
+    from listing_gift import should_claim_listing_gift, gift_identity, gift_result_success
 except ImportError:
     from h3.account_data import empty_account_data
     from h3.box_lottery import is_box_lottery_required
-    from h3.listing_gift import should_claim_listing_gift
+    from h3.listing_gift import should_claim_listing_gift, gift_identity, gift_result_success
 
 
 RISK_CONTROL_MESSAGE = (os.getenv("RISK_CONTROL_MESSAGE") or "签到失败，疑似违反签到规则").strip()
@@ -137,10 +137,11 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "box_lottery_required": is_box_lottery_required(task_date, group_code),
         "box_lottery": [],
+        **gift_identity(task_date),
         "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,
         "listing_gift_attempted": False,
-        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, group_code) else "非星火会礼包领取日期或当前组不适用",
+        "listing_gift_status": "待领取" if should_claim_listing_gift(task_date, group_code) else "非每月礼包领取日期或当前组不适用",
         "listing_gift_time": "",
         "listing_gift_detail": "",
         "vote_required": False,
@@ -204,7 +205,9 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "account_data_fetch_success": truthy(raw.get("account_data_fetch_success")),
             "account_data": raw.get("account_data") if isinstance(raw.get("account_data"), dict) else empty_account_data(),
             "listing_gift_required": truthy(raw.get("listing_gift_required")),
-            "listing_gift_success": truthy(raw.get("listing_gift_success")),
+            "listing_gift_success": gift_result_success(raw),
+            "listing_gift_id": raw.get("listing_gift_id"),
+            "listing_gift_month": raw.get("listing_gift_month"),
             "listing_gift_attempted": truthy(raw.get("listing_gift_attempted")),
             "listing_gift_status": str(raw.get("listing_gift_status") or "").strip(),
             "listing_gift_time": str(raw.get("listing_gift_time") or "").strip(),
@@ -230,7 +233,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
     normalized["box_lottery_required"] = is_box_lottery_required(task_date, group_code)
     normalized["listing_gift_required"] = should_claim_listing_gift(task_date, group_code)
     if not normalized["listing_gift_required"]:
-        normalized["listing_gift_status"] = "非星火会礼包领取日期或当前组不适用"
+        normalized["listing_gift_status"] = "非每月礼包领取日期或当前组不适用"
 
     if not normalized["detail_reason"]:
         if normalized["password_error"]:
@@ -334,6 +337,8 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "account_data_required": item.get("account_data_required", False),
                 "account_data_fetch_success": item.get("account_data_fetch_success", False),
                 "account_data": item.get("account_data") or empty_account_data(),
+                "listing_gift_id": item.get("listing_gift_id"),
+                "listing_gift_month": item.get("listing_gift_month"),
                 "listing_gift_required": item.get("listing_gift_required", False),
                 "listing_gift_success": item.get("listing_gift_success", False),
                 "listing_gift_attempted": item.get("listing_gift_attempted", False),

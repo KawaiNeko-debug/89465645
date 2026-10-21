@@ -25,7 +25,7 @@ jobs:
 
           value = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
           if not is_listing_gift_date(value):
-              raise SystemExit('领券测试组仅允许在星火会礼包活动日期运行')
+              raise SystemExit('领券测试组仅允许在每月礼包活动日期运行')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f'task_start_date={value}\n')
           PY
