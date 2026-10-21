@@ -166,6 +166,11 @@ def main():
     counts = baseline['group_counts'] if baseline else configured_group_counts()
     state = recovery_state(args.orchestration_id, args.ref, task_date, counts, baseline)
     state['recovery_base_summary_run_id'] = run_id
+    try:
+        from recovery_handoff import update_handoff, WeeklyStore
+    except ImportError:
+        from h3.recovery_handoff import update_handoff, WeeklyStore
+    update_handoff(WeeklyStore(), args.orchestration_id)
     write_json('chain-state.json', state)
     if state['batches']:
         dispatch_batch(state, state['batches'][0]['batch_id'])

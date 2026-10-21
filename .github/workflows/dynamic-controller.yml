@@ -181,6 +181,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install dispatcher dependency
+        run: python -m pip install --timeout 60 --retries 3 requests
       - name: Guard duplicate scheduled invocation
         id: schedule-guard
         if: '!inputs.gift_recovery'
@@ -191,13 +196,6 @@ jobs:
           python h3/schedule_guard.py | tee guard.log
           skip="$(sed -n 's/^skip=//p' guard.log | tail -n 1)"
           echo "skip=${skip:-false}" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-python@v5
-        if: steps.schedule-guard.outputs.skip != 'true'
-        with:
-          python-version: "3.10"
-      - name: Install dispatcher dependency
-        if: steps.schedule-guard.outputs.skip != 'true'
-        run: python -m pip install --timeout 60 --retries 3 requests
       - name: Freeze and dispatch first mixed batch
         if: steps.schedule-guard.outputs.skip != 'true' && !inputs.gift_recovery
         env:

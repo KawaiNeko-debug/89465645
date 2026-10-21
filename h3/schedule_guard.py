@@ -11,12 +11,18 @@ from urllib.request import Request, urlopen
 SHANGHAI = timezone(timedelta(hours=8))
 
 
-def has_controller_run_today(payload: dict, now=None, current_run_id: str = "") -> bool:
+def has_controller_run_today(payload: dict, now=None, current_run_id: str = "",
+                             excluded_run_ids=()) -> bool:
     now = now or datetime.now(SHANGHAI)
     today = now.astimezone(SHANGHAI).date()
     current_run_id = str(current_run_id or "").strip()
+    excluded = {str(value) for value in excluded_run_ids}
     for run in payload.get("workflow_runs", []) if isinstance(payload, dict) else []:
         if not isinstance(run, dict) or str(run.get("event") or "") not in {"workflow_dispatch", "schedule"}:
+            continue
+        if str(run.get('display_title') or '').startswith('gift-recovery-'):
+            continue
+        if str(run.get('id') or '') in excluded:
             continue
         if current_run_id and str(run.get("id") or run.get("run_id") or "").strip() == current_run_id:
             continue
@@ -62,7 +68,23 @@ def main() -> int:
         print(f"daily guard query failed ({type(exc).__name__}); blocking this run", flush=True)
         print("skip=true")
         return 0
-    if has_controller_run_today(payload, current_run_id=os.getenv("GITHUB_RUN_ID", "")):
+    current = os.getenv('GITHUB_RUN_ID', '')
+    now = datetime.now(SHANGHAI)
+    try:
+        try:
+            from recovery_handoff import guard_recoveries
+        except ImportError:
+            from h3.recovery_handoff import guard_recoveries
+        excluded, deferred = guard_recoveries(payload, now, current, repository, token)
+    except Exception as exc:
+        print(f'recovery handoff unavailable ({type(exc).__name__}); blocking this run', flush=True)
+        print('skip=true')
+        return 0
+    if deferred:
+        print('Gift recovery is active; daily entry deferred until its summary finishes.', flush=True)
+        print('skip=true')
+        return 0
+    if has_controller_run_today(payload, now, current, excluded):
         print("A controller run already exists today; this invocation is blocked.", flush=True)
         print("skip=true")
         return 0

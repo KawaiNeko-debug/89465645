@@ -21,6 +21,15 @@ from h3.weekly_box_schedule import StateConflict
 from h3.report import build_message, normalize_record, status_label
 
 
+@pytest.fixture(autouse=True)
+def synthetic_login_config(monkeypatch):
+    for key in ('BASE_URL', 'PASSPORT_URL', 'REFERER'):
+        monkeypatch.setenv(key, 'https://example.test')
+    for key in ('SLIDER_ID', 'WRAPPER_ID', 'HEADER_CLIENT_TYPE',
+                'HEADER_ACCESS_TOKEN', 'TOKEN_KEY'):
+        monkeypatch.setenv(key, 'synthetic-test-setting')
+
+
 class MemoryStore:
     def __init__(self):
         self.files = {}
@@ -70,6 +79,14 @@ def test_checkpoint_is_monthly_and_credential_free():
     assert not MonthlyGiftCheckpoint('2026-10-22', 'ld1', 1, store).completed()
     with pytest.raises(ValueError):
         checkpoint.save('failed')
+
+
+def test_stock_shortage_is_not_reported_as_received(claim_client):
+    client, store = claim_client
+    client._browser_fetch_json_once.return_value = {'success': False, 'message': '券余量不足'}
+    assert not client.execute_listing_gift('2026-10-22')
+    assert not client.listing_gift_success
+    assert not store.files
 
 
 def test_legacy_campaign_or_previous_month_cannot_complete_gift():

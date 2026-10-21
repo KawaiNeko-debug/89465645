@@ -165,8 +165,8 @@ env:
   zh20: ${{ secrets.zh20 }}
 
 permissions:
-  contents: read
-  actions: read
+  contents: write
+  actions: write
 
 jobs:
   summarize:
@@ -213,3 +213,9 @@ jobs:
             results/*.xlsx
           if-no-files-found: warn
           retention-days: 3
+      - name: Resume daily entry after isolated recovery
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: python h3/recovery_handoff.py
