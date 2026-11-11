@@ -277,6 +277,7 @@ jobs:
       WEEKLY_BOX_LOTTERY_WEEK_ID: ${{ matrix.week_id }}
       WEEKLY_BOX_LOTTERY_ASSIGNED_DATE: ${{ matrix.assigned_date }}
       WEEKLY_BOX_STATE_KEY: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      SEASON_LOTTERY_PAGE_URL: ${{ vars.SEASON_LOTTERY_PAGE_URL }}
       GITHUB_TOKEN: ${{ github.token }}
       GITHUB_API_URL: ${{ github.api_url }}
     steps:

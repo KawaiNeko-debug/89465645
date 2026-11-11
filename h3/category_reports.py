@@ -5,9 +5,15 @@ import sys
 from pathlib import Path
 
 try:
-    from report import send_telegram_documents, send_telegram_message
+    from report import send_telegram_documents, send_telegram_message, load_credential_lookup
+    from report_extensions import compact_message, table
+    from weekly_box_schedule import WeeklyStore
+    from weekly_box_report import prepare_reports, acknowledge
 except ImportError:
-    from h3.report import send_telegram_documents, send_telegram_message
+    from h3.report import send_telegram_documents, send_telegram_message, load_credential_lookup
+    from h3.report_extensions import compact_message, table
+    from h3.weekly_box_schedule import WeeklyStore
+    from h3.weekly_box_report import prepare_reports, acknowledge
 
 
 CATEGORIES = (
@@ -84,6 +90,18 @@ def main() -> int:
     failures = []
     messages = []
     xlsx_paths = []
+    weekly_reports = []
+    # A persisted early retirement also suppresses stale fallback failures in reports.
+    if os.getenv('GITHUB_TOKEN'):
+        try:
+            try:
+                from season_lottery import Lifecycle
+            except ImportError:
+                from h3.season_lottery import Lifecycle
+            if Lifecycle(WeeklyStore()).stopped():
+                os.environ['SEASON_LOTTERY_RETIRED'] = 'true'
+        except Exception:
+            print('::warning::season lifecycle could not be read for summary', flush=True)
     for category, filename_label in selected_categories:
         output_path = results_dir / f"{task_date}-{filename_label}.xlsx"
         message_path = results_dir / f".{filename_label}-message.txt"
@@ -103,6 +121,7 @@ def main() -> int:
                 "REPORT_GROUP_FILTER_ACTIVE": "true",
                 "REPORT_GROUP_LIMITS": json.dumps(group_limits, ensure_ascii=False),
                 "REPORT_GIFT_ONLY": "true" if isolated_gifts else "false",
+                "REPORT_MASTER": "false",
                 "SUMMARY_RECOVERY_EXCLUDED_GROUPS": ",".join(
                     excluded_by_category[category]
                 ),
@@ -135,18 +154,69 @@ def main() -> int:
             failures.append(category)
             print(f"::error::{category} XLSX was not generated", flush=True)
 
+    full_daily = not requested and not manifest.get('gift_recovery')
+    if full_daily:
+        master_path = results_dir / f"{task_date}-超级总表.xlsx"
+        master_env = os.environ.copy()
+        master_env.update({
+            'SUMMARY_CATEGORY': '', 'SUMMARY_CATEGORY_LABEL': '超级总表',
+            'EXPECTED_TOTAL': str(sum(counts.values())), 'REPORT_MASTER': 'true',
+            'OUTPUT_XLSX_PATH': str(master_path), 'REPORT_PRINT_MESSAGE': 'false',
+            'REPORT_MESSAGE_PATH': '', 'GENERATE_XLSX': 'true',
+            'TELEGRAM_SEND_TEXT': 'false', 'TELEGRAM_SEND_XLSX': 'false',
+            'REPORT_GROUP_FILTER_ACTIVE': 'true', 'REPORT_GROUP_CODES': group_codes,
+            'REPORT_GROUP_LIMITS': json.dumps(group_limits),
+        })
+        completed = subprocess.run([sys.executable, str(Path(__file__).with_name('report.py')), str(results_dir)],
+                                   env=master_env, check=False)
+        if completed.returncode == 0 and master_path.exists():
+            xlsx_paths.append(str(master_path))
+        else:
+            failures.append('超级总表')
+        try:
+            if os.getenv('GITHUB_TOKEN') and os.getenv('WEEKLY_BOX_STATE_KEY'):
+                weekly_store = WeeklyStore()
+                credentials, _ = load_credential_lookup()
+                weekly_reports = prepare_reports(weekly_store, task_date, results_dir, credentials)
+                for weekly in weekly_reports:
+                    if not weekly['receipt'].get('text_sent'):
+                        messages.append(('纸盒抽奖周报', weekly['message']))
+                    if not weekly['receipt'].get('documents_sent'):
+                        xlsx_paths.append(weekly['path'])
+        except Exception:
+            failures.append('纸盒抽奖周报')
+            print('::error::weekly report unavailable; daily reports continue', flush=True)
+        if master_path.exists():
+            try:
+                from openpyxl import load_workbook
+                workbook = load_workbook(master_path)
+                table(workbook, '通知完整明细', ['分类', '完整统计文本'],
+                      [(label, line) for label, text in messages for line in text.splitlines()])
+                workbook.save(master_path)
+            except Exception:
+                failures.append('通知完整明细')
+
     telegram_configured = bool(
         os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")
     )
+    text_sent = documents_sent = False
     if telegram_configured and messages:
-        combined = combine_category_messages(messages)
-        if not send_telegram_message(combined, single_message=True):
+        combined = compact_message(messages)
+        text_sent = send_telegram_message(combined, single_message=True)
+        if not text_sent:
             failures.append("Telegram 合并文字")
             print("::error::combined Telegram message failed", flush=True)
     if telegram_configured and xlsx_paths:
-        if not send_telegram_documents(xlsx_paths):
+        documents_sent = send_telegram_documents(xlsx_paths)
+        if not documents_sent:
             failures.append("Telegram XLSX 媒体组")
             print("::error::Telegram XLSX media group failed after retry", flush=True)
+    if weekly_reports and telegram_configured:
+        try:
+            acknowledge(weekly_store, weekly_reports, text_sent, documents_sent)
+        except Exception:
+            failures.append('周报发送状态保存')
+            print('::error::weekly report receipt could not be saved', flush=True)
 
     print(
         f"[category-reports] generated={len(xlsx_paths)} messages={len(messages)} "

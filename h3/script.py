@@ -16,6 +16,11 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as Playwrigh
 from fake_useragent import UserAgent
 
 try:
+    from season_lottery import execute as execute_season_lottery, empty_result as empty_season_result, merge_results as merge_season_results
+except ImportError:
+    from h3.season_lottery import execute as execute_season_lottery, empty_result as empty_season_result, merge_results as merge_season_results
+
+try:
     from seventh_reward import (
         applies as reward_strategy_applies, choose_reward, empty_reward,
         safe_reward, merge_reward,
@@ -1280,6 +1285,7 @@ class ApiClient:
         dump_body_on_error=False,
         dump_json_on_success_false=True,
         log_http_error=True,
+        return_business_errors=False,
     ):
         if not self.page:
             return None
@@ -1295,7 +1301,7 @@ class ApiClient:
             headers.setdefault("content-type", "application/json;charset=UTF-8")
         try:
             result = self.page.evaluate(
-                """async ({url, method, payload, headers}) => {
+                """async ({url, method, payload, headers, returnBusinessErrors}) => {
                     const captureRuntime = () => {
                         let runtime = null;
                         try {
@@ -1365,7 +1371,7 @@ class ApiClient:
                                 url: requestPath,
                                 method: method.toLowerCase(),
                                 flat: true,
-                                errToReject: true,
+                                errToReject: !returnBusinessErrors,
                                 errorTip: false,
                             };
                             if (method === "POST") {
@@ -1427,7 +1433,8 @@ class ApiClient:
                         channel: "fetch-fallback",
                     };
                 }""",
-                {"url": url, "method": method, "payload": payload or {}, "headers": headers},
+                {"url": url, "method": method, "payload": payload or {}, "headers": headers,
+                 "returnBusinessErrors": return_business_errors},
             )
             status = safe_int(result.get("status"), 0) if isinstance(result, dict) else 0
             data = result.get("data") if isinstance(result, dict) else None
@@ -1444,9 +1451,10 @@ class ApiClient:
                     log(msg)
                     if dump_body_on_error and isinstance(result, dict):
                         log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
-                return None
+                return data if return_business_errors and isinstance(data, dict) else None
             if data is None:
-                log(f"账号{self.account_index} - {tag}浏览器响应JSON解析失败 (200 {method} {url})")
+                if log_http_error:
+                    log(f"账号{self.account_index} - {tag}浏览器响应JSON解析失败 (200 {method} {url})")
                 if dump_body_on_error and isinstance(result, dict):
                     log(f"账号{self.account_index} - {tag}浏览器响应内容: {redact_sensitive(truncate_text(result.get('text'), 2000))}")
                 return None
@@ -1454,7 +1462,8 @@ class ApiClient:
                 log(f"账号{self.account_index} - ⚠️ {tag}浏览器返回success=false: {redact_sensitive(truncate_text(json.dumps(data, ensure_ascii=False), 2000))}")
             return data
         except Exception as e:
-            log(f"账号{self.account_index} - {tag}浏览器请求异常: {e}")
+            if log_http_error:
+                log(f"账号{self.account_index} - {tag}浏览器请求异常: {e}")
             return None
 
     def get_json_retry1(self, url, tag="API", dump_body_on_error=False, dump_json_on_success_false=True):
@@ -3148,6 +3157,7 @@ def sign_in_account(
         'box_lottery_required': is_box_lottery_required(task_start_date, execution.get('group_code')),
         'box_lottery': empty_box_lottery(),
         'seventh_reward': empty_reward(),
+        'season_lottery': empty_season_result(task_start_date, execution.get('group_code')),
         **execution,
     }
     if previous_result:
@@ -3350,6 +3360,15 @@ def sign_in_account(
                     client.execute_box_lottery(task_start_date)
                     client.refresh_points_after_box_lottery()
 
+                if not banned_account and "season_lottery" in components:
+                    result['season_lottery'] = execute_season_lottery(client, task_start_date, execution)
+                    season = result['season_lottery']
+                    log(f"账号{account_index} - 有料季: {season['status']}")
+                    if season.get('draws'):
+                        latest_points = client.get_points()
+                        if latest_points is not None:
+                            client.final_points = latest_points
+
                 if not banned_account and "gift" in components:
                     client.execute_listing_gift(task_start_date)
                 # A gift-only retry still needs a fresh coupon snapshot: the
@@ -3361,13 +3380,16 @@ def sign_in_account(
                     data_components.add("coupons")
                 if "box_lottery" in components:
                     data_components.add("balance")
+                if result.get('season_lottery', {}).get('draws'):
+                    data_components.add('coupons')
                 if client.seventh_reward['required']:
                     data_components.add('coupons')
                     if client.seventh_reward['complete']:
                         latest_points = client.get_points()
                         if latest_points is not None:
                             client.final_points = latest_points
-                            client.points_reward = latest_points - client.initial_points
+                            if not result.get('season_lottery', {}).get('draws'):
+                                client.points_reward = latest_points - client.initial_points
                 client.fetch_account_data(data_components)
                 client.fetch_activity_records(components)
                 if VOTE_ENABLED and "vote" in components:
@@ -3586,6 +3608,9 @@ def process_single_account(username, password, account_index, total_accounts):
             is_final_retry=bool(seed),
             previous_result=merged if attempt > 0 or seed else None,
         )
+        season_result = merge_season_results(res.get('season_lottery'), merged.get('season_lottery'))
+        res['season_lottery'] = season_result
+        merged['season_lottery'] = season_result
 
         if res.get('password_error'):
             merged['password_error'] = True
@@ -3728,6 +3753,7 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                                 retry_count=f['prev_retry'] + 1, is_final_retry=True,
                                 previous_result=all_results[f['index']])
         orig = all_results[f['index']]
+        orig['season_lottery'] = merge_season_results(final.get('season_lottery'), orig.get('season_lottery'))
         previous_gift = {key: orig.get(key) for key in (
             *LISTING_GIFT_RESULT_FIELDS, 'task_start_date'
         )}
@@ -3999,6 +4025,7 @@ def write_results_json(path, all_results, total_accounts):
                 "box_lottery_required": r.get("box_lottery_required"),
                 "box_lottery": r.get("box_lottery") or empty_box_lottery(),
                 "seventh_reward": safe_reward(r.get("seventh_reward")),
+                "season_lottery": r.get("season_lottery") or empty_season_result(r.get('task_start_date'), r.get('group_code')),
                 "week_id": execution.get("week_id", ""),
                 "assigned_date": execution.get("assigned_date", ""),
                 "weekly_box_lottery": execution.get("weekly_box_lottery", False),

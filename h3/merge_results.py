@@ -4,6 +4,10 @@ import os
 import re
 import sys
 try:
+    from season_lottery import merge_results as merge_season_results
+except ImportError:
+    from h3.season_lottery import merge_results as merge_season_results
+try:
     from listing_gift import gift_result_rank
 except ImportError:
     from h3.listing_gift import gift_result_rank
@@ -147,6 +151,7 @@ def merge_component_fields(picked: dict, fallback: dict | None):
     if not fallback:
         picked["component_status"] = component_status(picked)
         return
+    picked['season_lottery'] = merge_season_results(picked.get('season_lottery'), fallback.get('season_lottery'))
     if gift_result_rank(fallback) > gift_result_rank(picked):
         for key in LISTING_GIFT_FIELDS:
             picked[key] = fallback.get(key)

@@ -178,6 +178,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       CONFIDENTIAL_PASSWORDS: ${{ secrets.CONFIDENTIAL_PASSWORDS }}
+      WEEKLY_BOX_STATE_KEY: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       NOTIFY_CHANNELS: telegram
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +188,7 @@ jobs:
           cache: pip
           cache-dependency-path: h3/requirements.txt
       - name: Install report dependencies
-        run: python -m pip install --timeout 60 --retries 3 requests openpyxl
+        run: python -m pip install --timeout 60 --retries 3 requests openpyxl cryptography
       - name: Download exact chain artifacts
         env:
           GITHUB_TOKEN: ${{ github.token }}

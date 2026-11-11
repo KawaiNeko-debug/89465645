@@ -7,6 +7,11 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from season_lottery import scheduled as season_scheduled, empty_result as empty_season_result
+except ImportError:
+    from h3.season_lottery import scheduled as season_scheduled, empty_result as empty_season_result
+
+try:
     from box_lottery import is_box_lottery_required
     from account_data import empty_account_data
     from campaign_vote import is_vote_date
@@ -171,6 +176,8 @@ def applicable_components(account: dict, task_date: str) -> list[str]:
         components.remove("vote")
     if not is_box_lottery_required(task_date, source_group, account.get("assigned_date", "")):
         components.remove("box_lottery")
+    if not season_scheduled(task_date, source_group):
+        components.remove('season_lottery')
     return components
 
 
@@ -278,6 +285,7 @@ def missing_result(account: dict, task_date: str) -> dict:
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "box_lottery_required": box_required,
         "box_lottery": [],
+        "season_lottery": empty_season_result(task_date, source_group),
         "seventh_reward": empty_reward(),
         "account_data_required": True,
         "account_data_fetch_success": False,

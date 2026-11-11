@@ -54,6 +54,8 @@ env:
   TZ: Asia/Shanghai
   GITHUB_TOKEN: ${{ github.token }}
   GITHUB_API_URL: ${{ github.api_url }}
+  WEEKLY_BOX_STATE_KEY: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  SEASON_LOTTERY_PAGE_URL: ${{ vars.SEASON_LOTTERY_PAGE_URL }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   old1: ${{ secrets.old1 }}
   old2: ${{ secrets.old2 }}

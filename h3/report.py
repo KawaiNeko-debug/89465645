@@ -1,6 +1,11 @@
 import glob
 import json
 import os
+
+try:
+    from report_extensions import extend_workbook, main_order, source, SOURCE_HEADERS, season_message, season_issue
+except ImportError:
+    from h3.report_extensions import extend_workbook, main_order, source, SOURCE_HEADERS, season_message, season_issue
 import re
 import smtplib
 import ssl
@@ -483,6 +488,7 @@ def normalize_record(
         "vote_product_name": str(record.get("vote_product_name") or "").strip(),
         "vote_detail": str(record.get("vote_detail") or "").strip(),
         "box_lottery_required": box_lottery_required,
+        "season_lottery": record.get("season_lottery") if isinstance(record.get("season_lottery"), dict) else {},
         "box_lottery": record.get("box_lottery")
         if isinstance(record.get("box_lottery"), list)
         else [],
@@ -714,6 +720,8 @@ def detail_text(record: dict) -> str:
 
 
 def is_problem_record(record: dict) -> bool:
+    if season_issue(record):
+        return True
     return (
         truthy(record.get("account_format_error"))
         or status_sort_bucket(record) == 0
@@ -735,6 +743,8 @@ def is_problem_record(record: dict) -> bool:
 
 def problem_reason(record: dict) -> str:
     reasons = []
+    if season_issue(record):
+        reasons.append('有料季：' + str((record.get('season_lottery') or {}).get('status') or '未检测'))
     if truthy(record.get("account_format_error")):
         reasons.append(
             str(
@@ -984,7 +994,7 @@ def build_box_lottery_lines(summary: dict) -> list[str]:
     return lines
 
 
-def build_message(
+def _build_message(
     records: list[dict], manifest: dict, expected_total: int
 ) -> tuple[str, dict]:
     sorted_records = sort_records(records)
@@ -1078,6 +1088,12 @@ def build_message(
     lines.extend(build_stats_lines(summary))
     lines.extend(build_box_lottery_lines(summary))
     return "\n".join(lines), summary
+
+
+def build_message(records, manifest, expected_total):
+    message, summary = _build_message(records, manifest, expected_total)
+    extra = season_message(records)
+    return message + ('\n\n' + extra if extra else ''), summary
 
 
 def redact_accounts_for_log(message: str, records: list[dict]) -> str:
@@ -1560,6 +1576,7 @@ def signin_sheet_order(records: list[dict]) -> list[dict]:
 
 def write_pcb_smt_sheet(workbook, records: list[dict]):
     rows = []
+    master = os.getenv('REPORT_MASTER') == 'true'
     for record in sort_records(records):
         for coupon in (record.get("account_data") or {}).get("coupons", {}).get(
             "unused", []
@@ -1572,6 +1589,7 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
                         invoice_profile_status(record),
                         str(coupon.get("name") or "未命名优惠券"),
                         str(coupon.get("expires_at") or ""),
+                        *(source(record) if master else []),
                     )
                 )
     rows.sort(key=coupon_sheet_row_sort_key)
@@ -1579,6 +1597,9 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
         return
     sheet = workbook.create_sheet("PCB+SMT券", 1)
     sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
+    if master:
+        for column, name in enumerate(SOURCE_HEADERS, 7):
+            sheet.cell(1, column, name)
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="E2F0D9")
         cell.font = Font(bold=True)
@@ -1592,6 +1613,7 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
 
 def write_coupon_sheets(workbook, records: list[dict]):
     by_name = {}
+    master = os.getenv('REPORT_MASTER') == 'true'
     for record in sort_records(records):
         account = str(record.get("username") or "").strip()
         password = report_password(str(record.get("password") or ""))
@@ -1610,21 +1632,26 @@ def write_coupon_sheets(workbook, records: list[dict]):
                     password,
                     invoice_status,
                     str(coupon.get("expires_at") or "").strip(),
+                    *(source(record) if master else []),
                 )
             )
     used = set(workbook.sheetnames)
+    used.update(('有料季抽奖', '有料季待抽账号', '有料季历史奖品', '通知完整明细'))
     priority = {'加急减免券': 0, SHELL_COUPON: 1}
     for name, rows in sorted(by_name.items(), key=lambda item: (priority.get(item[0], 2), item[0])):
         rows.sort(key=coupon_sheet_row_sort_key)
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
         sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
+        if master:
+            for column, title in enumerate(SOURCE_HEADERS, 6):
+                sheet.cell(1, column, title)
         for cell in sheet[1]:
             cell.fill = PatternFill("solid", fgColor="E2F0D9")
             cell.font = Font(bold=True)
-        for index, (account, password, invoice_status, expiry) in enumerate(
+        for index, row in enumerate(
             rows, start=1
         ):
-            sheet.append([index, account, password, invoice_status, expiry])
+            sheet.append([index, *row])
             style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
         sheet.freeze_panes = "A2"
         sheet.column_dimensions["A"].width = 8
@@ -1714,7 +1741,8 @@ def write_xlsx(path: str, records: list[dict]):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    for index, record in enumerate(signin_sheet_order(records), start=1):
+    ordered_records = main_order(records, signin_sheet_order)
+    for index, record in enumerate(ordered_records, start=1):
         label = status_label(record)
         row = (
             [
@@ -1899,6 +1927,12 @@ def write_xlsx(path: str, records: list[dict]):
         os.makedirs(directory, exist_ok=True)
     write_pcb_smt_sheet(workbook, records)
     write_coupon_sheets(workbook, records)
+    extend_workbook(workbook, ordered_records)
+    for worksheet in workbook:
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = 's'
     workbook.save(path)
 
 
@@ -2098,6 +2132,11 @@ def main():
             if isinstance(key[0], str)
             and any(key[0].startswith(prefix) for prefix in allowed_prefixes)
         }
+    if os.getenv('REPORT_MASTER') == 'true':
+        daily_code = re.compile(r'(?:old|wudi|new|ld|yyy|ll|zh)(?:[1-9]|1[0-9]|20)$')
+        credential_lookup = {k: v for k, v in credential_lookup.items() if isinstance(k[0], str) and daily_code.fullmatch(k[0])}
+        account_lookup = {k: v for k, v in account_lookup.items() if k in credential_lookup}
+        raw_records = [r for r in raw_records if daily_code.fullmatch(str(r.get('group_code') or ''))]
     if os.getenv("EXPECTED_TOTAL") not in (None, ""):
         expected_total = max(0, safe_int(os.getenv("EXPECTED_TOTAL"), 0))
     records = merge_records_with_expected(

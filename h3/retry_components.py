@@ -5,6 +5,11 @@ import sys
 from pathlib import Path
 
 try:
+    from season_lottery import component_complete as season_complete
+except ImportError:
+    from h3.season_lottery import component_complete as season_complete
+
+try:
     from seventh_reward import record_reward
 except ImportError:
     from h3.seventh_reward import record_reward
@@ -30,6 +35,7 @@ COMPONENTS = (
     "gift",
     "vote",
     "box_lottery",
+    "season_lottery",
 )
 
 
@@ -122,9 +128,10 @@ def component_status(row: dict | None) -> dict[str, bool]:
         "gift": gift_complete,
         "vote": vote_complete,
         "box_lottery": box_complete,
+        "season_lottery": season_complete(row),
     }
     for key in result:
-        if key in ("box_lottery", "seventh_reward", "gift"):
+        if key in ("box_lottery", "seventh_reward", "gift", "season_lottery"):
             continue
         if key in stored:
             result[key] = result[key] or truthy(stored[key])

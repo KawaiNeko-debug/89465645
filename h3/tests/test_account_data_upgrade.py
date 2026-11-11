@@ -1470,6 +1470,7 @@ class DynamicGroupTests(unittest.TestCase):
                     "2026-08-25-无敌全干组.xlsx",
                     "2026-08-25-立东全干组.xlsx",
                     "2026-08-25-老号全干组.xlsx",
+                    "2026-08-25-超级总表.xlsx",
                 ],
             )
 

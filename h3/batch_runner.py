@@ -9,6 +9,11 @@ import time
 from datetime import datetime
 
 try:
+    from season_lottery import empty_result as empty_season_result
+except ImportError:
+    from h3.season_lottery import empty_result as empty_season_result
+
+try:
     from seventh_reward import safe_reward
 except ImportError:
     from h3.seventh_reward import safe_reward
@@ -137,6 +142,7 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "activity_records": {"seckill": [], "lottery": [], "exchange": []},
         "box_lottery_required": is_box_lottery_required(task_date, group_code),
         "box_lottery": [],
+        "season_lottery": empty_season_result(task_date, group_code),
         **gift_identity(task_date),
         "listing_gift_required": should_claim_listing_gift(task_date, group_code),
         "listing_gift_success": False,

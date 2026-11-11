@@ -459,6 +459,14 @@ def start_chain(args) -> int:
             # discard today's entire sign-in/data/report chain.
             state['weekly_schedule_error'] = '周计划不可用，纸盒暂停，其余日常流程继续'
             print('::warning::weekly schedule unavailable; lottery paused, daily chain continues')
+    try:
+        try:
+            from season_lottery import maintain_lifecycle
+        except ImportError:
+            from h3.season_lottery import maintain_lifecycle
+        maintain_lifecycle(WeeklyStore())
+    except Exception:
+        print('::warning::season retirement checkpoint unavailable; date gate remains active')
     write_json(args.output, state)
     if state["batches"]:
         dispatch_batch(state, state["batches"][0]["batch_id"])
