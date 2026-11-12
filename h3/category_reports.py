@@ -6,12 +6,12 @@ from pathlib import Path
 
 try:
     from report import send_telegram_documents, send_telegram_message, load_credential_lookup
-    from report_extensions import compact_message, table
+    from report_extensions import telegram_message_parts, table
     from weekly_box_schedule import WeeklyStore
     from weekly_box_report import prepare_reports, acknowledge
 except ImportError:
     from h3.report import send_telegram_documents, send_telegram_message, load_credential_lookup
-    from h3.report_extensions import compact_message, table
+    from h3.report_extensions import telegram_message_parts, table
     from h3.weekly_box_schedule import WeeklyStore
     from h3.weekly_box_report import prepare_reports, acknowledge
 
@@ -201,8 +201,10 @@ def main() -> int:
     )
     text_sent = documents_sent = False
     if telegram_configured and messages:
-        combined = compact_message(messages)
-        text_sent = send_telegram_message(combined, single_message=True)
+        # Do not use all(generator): every page must be attempted even after a failure.
+        sent_pages = [send_telegram_message(part, single_message=True)
+                      for part in telegram_message_parts(messages)]
+        text_sent = bool(sent_pages) and all(sent_pages)
         if not text_sent:
             failures.append("Telegram 合并文字")
             print("::error::combined Telegram message failed", flush=True)

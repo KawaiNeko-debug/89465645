@@ -1937,17 +1937,18 @@ def write_xlsx(path: str, records: list[dict]):
 
 
 def split_text(text: str, limit: int = 3900) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    parts = []
-    current = ""
-    for line in text.splitlines(True):
-        if len(current) + len(line) > limit and current:
-            parts.append(current)
-            current = ""
-        current += line
-    if current:
-        parts.append(current)
+    try:
+        from report_extensions import text_boundary, telegram_size
+    except ImportError:
+        from h3.report_extensions import text_boundary, telegram_size
+    if limit < 2:
+        raise ValueError('message limit must fit a Unicode character')
+    parts, offset = [], 0
+    while offset < len(text):
+        count = text_boundary(text[offset:], limit)
+        parts.append(text[offset:offset + count])
+        offset += count
+    assert all(telegram_size(part) <= limit for part in parts)
     return parts
 
 
@@ -1956,9 +1957,12 @@ def send_telegram_message(text: str, *, single_message: bool = False) -> bool:
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return False
-    parts = [text] if single_message and len(text) <= 4096 else split_text(text)
-    if single_message and len(parts) != 1:
-        return False
+    if single_message:
+        if len(text.encode('utf-16-le')) // 2 > 4096:
+            return False
+        parts = [text]
+    else:
+        parts = split_text(text)
     ok = True
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for part in parts:

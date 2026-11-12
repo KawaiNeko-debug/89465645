@@ -143,17 +143,22 @@ def season_message(records):
         return ""
     values = [r.get("season_lottery") or {} for r in relevant]
     checked = sum(bool(v.get("query_success")) for v in values)
-    available = sum(int(v.get("initial_count") or 0) > 0 for v in values)
+    available = sum(bool(v.get('query_success')) and int(v.get("initial_count") or 0) > 0 for v in values)
+    zero = sum(bool(v.get('query_success')) and v.get('initial_count') == 0 for v in values)
     successes = sum(sum(bool(d.get("draw_success")) for d in v.get("draws") or []) for v in values)
     peer = [v for r, v in zip(relevant, values) if str(r.get("group_code") or "").startswith(("ll", "zh"))]
     counts = Counter()
     for value in values:
         counts.update(prizes(value))
-    lines = ["🎯 有料季抽奖", f"检测成功: {checked}/{len(values)}；有次数账号: {available}",
+    lines = ["🎯 有料季抽奖", f"计划检测: {len(values)}个账号；检测成功: {checked}/{len(values)}",
+             f"检测失败或未执行: {len(values) - checked}个账号",
+             f"有次数账号: {available}；无次数账号: {zero}",
              f"成功抽奖: {successes}次；已知剩余: {sum(int(v.get('remaining_count') or 0) for v in values)}次",
-             f"查询失败: {len(values) - checked}；未完成/待核实: {sum(not v.get('complete') or '未知' in v.get('status', '') for v in values)}"]
+             f"未完成/待核实: {sum(not v.get('complete') or '未知' in v.get('status', '') for v in values)}"]
+    if checked and zero == checked:
+        lines.append('已检测，暂无抽奖次数' + ('（仅指检测成功的账号）' if checked < len(values) else ''))
     if peer:
-        lines.append(f"同行仅检测: {sum(int(v.get('remaining_count') or 0) > 0 for v in peer)}个账号有次数（名单见表）")
+        lines.append(f"同行仅查询，不抽奖: {sum(int(v.get('remaining_count') or 0) > 0 for v in peer)}个账号有次数（名单见表）")
     if counts:
         lines.append("🎁 有料季奖品: " + "；".join(f"{k} × {v}" for k, v in counts.most_common()))
     return "\n".join(lines)
@@ -169,19 +174,64 @@ def season_issue(record):
 
 
 def compact_message(messages, limit=4096):
+    """Compatibility entrypoint: preserve every section, even above one-message limits."""
     separator = "\n\n=============================\n\n"
-    full = separator.join(f"{label}:\n{text.strip()}" for label, text in messages if text.strip())
-    size = lambda text: len(text.encode("utf-16-le")) // 2
-    if size(full) <= limit:
-        return full
-    sections = []
+    return separator.join(f"{label}:\n{text.strip()}" for label, text in messages if text.strip())
+
+
+def telegram_size(text):
+    return len(text.encode('utf-16-le')) // 2
+
+
+def text_boundary(text, budget):
+    """Find a safe codepoint boundary, preferring paragraphs and complete log lines."""
+    used, end = 0, 0
+    for end, char in enumerate(text, 1):
+        used += 2 if ord(char) > 0xffff else 1
+        if used > budget:
+            end -= 1
+            break
+    if end == len(text) and used <= budget:
+        return end
+    for marker in ('\n\n=============================\n\n', '\n\n', '\n'):
+        boundary = text.rfind(marker, 0, end)
+        if boundary >= 0 and telegram_size(text[:boundary]) >= budget * 0.6:
+            return boundary + len(marker)
+    return end
+
+
+def telegram_message_parts(messages, limit=4096):
+    """Lossless, ordered pages; only page headers are added to the original content."""
+    full = compact_message(messages)
+    if not full:
+        return []
+    if telegram_size(full) <= limit:
+        return [full]
+    if limit < 128:
+        raise ValueError('Telegram page limit is too small')
+    offsets, offset = [], 0
     for label, message in messages:
-        # Keep numeric headline statistics; complete detail remains in each workbook.
-        lines = [line for line in message.splitlines() if any(key in line for key in (
-            "总账号数", "签到成功:", "无抽奖次数", "未完成", "抽奖成功:", "计划账号", "成功率", "券余量不足"))]
-        sections.append(f"{label}:\n" + "\n".join(lines[:7]))
-    suffix = "\n\n详细问题、奖品分布及账号名单见随附 XLSX。"
-    result = separator.join(sections)
-    while size(result + suffix) > limit:
-        result = result[:-1]
-    return result + suffix
+        if not message.strip():
+            continue
+        if offsets:
+            offset += len('\n\n=============================\n\n')
+        offsets.append((offset, label))
+        offset += len(f'{label}:\n{message.strip()}')
+    expected = 1
+    for _ in range(12):
+        parts, offset = [], 0
+        while offset < len(full):
+            start, label = next((start, label) for start, label in reversed(offsets) if start <= offset)
+            header = f'【{len(parts) + 1}/{expected}】' + (f'（续：{label}）' if offset > start else '') + '\n'
+            budget = limit - telegram_size(header)
+            if budget < 1:
+                raise ValueError('Telegram category heading is too long')
+            count = text_boundary(full[offset:], budget)
+            if count < 1:
+                raise ValueError('Telegram content cannot fit')
+            parts.append(header + full[offset:offset + count])
+            offset += count
+        if len(parts) == expected:
+            return parts
+        expected = len(parts)
+    raise ValueError('Telegram pagination did not converge')

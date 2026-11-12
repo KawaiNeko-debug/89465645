@@ -7,17 +7,16 @@ import hashlib
 import json
 import os
 import random
-import re
 import time
 from pathlib import Path
 
 from openpyxl import Workbook
 
 try:
-    from weekly_box_schedule import AccountCheckpoint, StateConflict, parse_date, validate_roster
+    from weekly_box_schedule import AccountCheckpoint, StateConflict, parse_date, validate_roster, week_id
     from report_extensions import table
 except ImportError:
-    from h3.weekly_box_schedule import AccountCheckpoint, StateConflict, parse_date, validate_roster
+    from h3.weekly_box_schedule import AccountCheckpoint, StateConflict, parse_date, validate_roster, week_id
     from h3.report_extensions import table
 
 
@@ -56,22 +55,79 @@ def categories(group):
     return ""
 
 
+REPORT_START = '2026-11-09'
+SHANGHAI = timezone(timedelta(hours=8))
+
+
+def today_shanghai():
+    return datetime.now(SHANGHAI).date()
+
+
+def valid_settlement(marker, week):
+    if not isinstance(marker, dict):
+        return False
+    sunday = (parse_date(week) + timedelta(days=6)).isoformat()
+    batches = marker.get('batches')
+    try:
+        settled = datetime.fromisoformat(str(marker.get('settled_at'))).astimezone(SHANGHAI).date()
+    except (TypeError, ValueError):
+        return False
+    return bool(marker.get('week_id') == week and marker.get('task_start_date') == sunday
+                and parse_date(sunday) <= settled <= parse_date(sunday) + timedelta(days=1)
+                and str(marker.get('orchestration_id', '')).isdigit() and marker.get('settled_at')
+                and isinstance(batches, list) and batches
+                and all(isinstance(b, dict) and b.get('batch_id') == f'batch-{i}' and type(b.get('run_id')) is int
+                        and b['run_id'] > 0 for i, b in enumerate(batches, 1))
+                and len({b['run_id'] for b in batches}) == len(batches))
+
+
+def settle_week(store, state, cancelled=False):
+    """Called after the final Sunday retry stage and before summary dispatch."""
+    day = parse_date(state['task_start_date'])
+    if (cancelled or day.weekday() != 6 or not day <= today_shanghai() <= day + timedelta(days=1)
+            or state.get('gift_recovery') or state.get('component_scope')
+            or not state.get('completed_at') or week_id(day) < REPORT_START):
+        return False
+    week = week_id(day)
+    batches = state.get('batches') or []
+    if not batches or any(b.get('handoff_status') != 'finalized' for b in batches):
+        return False
+    marker = {'week_id': week, 'task_start_date': day.isoformat(),
+              'orchestration_id': str(state['orchestration_id']), 'settled_at': state['completed_at'],
+              'batches': [{'batch_id': b['batch_id'], 'run_id': b.get('run_id')} for b in batches]}
+    if not valid_settlement(marker, week):
+        return False
+    store.ensure_branch()
+    path = f'weekly/{week}/settlement.json'
+    for _ in range(8):
+        existing, sha = store.read(path)
+        if existing:
+            return valid_settlement(existing, week)
+        try:
+            store.write(path, marker, sha)
+            return True
+        except StateConflict:
+            time.sleep(random.uniform(0.1, 0.3))
+    raise StateConflict('weekly settlement busy')
+
+
 def closed_weeks(store, task_date):
-    response = store.request("GET", "git/trees/lottery-state?recursive=1")
-    if response.status_code == 404:
+    day = parse_date(task_date)
+    # Historical manual summaries must not trigger notifications for previous weeks.
+    if day != today_shanghai():
         return []
-    payload = response.json()
-    if response.status_code != 200 or payload.get("truncated"):
-        raise RuntimeError("weekly report index unavailable")
-    weeks = []
-    for node in payload.get("tree", []):
-        match = re.fullmatch(r"weekly/(\d{4}-\d{2}-\d{2})/roster.json", node.get("path", ""))
-        if match and parse_date(match[1]) + timedelta(days=6) <= parse_date(task_date):
-            weeks.append(match[1])
-    return sorted(set(weeks))
+    sunday = day - timedelta(days=(day.weekday() + 1) % 7)
+    week = week_id(sunday)
+    if week < REPORT_START:
+        return []
+    marker, _ = store.read(f'weekly/{week}/settlement.json')
+    return [week] if valid_settlement(marker, week) else []
 
 
 def frozen_snapshot(store, week):
+    marker, _ = store.read(f'weekly/{week}/settlement.json')
+    if not valid_settlement(marker, week):
+        raise ValueError('weekly round has not settled')
     path = f"weekly/{week}/report-snapshot.json"
     payload, _ = store.read(path)
     if payload:
@@ -211,9 +267,7 @@ def prepare_reports(store, task_date, results_dir, credentials):
         path = Path(results_dir) / f"{week}-{snapshot['cycle_dates'][-1]}-纸盒抽奖周报.xlsx"
         message = build_report(snapshot, path, credentials)
         reports.append({"week_id": week, "path": str(path), "message": message, "receipt": receipt, "sha": sha})
-        # A Telegram media group accepts at most ten files (six daily + four catch-up reports).
-        if len(reports) == 4:
-            break
+        break  # At most the latest eligible round, never a historical backlog.
     return reports
 
 

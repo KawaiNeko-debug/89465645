@@ -1,10 +1,12 @@
 import json
 from unittest.mock import Mock
 
+import pytest
+
 from openpyxl import load_workbook
 
 from h3.report import normalize_record, write_xlsx, build_message
-from h3.report_extensions import compact_message, season_message
+from h3.report_extensions import compact_message, season_message, telegram_message_parts, telegram_size
 from h3.weekly_box_report import (acknowledge, build_report, classify, closed_weeks,
                                   frozen_snapshot, prepare_reports)
 from h3.weekly_box_schedule import AccountCheckpoint, assign_accounts
@@ -61,14 +63,15 @@ def test_duplicate_account_sources_not_inferred_from_username(tmp_path, monkeypa
         assert {sheet.cell(i, heads['原始组']).value for i in (2, 3)} == {'old1', 'ld1'}
 
 
-def test_message_preserves_full_content_or_compacts_with_utf16_limit():
+def test_message_preserves_full_content_with_utf16_pagination():
     short = [('老号全干组', '总账号数: 2'), ('无敌全干组', '总账号数: 3')]
     assert '=============================' in compact_message(short)
     long = [(f'组{i}', '🧧' * 3000 + '\n总账号数: 20\n无抽奖次数: 3') for i in range(5)]
-    output = compact_message(long)
-    assert len(output.encode('utf-16-le')) // 2 <= 4096
-    assert '见随附 XLSX' in output
-    assert all(f'组{i}' in output for i in range(5))
+    output = telegram_message_parts(long)
+    assert all(telegram_size(page) <= 4096 for page in output)
+    assert len(output) > 1
+    assert ''.join(page.split('\n', 1)[1] for page in output) == compact_message(long)
+    assert any('续：' in page.split('\n', 1)[0] for page in output)
 
 
 def test_season_message_prizes_peers_and_off_days():
@@ -125,6 +128,9 @@ def test_week_classification():
 
 
 def weekly_store(monkeypatch):
+    from h3 import weekly_box_report as weekly
+    from datetime import date
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 15))
     monkeypatch.setenv('WEEKLY_BOX_STATE_KEY', 'synthetic-weekly-fixture')
     store = MemoryStore()
     accounts = assign_accounts([{'source_group': 'old1', 'account_index': i} for i in range(1, 5)], '2026-11-09')
@@ -134,6 +140,9 @@ def weekly_store(monkeypatch):
         rows = [draw(1), draw(2)] if account == accounts[0] else ([draw(1, '测试优惠券'), draw(2, '测试优惠券')]
                    if account == accounts[1] else [{'draw_status': '次数不足', 'terminal': True}])
         AccountCheckpoint(store, account).save(rows)
+    store.write('weekly/2026-11-09/settlement.json', {
+        'week_id': '2026-11-09', 'task_start_date': '2026-11-15', 'orchestration_id': '100',
+        'settled_at': '2026-11-15T12:00:00+08:00', 'batches': [{'batch_id': 'batch-1', 'run_id': 101}]})
     return store
 
 
@@ -168,6 +177,8 @@ def test_week_report_counts_prizes_password_and_dedup(tmp_path, monkeypatch):
 
 
 def test_closed_week_only_and_delivery_retry(tmp_path, monkeypatch):
+    from h3 import weekly_box_report as weekly
+    from datetime import date
     store = weekly_store(monkeypatch)
     response = Mock(status_code=200)
     response.json.return_value = {'tree': [{'path': 'weekly/2026-11-09/roster.json'},
@@ -175,6 +186,7 @@ def test_closed_week_only_and_delivery_retry(tmp_path, monkeypatch):
     store.request = Mock(return_value=response)
     assert closed_weeks(store, '2026-11-14') == []
     assert closed_weeks(store, '2026-11-15') == ['2026-11-09']
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 16))
     reports = prepare_reports(store, '2026-11-16', tmp_path, {})
     assert len(reports) == 1  # Prior Sunday is picked up on Monday; no draws are executed.
     acknowledge(store, reports, True, False)
@@ -194,7 +206,9 @@ def test_unreadable_checkpoint_is_unverified(monkeypatch):
     assert frozen_snapshot(store, '2026-11-09')['rows'][0]['report_status'] == '状态不可核实'
 
 
-def test_category_bundle_includes_master_weekly_and_full_message(tmp_path, monkeypatch):
+@pytest.mark.parametrize('include_weekly', [False, True])
+@pytest.mark.parametrize('failed_page', [False, True])
+def test_category_bundle_includes_master_weekly_and_full_message(tmp_path, monkeypatch, include_weekly, failed_page):
     from types import SimpleNamespace
     from pathlib import Path
     from openpyxl import Workbook
@@ -216,16 +230,134 @@ def test_category_bundle_includes_master_weekly_and_full_message(tmp_path, monke
     monkeypatch.setattr(reports.subprocess, 'run', render)
     weekly_path = tmp_path / 'weekly.xlsx'
     Workbook().save(weekly_path)
-    weekly = [{'path': str(weekly_path), 'message': '计划账号: 7', 'receipt': {}}]
+    weekly = [{'path': str(weekly_path), 'message': '计划账号: 7', 'receipt': {}}] if include_weekly else []
     monkeypatch.setattr(reports, 'prepare_reports', lambda *args: weekly)
-    text, documents, ack = Mock(return_value=True), Mock(return_value=True), Mock()
+    attempts = []
+    def send_page(*args, **kwargs):
+        attempts.append(args[0])
+        return not (failed_page and len(attempts) == 1)
+    text, documents, ack = Mock(side_effect=send_page), Mock(return_value=True), Mock()
     monkeypatch.setattr(reports, 'send_telegram_message', text)
     monkeypatch.setattr(reports, 'send_telegram_documents', documents)
     monkeypatch.setattr(reports, 'acknowledge', ack)
-    assert reports.main() == 0
-    assert len(documents.call_args.args[0]) == 7
-    assert text.call_count == documents.call_count == 1
-    assert len(text.call_args.args[0].encode('utf-16-le')) // 2 <= 4096
+    assert reports.main() == (1 if failed_page else 0)
+    assert len(documents.call_args.args[0]) == (7 if include_weekly else 6)
+    assert text.call_count > 1 and documents.call_count == 1
+    assert all(telegram_size(call.args[0]) <= 4096 for call in text.call_args_list)
+    assert '完整奖品' in ''.join(call.args[0] for call in text.call_args_list)
     master = load_workbook(tmp_path / '2026-11-15-超级总表.xlsx')
     assert '完整奖品' in master['通知完整明细'].cell(3, 2).value
-    assert ack.call_args.args[-2:] == (True, True)
+    if include_weekly:
+        assert ack.call_args.args[-2:] == (not failed_page, True)
+    else:
+        ack.assert_not_called()
+
+
+def test_latest_round_only_and_no_premature_snapshot(monkeypatch, tmp_path):
+    from h3 import weekly_box_report as weekly
+    from datetime import date
+    import pytest
+    store = weekly_store(monkeypatch)
+    store.files.pop('weekly/2026-11-09/settlement.json')
+    for day in (12, 13, 14, 15):
+        monkeypatch.setattr(weekly, 'today_shanghai', lambda d=day: date(2026, 11, d))
+        assert weekly.prepare_reports(store, f'2026-11-{day}', tmp_path, {}) == []
+    with pytest.raises(ValueError, match='not settled'):
+        frozen_snapshot(store, '2026-11-09')
+    assert not any('report-snapshot' in path for path in store.files)
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 23))
+    assert closed_weeks(store, '2026-11-23') == []  # No fallback to older settled rounds.
+    assert closed_weeks(store, '2026-11-15') == []  # Historical manual summary.
+    store.request = Mock(side_effect=AssertionError('must not scan historical tree'))
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 12))
+    assert closed_weeks(store, '2026-11-12') == []
+    store.request.assert_not_called()
+
+
+def test_settlement_requires_finalized_sunday_chain(monkeypatch):
+    from h3 import weekly_box_report as weekly
+    from datetime import date
+    store = MemoryStore()
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 15))
+    state = {'task_start_date': '2026-11-15', 'orchestration_id': '100',
+             'completed_at': '2026-11-15T12:00:00+08:00', 'batches': [
+                 {'batch_id': 'batch-1', 'run_id': 101, 'handoff_status': 'finalized'},
+                 {'batch_id': 'batch-2', 'run_id': 102, 'handoff_status': 'pending'}]}
+    assert not weekly.settle_week(store, state)
+    state['batches'][1]['handoff_status'] = 'finalized'
+    assert not weekly.settle_week(store, state, cancelled=True)
+    assert not weekly.settle_week(store, {**state, 'task_start_date': '2026-11-12'})
+    assert not weekly.settle_week(store, {**state, 'gift_recovery': True})
+    assert not weekly.settle_week(store, {**state, 'completed_at': ''})
+    assert weekly.settle_week(store, state)
+    first = store.read('weekly/2026-11-09/settlement.json')[0]
+    assert weekly.settle_week(store, {**state, 'orchestration_id': '200'})
+    assert store.read('weekly/2026-11-09/settlement.json')[0] == first
+    assert len(first['batches']) == 2 and 'password' not in json.dumps(first)
+
+
+def test_sunday_chain_finishing_after_midnight_is_settled(monkeypatch):
+    from h3 import weekly_box_report as weekly
+    from datetime import date
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 16))
+    store = MemoryStore()
+    state = {'task_start_date': '2026-11-15', 'orchestration_id': '100',
+             'completed_at': '2026-11-15T17:00:00+00:00', 'batches': [
+                 {'batch_id': 'batch-1', 'run_id': 101, 'handoff_status': 'finalized'}]}
+    assert weekly.settle_week(store, state)
+    assert closed_weeks(store, '2026-11-16') == ['2026-11-09']
+    assert closed_weeks(store, '2026-11-15') == []
+
+
+def test_final_chain_persists_settlement_before_summary(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from h3 import mixed_batches, weekly_box_report as weekly, weekly_box_schedule
+    from datetime import date
+    store = MemoryStore()
+    monkeypatch.setattr(weekly_box_schedule, 'WeeklyStore', lambda: store)
+    monkeypatch.setattr(weekly, 'today_shanghai', lambda: date(2026, 11, 15))
+    state = mixed_batches.new_chain_state('100', 'main', '2026-11-15', group_counts={'old1': 1})
+    monkeypatch.setattr(mixed_batches, 'datetime', Mock(wraps=weekly.datetime))
+    mixed_batches.datetime.now.return_value = weekly.datetime.fromisoformat('2026-11-15T12:00:00+08:00')
+    monkeypatch.setattr(mixed_batches, 'dispatch_summary', lambda s:
+                        store.read('weekly/2026-11-09/settlement.json')[0]['batches'][0]['run_id'] == 101)
+    monkeypatch.setenv('GITHUB_API_URL', 'https://example.invalid')
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'fixture/repo')
+    monkeypatch.setenv('GITHUB_TOKEN', 'synthetic-token')
+    args = SimpleNamespace(chain_state_env='', chain_state=mixed_batches.encode_chain_state(state),
+                           current_batch='batch-1', current_run_id=101, output=tmp_path / 'chain.json')
+    assert mixed_batches.advance_chain(args) == 0
+    assert closed_weeks(store, '2026-11-15') == ['2026-11-09']
+
+
+def test_missing_account_result_does_not_prevent_round_settlement(monkeypatch, tmp_path):
+    store = weekly_store(monkeypatch)
+    reports = prepare_reports(store, '2026-11-15', tmp_path, {})
+    assert len(reports) == 1 and '未完成账号: 1' in reports[0]['message']
+    assert '2026-11-09 至 2026-11-15' in reports[0]['message']
+
+
+def test_season_zero_chances_and_failures_are_explicit():
+    row = record('old1', 1)
+    message = season_message([row])
+    assert '已检测，暂无抽奖次数' in message and '无次数账号: 1' in message
+    failed = record('wudi1', 1)
+    failed['season_lottery'] = {}
+    message = season_message([row, failed])
+    assert '检测失败或未执行: 1' in message
+    assert '仅指检测成功的账号' in message
+
+
+def test_lossless_daily_sections_and_long_trace_lines():
+    from h3.report import split_text
+    body = ('NO❗今天出现问题了捏\n1个账号：密码错误❌\n📈 总体统计\n'
+            '签到获得 +100 🌽\n纸盒抽奖获得 +200 🌽\n本月加急减免券已领取: 30\n'
+            '🎁 奖品分布\n10金豆: 20\n🎟️ 盲盒优惠券\n测试券: 2\n🎯 有料季抽奖\n')
+    messages = [(f'分类{i}', body + '🧧' * 5000 + '\nCall log:\n  - waiting for locator') for i in range(5)]
+    parts = telegram_message_parts(messages)
+    restored = ''.join(part.split('\n', 1)[1] for part in parts)
+    assert restored == compact_message(messages)
+    assert all(telegram_size(part) <= 4096 for part in parts)
+    raw = '🧧' * 5000 + '\n' + body
+    assert ''.join(split_text(raw)) == raw
+    assert all(telegram_size(part) <= 3900 for part in split_text(raw))

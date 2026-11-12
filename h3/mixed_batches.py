@@ -493,6 +493,16 @@ def advance_chain(args) -> int:
     else:
         state["completed_at"] = datetime.now(timezone.utc).isoformat()
         write_json(args.output, state)
+        try:
+            try:
+                from weekly_box_report import settle_week
+                from weekly_box_schedule import WeeklyStore
+            except ImportError:
+                from h3.weekly_box_report import settle_week
+                from h3.weekly_box_schedule import WeeklyStore
+            settle_week(WeeklyStore(), state, cancelled=os.getenv('CHAIN_CANCELLED') == 'true')
+        except Exception:
+            print('::warning::weekly settlement unavailable; daily summary continues', flush=True)
         dispatch_summary(state)
     return 0
 
