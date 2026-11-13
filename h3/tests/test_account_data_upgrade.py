@@ -460,7 +460,7 @@ class DynamicLotteryTests(unittest.TestCase):
             write_xlsx(path, rows)
             sheet = load_workbook(path)["签到汇总"]
             headers = [cell.value for cell in sheet[1]]
-            first_row = next(row for row in sheet.iter_rows(min_row=2) if row[2].value == "account1")
+            first_row = next(row for row in sheet.iter_rows(min_row=2) if row[headers.index("客编")].value == "account1")
             self.assertEqual(headers.count("抽奖8"), 1)
             self.assertIsNone(first_row[headers.index("抽奖3")].value)
             self.assertIsNone(first_row[headers.index("抽奖8")].value)
@@ -729,7 +729,7 @@ class AccountDataTests(unittest.TestCase):
             workbook = load_workbook(path)
             self.assertEqual(workbook.sheetnames[:2], ["签到汇总", "PCB+SMT券"])
             main_headers = [cell.value for cell in workbook["签到汇总"][1]]
-            self.assertEqual(main_headers[2:4], ["客编", "密码"])
+            self.assertEqual(main_headers[2:5], ["2026年底到期金豆", "客编", "密码"])
             self.assertEqual(workbook["PCB+SMT券"][2][1].value, "customer123")
             self.assertEqual(workbook["PCB+SMT券"][2][2].value, "plain-password")
             pcb_headers = [cell.value for cell in workbook["PCB+SMT券"][1]]

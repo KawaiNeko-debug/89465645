@@ -3,6 +3,11 @@ import json
 import os
 import re
 import sys
+
+try:
+    from goldbean_expiry import normalize_points_expiry, merge_points_expiry
+except ImportError:
+    from h3.goldbean_expiry import normalize_points_expiry, merge_points_expiry
 try:
     from season_lottery import merge_results as merge_season_results
 except ImportError:
@@ -107,6 +112,7 @@ def strip_resolved_data_failures(text: str) -> str:
 def merge_data_fields(picked: dict, fallback: dict | None):
     if not fallback:
         return
+    picked["points_expiry"] = merge_points_expiry(picked.get("points_expiry"), fallback.get("points_expiry"))
     if not truthy(picked.get("points_fetch_success")) and truthy(fallback.get("points_fetch_success")):
         for key in (
             "initial_points",
@@ -430,6 +436,7 @@ def main():
                 "sign_status": row.get("sign_status", ""),
                 "initial_points": row.get("initial_points", 0.0),
                 "final_points": row.get("final_points", 0.0),
+                "points_expiry": normalize_points_expiry(row.get("points_expiry")),
                 "points_reward": row.get("points_reward", 0.0),
                 "box_lottery_points_reward": row.get("box_lottery_points_reward", 0.0),
                 "has_reward": truthy(row.get("has_reward")),

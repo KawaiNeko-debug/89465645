@@ -9,6 +9,11 @@ import time
 from datetime import datetime
 
 try:
+    from goldbean_expiry import empty_points_expiry, normalize_points_expiry
+except ImportError:
+    from h3.goldbean_expiry import empty_points_expiry, normalize_points_expiry
+
+try:
     from season_lottery import empty_result as empty_season_result
 except ImportError:
     from h3.season_lottery import empty_result as empty_season_result
@@ -123,6 +128,7 @@ def build_placeholder_result(account: dict, status="签到异常", reason="工�
         "sign_status": status,
         "initial_points": 0.0,
         "final_points": 0.0,
+        "points_expiry": empty_points_expiry(),
         "points_reward": 0.0,
         "has_reward": False,
         "password_error": False,
@@ -190,6 +196,7 @@ def normalize_result(account: dict, result_path: str) -> dict:
             "sign_status": str(raw.get("sign_status") or normalized["sign_status"]).strip(),
             "initial_points": safe_float(raw.get("initial_points"), 0.0),
             "final_points": safe_float(raw.get("final_points"), 0.0),
+            "points_expiry": normalize_points_expiry(raw.get("points_expiry")),
             "points_reward": safe_float(raw.get("points_reward"), 0.0),
             "has_reward": truthy(raw.get("has_reward")),
             "password_error": truthy(raw.get("password_error")),
@@ -318,6 +325,7 @@ def write_batch_result(path: str, results: list[dict], controller: PauseControll
                 "sign_status": item["sign_status"],
                 "initial_points": item["initial_points"],
                 "final_points": item["final_points"],
+                "points_expiry": normalize_points_expiry(item.get("points_expiry")),
                 "points_reward": item["points_reward"],
                 "has_reward": item["has_reward"],
                 "password_error": item["password_error"],

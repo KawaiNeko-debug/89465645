@@ -3,6 +3,11 @@ import json
 import os
 
 try:
+    from goldbean_expiry import normalize_points_expiry, points_expiring_in_2026, nonnegative_number
+except ImportError:
+    from h3.goldbean_expiry import normalize_points_expiry, points_expiring_in_2026, nonnegative_number
+
+try:
     from report_extensions import extend_workbook, main_order, source, SOURCE_HEADERS, season_message, season_issue
 except ImportError:
     from h3.report_extensions import extend_workbook, main_order, source, SOURCE_HEADERS, season_message, season_issue
@@ -440,6 +445,7 @@ def normalize_record(
         "sign_status": str(record.get("sign_status") or "").strip(),
         "initial_points": safe_float(record.get("initial_points"), 0.0),
         "final_points": safe_float(record.get("final_points"), 0.0),
+        "points_expiry": normalize_points_expiry(record.get("points_expiry")),
         "points_reward": safe_float(record.get("points_reward"), 0.0),
         "box_lottery_points_reward": safe_float(
             record.get("box_lottery_points_reward"), 0.0
@@ -1513,14 +1519,25 @@ def style_invoice_profile_cell(cell):
     )
 
 
-def coupon_sheet_row_sort_key(row: tuple) -> tuple:
+def coupon_sheet_row_sort_key(row: tuple, points_index: int) -> tuple:
     account, password, invoice_status, *details = row
+    points = nonnegative_number(row[points_index])
     return (
+        points is None,
+        points if points is not None else 0.0,
         str(invoice_status).strip() != "有",
         str(password).strip() == "保密",
         str(account).strip(),
         *(str(value or "") for value in details),
     )
+
+
+def coupon_points(record: dict):
+    # Preserve a real zero and place failed/missing point fetches last.
+    if record.get("points_fetch_success") is False:
+        return "数据不足"
+    points = nonnegative_number(record.get("final_points"))
+    return points if points is not None else "数据不足"
 
 
 def stable_account_order(records: list[dict]) -> list[dict]:
@@ -1589,16 +1606,17 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
                         invoice_profile_status(record),
                         str(coupon.get("name") or "未命名优惠券"),
                         str(coupon.get("expires_at") or ""),
+                        coupon_points(record),
                         *(source(record) if master else []),
                     )
                 )
-    rows.sort(key=coupon_sheet_row_sort_key)
+    rows.sort(key=lambda row: coupon_sheet_row_sort_key(row, 5))
     if not rows:
         return
     sheet = workbook.create_sheet("PCB+SMT券", 1)
-    sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间"])
+    sheet.append(["序号", "客编", "密码", "开票资料", "优惠券名称", "优惠券过期时间", "金豆数量"])
     if master:
-        for column, name in enumerate(SOURCE_HEADERS, 7):
+        for column, name in enumerate(SOURCE_HEADERS, 8):
             sheet.cell(1, column, name)
     for cell in sheet[1]:
         cell.fill = PatternFill("solid", fgColor="E2F0D9")
@@ -1606,8 +1624,9 @@ def write_pcb_smt_sheet(workbook, records: list[dict]):
     for index, row in enumerate(rows, start=1):
         sheet.append([index, *row])
         style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
+        sheet.cell(sheet.max_row, 7).number_format = "0.0"
     sheet.freeze_panes = "A2"
-    for column, width in {"A": 8, "B": 24, "C": 20, "D": 14, "E": 36, "F": 24}.items():
+    for column, width in {"A": 8, "B": 24, "C": 20, "D": 14, "E": 36, "F": 24, "G": 18}.items():
         sheet.column_dimensions[column].width = width
 
 
@@ -1632,6 +1651,7 @@ def write_coupon_sheets(workbook, records: list[dict]):
                     password,
                     invoice_status,
                     str(coupon.get("expires_at") or "").strip(),
+                    coupon_points(record),
                     *(source(record) if master else []),
                 )
             )
@@ -1639,11 +1659,11 @@ def write_coupon_sheets(workbook, records: list[dict]):
     used.update(('有料季抽奖', '有料季待抽账号', '有料季历史奖品', '通知完整明细'))
     priority = {'加急减免券': 0, SHELL_COUPON: 1}
     for name, rows in sorted(by_name.items(), key=lambda item: (priority.get(item[0], 2), item[0])):
-        rows.sort(key=coupon_sheet_row_sort_key)
+        rows.sort(key=lambda row: coupon_sheet_row_sort_key(row, 4))
         sheet = workbook.create_sheet(safe_sheet_title(name, used))
-        sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间"])
+        sheet.append(["序号", "客编", "密码", "开票资料", "优惠券过期时间", "金豆数量"])
         if master:
-            for column, title in enumerate(SOURCE_HEADERS, 6):
+            for column, title in enumerate(SOURCE_HEADERS, 7):
                 sheet.cell(1, column, title)
         for cell in sheet[1]:
             cell.fill = PatternFill("solid", fgColor="E2F0D9")
@@ -1653,12 +1673,14 @@ def write_coupon_sheets(workbook, records: list[dict]):
         ):
             sheet.append([index, *row])
             style_invoice_profile_cell(sheet.cell(sheet.max_row, 4))
+            sheet.cell(sheet.max_row, 6).number_format = "0.0"
         sheet.freeze_panes = "A2"
         sheet.column_dimensions["A"].width = 8
         sheet.column_dimensions["B"].width = 24
         sheet.column_dimensions["C"].width = 20
         sheet.column_dimensions["D"].width = 14
         sheet.column_dimensions["E"].width = 24
+        sheet.column_dimensions["F"].width = 18
 
 
 def write_xlsx(path: str, records: list[dict]):
@@ -1677,6 +1699,7 @@ def write_xlsx(path: str, records: list[dict]):
     headers = [
         "序号",
         "金豆数量",
+        "2026年底到期金豆",
         "客编",
         "密码",
         "组别",
@@ -1744,10 +1767,12 @@ def write_xlsx(path: str, records: list[dict]):
     ordered_records = main_order(records, signin_sheet_order)
     for index, record in enumerate(ordered_records, start=1):
         label = status_label(record)
+        expiry_points = points_expiring_in_2026(record.get("points_expiry"))
         row = (
             [
                 index,
                 safe_float(record.get("final_points"), 0.0),
+                expiry_points if expiry_points is not None else "数据不足",
                 str(record.get("username") or ""),
                 str(record.get("password") or ""),
                 str(record.get("group_code") or record.get("group_position") or ""),
@@ -1842,6 +1867,14 @@ def write_xlsx(path: str, records: list[dict]):
                 horizontal="center", vertical="center", wrap_text=True
             )
         sheet.cell(row_index, 2).number_format = "0.0"
+        expiry_cell = sheet.cell(row_index, header_index["2026年底到期金豆"])
+        expiry_cell.number_format = "0.0"
+        expiry_cell.alignment = Alignment(horizontal="center", vertical="center")
+        if isinstance(expiry_cell.value, (int, float)) and expiry_cell.value > 0:
+            expiry_cell.fill = STATUS_YELLOW_FILL
+            expiry_cell.font = FONT_RED
+        elif expiry_cell.value == "数据不足":
+            expiry_cell.font = FONT_BLUE
         fill = color_for_points(safe_float(record.get("final_points"), 0.0))
         if fill:
             sheet.cell(row_index, 2).fill = fill
@@ -1914,6 +1947,8 @@ def write_xlsx(path: str, records: list[dict]):
             width = 20
         elif name.startswith("纸盒抽奖"):
             width = 28 if name.endswith("奖励") else 22
+        elif name == "2026年底到期金豆":
+            width = 24
         widths[get_column_letter(column_index)] = width
     for column_index in range(activity_start_column, len(headers) + 1):
         widths[get_column_letter(column_index)] = (

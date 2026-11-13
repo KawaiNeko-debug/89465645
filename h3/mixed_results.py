@@ -7,6 +7,11 @@ from datetime import datetime
 from pathlib import Path
 
 try:
+    from goldbean_expiry import empty_points_expiry
+except ImportError:
+    from h3.goldbean_expiry import empty_points_expiry
+
+try:
     from season_lottery import scheduled as season_scheduled, empty_result as empty_season_result
 except ImportError:
     from h3.season_lottery import scheduled as season_scheduled, empty_result as empty_season_result
@@ -264,6 +269,7 @@ def missing_result(account: dict, task_date: str) -> dict:
         "sign_status": "取数异常" if skip_sign else "签到异常",
         "initial_points": 0.0,
         "final_points": 0.0,
+        "points_expiry": empty_points_expiry(),
         "points_reward": 0.0,
         "box_lottery_points_reward": 0.0,
         "has_reward": False,

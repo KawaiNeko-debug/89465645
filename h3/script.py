@@ -16,6 +16,11 @@ from playwright.sync_api import sync_playwright, Page, TimeoutError as Playwrigh
 from fake_useragent import UserAgent
 
 try:
+    from goldbean_expiry import empty_points_expiry, normalize_points_expiry, parse_points_expiry, merge_points_expiry
+except ImportError:
+    from h3.goldbean_expiry import empty_points_expiry, normalize_points_expiry, parse_points_expiry, merge_points_expiry
+
+try:
     from season_lottery import execute as execute_season_lottery, empty_result as empty_season_result, merge_results as merge_season_results
 except ImportError:
     from h3.season_lottery import execute as execute_season_lottery, empty_result as empty_season_result, merge_results as merge_season_results
@@ -1103,6 +1108,7 @@ class ApiClient:
         self.brand_activity_config_success = False
         self.activity_access_id = VOTE_ACTIVITY_ACCESS_ID
         self.points_fetch_success = False
+        self.points_expiry = empty_points_expiry()
         self.seckill_fetch_success = False
         self.lottery_fetch_success = False
         self.voucher_fetch_success = False
@@ -1149,6 +1155,7 @@ class ApiClient:
         if not isinstance(previous, dict):
             return
         status = component_status(previous)
+        self.points_expiry = normalize_points_expiry(previous.get("points_expiry"))
         self.seventh_reward = (
             safe_reward(previous.get('seventh_reward'))
             if reward_strategy_applies(execution_context().get('group_code'))
@@ -1542,6 +1549,7 @@ class ApiClient:
 
             points = extract_integral_voucher(data)
             if points is not None:
+                self.points_expiry = parse_points_expiry(data)
                 self.points_fetch_success = True
                 log(f"账号{self.account_index} - 金豆数量获取成功: {points:.1f}")
                 return points
@@ -1558,6 +1566,7 @@ class ApiClient:
             )
             points = extract_integral_voucher(data)
             if points is not None:
+                self.points_expiry = parse_points_expiry(data)
                 self.points_fetch_success = True
                 log(f"账号{self.account_index} - 金豆数量刷新token后获取成功: {points:.1f}")
                 return points
@@ -3416,6 +3425,7 @@ def sign_in_account(
                     'sign_status': '账号封禁' if banned_account else ('签到风控' if client.risk_controlled and not success else client.sign_status),
                     'initial_points': client.initial_points,
                     'final_points': client.final_points,
+                    'points_expiry': normalize_points_expiry(client.points_expiry),
                     'points_reward': client.points_reward,
                     'box_lottery_points_reward': client.box_lottery_points_reward,
                     'has_reward': client.has_reward,
@@ -3611,6 +3621,7 @@ def process_single_account(username, password, account_index, total_accounts):
         season_result = merge_season_results(res.get('season_lottery'), merged.get('season_lottery'))
         res['season_lottery'] = season_result
         merged['season_lottery'] = season_result
+        merged['points_expiry'] = merge_points_expiry(res.get('points_expiry'), merged.get('points_expiry'))
 
         if res.get('password_error'):
             merged['password_error'] = True
@@ -3754,6 +3765,7 @@ def final_retry(all_results, usernames, passwords, total_accounts):
                                 previous_result=all_results[f['index']])
         orig = all_results[f['index']]
         orig['season_lottery'] = merge_season_results(final.get('season_lottery'), orig.get('season_lottery'))
+        orig['points_expiry'] = merge_points_expiry(final.get('points_expiry'), orig.get('points_expiry'))
         previous_gift = {key: orig.get(key) for key in (
             *LISTING_GIFT_RESULT_FIELDS, 'task_start_date'
         )}
@@ -3981,6 +3993,7 @@ def write_results_json(path, all_results, total_accounts):
                 "sign_status": r.get("sign_status"),
                 "initial_points": r.get("initial_points"),
                 "final_points": r.get("final_points"),
+                "points_expiry": normalize_points_expiry(r.get("points_expiry")),
                 "points_reward": r.get("points_reward"),
                 "box_lottery_points_reward": r.get("box_lottery_points_reward"),
                 "has_reward": r.get("has_reward"),

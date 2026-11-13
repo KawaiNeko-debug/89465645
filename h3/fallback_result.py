@@ -4,6 +4,11 @@ import sys
 from datetime import datetime
 
 try:
+    from goldbean_expiry import empty_points_expiry
+except ImportError:
+    from h3.goldbean_expiry import empty_points_expiry
+
+try:
     from season_lottery import empty_result as empty_season_result
 except ImportError:
     from h3.season_lottery import empty_result as empty_season_result
@@ -60,6 +65,7 @@ def main() -> int:
         "sign_status": "取数异常" if skipped else "签到异常",
         "initial_points": 0.0,
         "final_points": 0.0,
+        "points_expiry": empty_points_expiry(),
         "points_reward": 0.0,
         "box_lottery_points_reward": 0.0,
         "has_reward": False,
